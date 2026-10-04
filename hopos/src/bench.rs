@@ -55,9 +55,13 @@ const BUF: usize = 1 << 20;
 /// Hoogstens zoveel willekeurige 4 KiB-opdrachten (64 MiB).
 const RANDOM_OPS: u64 = 16384;
 
-/// Zoveel lezingen tegelijk in [`Bench::random_queue`]: de diepte van de
-/// hopfs-actor.
+/// Zoveel lezingen tegelijk in [`Bench::random_queue`], tot de diepte van
+/// de hopfs-actor.
 const QUEUE_DEPTH: usize = kern::rpc::FS_DEPTH;
+
+/// De dieptes die [`Bench::random_queue`] meet: zo zie je hoe het device
+/// schaalt.
+const QUEUE_DEPTHS: [usize; 3] = [1, 4, QUEUE_DEPTH];
 
 /// Eén bootparameter: de eerste waarde van `key` in [`cfg_text`], of "" als
 /// hij niet gezet is.
@@ -290,10 +294,16 @@ fn bench_disk(exec: &'static Executor, disk: &mut vboard::Disk) {
     );
     let t = Bench { exec, base, max };
     let mut disk = Paced::new(disk, Spin);
-    let ok = t.sizes(&mut disk, &mut buf, span)
+    // Eerst de blokken die een vorige run schreef (oud), straks dezelfde
+    // net geschreven (vers): zo zie je of een lees uit de cache van de SSD
+    // komt of van het flash.
+    let ok = t.random_queue(disk.dev_mut(), span, 1, "old")
+        && t.sizes(&mut disk, &mut buf, span)
         && t.sequential(&mut disk, &mut buf, span)
         && t.random(&mut disk, &mut buf, span)
-        && t.random_queue(disk.dev_mut(), span);
+        && QUEUE_DEPTHS
+            .iter()
+            .all(|&d| t.random_queue(disk.dev_mut(), span, d, "fresh"));
     if ok {
         t.hopfs(&mut disk, &mut buf, span);
     }
@@ -415,18 +425,40 @@ impl Bench {
         true
     }
 
-    /// Willekeurig lezen met de wachtrij vol: [`QUEUE_DEPTH`] lezingen van
-    /// 4 KiB tegelijk op de plekken van [`Self::random`], door de
-    /// `blkdev::Queue` die hopfs ook gebruikt. Het plafond van het device
-    /// voor de hele node (Linux: fio met iodepth); de bytes gaan niet naar
-    /// een buffer, alleen het device telt.
-    fn random_queue<D: AsyncBlockDevice>(&self, disk: &mut D, span: u64) -> bool {
+    /// Willekeurig lezen door de wachtrij: `depth` lezingen van 4 KiB
+    /// tegelijk op de plekken van [`Self::random`], door de `blkdev::Queue`
+    /// die hopfs ook gebruikt. Het plafond van het device voor de hele node
+    /// (Linux: fio met iodepth); de bytes gaan niet naar een buffer, alleen
+    /// het device telt.
+    ///
+    /// In een andere volgorde dan [`Self::random`] ze schreef: in
+    /// schrijfvolgorde liggen opeenvolgende plekken op hetzelfde stuk flash
+    /// en wachten zestien lezingen op een paar dies (GEMETEN 04-10 op de
+    /// Altra: 186k in schrijfvolgorde, 289k door elkaar). De regel zegt ook
+    /// waar de tijd zit: het device (van submit tot de completion gezien
+    /// werd) en wij (submit en ophalen per lees, en hoeveel rondes van de
+    /// wachter niets vonden).
+    fn random_queue<D: AsyncBlockDevice>(
+        &self,
+        disk: &mut D,
+        span: u64,
+        depth: usize,
+        what: &str,
+    ) -> bool {
         let sz: u64 = 4 << 10;
         let slots = span / sz;
         let n = slots.min(RANDOM_OPS);
         let (base, step) = (self.base, sz / LBA_SIZE);
-        let q = Queue::new(disk, Spin);
-        let depth = q.depth().min(QUEUE_DEPTH);
+        // Een oneven vermenigvuldiger is een permutatie modulo 2^k.
+        let mixed = |k: u64| {
+            if n.is_power_of_two() {
+                k.wrapping_mul(0x9e37_79b1) & (n - 1)
+            } else {
+                k
+            }
+        };
+        let q = Queue::new(Meter::new(disk), Spin);
+        let depth = q.depth().min(depth).min(QUEUE_DEPTH);
         let mut pool = core::pin::pin!(Pool::<_, QUEUE_DEPTH>::new());
         let (mut k, mut fail) = (0u64, None);
         let t0 = self.now();
@@ -434,7 +466,7 @@ impl Bench {
             loop {
                 crate::watchdog::pet_now();
                 while pool.len() < depth && k < n {
-                    let lba = base + (xorshift(k) % slots) * step;
+                    let lba = base + (xorshift(mixed(k)) % slots) * step;
                     let read = q.io(
                         Op::Read {
                             lba,
@@ -463,11 +495,17 @@ impl Bench {
             println!("nvme bench: random read {depth} at once: {e} HOPOS_NVMEBENCH_FAIL");
             return false;
         }
+        let m = q.with_dev(|m| m.ns());
+        let per = |x: u64, k: u64| x / k.max(1);
         println!(
-            "nvme bench: random 4 KiB read, {depth} at once (peak {}) x{n}: {} IOPS ({} MB/s) HOPOS_NVMEBENCH_RANDQ",
+            "nvme bench: random 4 KiB read ({what}), {depth} at once (peak {}) x{n}: {} IOPS ({} MB/s); device {} us per read, ours {} ns submit and {} ns reap, {}% of the reaps empty HOPOS_NVMEBENCH_RANDQ",
             q.peak(),
             n.saturating_mul(1_000_000_000) / ns.max(1),
-            rate(n * sz, ns)
+            rate(n * sz, ns),
+            per(m.device, m.done) / 1000,
+            per(m.submit, m.starts),
+            per(m.reap, m.reaps),
+            per(m.empty * 100, m.reaps)
         );
         true
     }
@@ -514,6 +552,113 @@ impl Bench {
             let (w, r) = (t1.saturating_sub(t0), self.now().saturating_sub(t1));
             line("hopfs bench:", sz, n, w, r, "call");
         }
+    }
+}
+
+/// De meetlat van [`Bench::random_queue`]: een schijf die telt wat de
+/// wachtrij met hem doet, in tikken van de teller.
+struct Meter<D> {
+    dev: D,
+    /// Per ticket de tik van zijn submit.
+    sub: [u64; blkdev::MAX_DEPTH],
+    starts: u64,
+    submit: u64,
+    reaps: u64,
+    empty: u64,
+    reap: u64,
+    /// Opgeteld: van submit tot de reap die hem zag.
+    device: u64,
+    done: u64,
+}
+
+/// De tellers van een [`Meter`] in nanoseconden.
+struct MeterNs {
+    starts: u64,
+    submit: u64,
+    reaps: u64,
+    empty: u64,
+    reap: u64,
+    device: u64,
+    done: u64,
+}
+
+impl<D: AsyncBlockDevice> Meter<D> {
+    fn new(dev: D) -> Self {
+        Self {
+            dev,
+            sub: [0; blkdev::MAX_DEPTH],
+            starts: 0,
+            submit: 0,
+            reaps: 0,
+            empty: 0,
+            reap: 0,
+            device: 0,
+            done: 0,
+        }
+    }
+
+    fn ns(&self) -> MeterNs {
+        let hz = u128::from(cpu::idle::freq().max(1));
+        let ns = |t: u64| (u128::from(t) * 1_000_000_000 / hz) as u64;
+        MeterNs {
+            starts: self.starts,
+            submit: ns(self.submit),
+            reaps: self.reaps,
+            empty: self.empty,
+            reap: ns(self.reap),
+            device: ns(self.device),
+            done: self.done,
+        }
+    }
+}
+
+impl<D: AsyncBlockDevice> AsyncBlockDevice for Meter<D> {
+    fn max_transfer(&self) -> usize {
+        self.dev.max_transfer()
+    }
+    fn start(&mut self, op: Op<'_>) -> blkdev::Result {
+        self.dev.start(op)
+    }
+    fn poll_done(&mut self, into: &mut [u8]) -> Poll<blkdev::Result> {
+        self.dev.poll_done(into)
+    }
+    fn poll_pace(&self) -> (u64, Duration) {
+        self.dev.poll_pace()
+    }
+    fn depth(&self) -> usize {
+        self.dev.depth()
+    }
+    fn start_tag(&mut self, op: Op<'_>) -> blkdev::Result<usize> {
+        let a = cpu::idle::counter();
+        let r = self.dev.start_tag(op);
+        let b = cpu::idle::counter();
+        self.starts += 1;
+        self.submit += b.saturating_sub(a);
+        if let Ok(t) = r
+            && let Some(s) = self.sub.get_mut(t)
+        {
+            *s = b;
+        }
+        r
+    }
+    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> Poll<blkdev::Result> {
+        self.dev.poll_tag(t, into)
+    }
+    fn reap(&mut self) -> blkdev::Result<u64> {
+        let a = cpu::idle::counter();
+        let r = self.dev.reap();
+        let b = cpu::idle::counter();
+        self.reaps += 1;
+        self.reap += b.saturating_sub(a);
+        let mut m = *r.as_ref().unwrap_or(&0);
+        self.empty += u64::from(m == 0);
+        while m != 0 {
+            let t = m.trailing_zeros() as usize;
+            m &= m - 1;
+            self.device += b.saturating_sub(self.sub.get(t).copied().unwrap_or(b));
+            self.done += 1;
+        }
+        r
     }
 }
 

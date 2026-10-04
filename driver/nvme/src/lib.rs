@@ -846,10 +846,18 @@ impl<T: Transport> Nvme<T> {
         if q.head == 0 {
             q.phase = !q.phase;
         }
-        dev::write32(self.doorbell(q.id, true), u32::from(q.head));
         self.store(admin, q);
         self.commands += 1;
         Ok(Some((cid, st >> 1)))
+    }
+
+    /// Na de laatste [`reap_one`](Self::reap_one) van een ronde: de
+    /// head-deurbel van de CQ, één keer voor alles wat er lag (Linux
+    /// `nvme_poll_cq`). De CQ loopt niet over: er staan nooit meer opdrachten
+    /// uit dan hij plekken heeft.
+    fn ring_cq(&self, admin: bool) {
+        let q = if admin { self.admin } else { self.io };
+        dev::write32(self.doorbell(q.id, true), u32::from(q.head));
     }
 
     /// Eén admin-opdracht op CID 0 die ter plekke wacht: alleen de opstart en
@@ -865,7 +873,9 @@ impl<T: Transport> Nvme<T> {
             self.dead = true;
             return Err(Error::Timeout { opc: m.opc });
         }
-        match self.reap_one(true)? {
+        let got = self.reap_one(true)?;
+        self.ring_cq(true);
+        match got {
             Some((0, 0)) => Ok(()),
             Some((0, status)) => Err(Error::Status { opc: m.opc, status }),
             Some((got, _)) => {
@@ -1220,7 +1230,9 @@ impl<T: Transport> Nvme<T> {
         }
         let mut ready = 0u64;
         let mut ahead_back = false;
+        let mut any = false;
         while let Some((cid, st)) = self.reap_one(false)? {
+            any = true;
             let bit = 1u64.checked_shl(u32::from(cid)).unwrap_or(0) & CIDS;
             let i = self
                 .owner
@@ -1256,6 +1268,9 @@ impl<T: Transport> Nvme<T> {
                 }
                 Use::Ahead { .. } => ahead_back = true,
             }
+        }
+        if any {
+            self.ring_cq(false);
         }
         if ahead_back {
             // Een flush wacht op de read-ahead (zie `poll_ticket`): kijk hem
@@ -1353,6 +1368,9 @@ impl<T: Transport> Nvme<T> {
             f.use_ = Use::Ticket;
             f.lba = lba;
             self.ahead_hits += 1;
+            if len == self.step() {
+                self.read_ahead(block + len as u64 / self.block_size.max(1), len, true);
+            }
             return Ok(i);
         }
         let f = Inflight::new(IO_READ, block, len, lba, Use::Ticket);
@@ -1393,21 +1411,38 @@ impl<T: Transport> Nvme<T> {
     /// niemand las (de hap voorbij het eind van een bestand), maakt plaats:
     /// anders hield hij zijn pagina's en kwam er nooit meer een (M29). Een
     /// fout hier is een dode driver en dat zegt de volgende opdracht.
-    fn read_ahead(&mut self, block: u64, len: usize) {
+    ///
+    /// `early`: de lezer pakte net de vorige read-ahead (die misschien nog
+    /// loopt), en dan gaat de volgende meteen de lucht in in plaats van na
+    /// de drain: twee happen tegelijk op de controller, zoals Linux zijn
+    /// readahead-venster voor de lezer uit houdt. Dat neemt de laatste
+    /// pagina's van het datablok, dus alleen als de lezer alleen is (geen
+    /// ander ticket in de lucht); wie daarna komt, wacht hoogstens tot de
+    /// hap van de lezer terug is. GEMETEN 04-10 op de Altra (SN770):
+    /// sequentieel 1 MiB lezen 2456 naar 3379 MB/s (schrijven 2656), door
+    /// hopfs 2274 naar 3049.
+    fn read_ahead(&mut self, block: u64, len: usize, early: bool) {
         let Some(w) = self.window else { return };
         let end = block.saturating_add(len as u64 / self.block_size.max(1));
-        let running = self
-            .inflight
-            .iter()
-            .flatten()
-            .any(|f| matches!(f.use_, Use::Ahead { .. }) && f.done().is_none());
-        if running || end > w.first + w.blocks {
+        let ahead = |f: &Inflight| matches!(f.use_, Use::Ahead { .. });
+        let mine = |f: &Inflight| f.use_ == (Use::Ahead { stale: false }) && f.block == block;
+        let flight = self.inflight.iter().flatten();
+        let (mut running, mut tickets, mut have) = (false, 0, false);
+        for f in flight {
+            running |= ahead(f) && f.done().is_none();
+            tickets += usize::from(f.use_ == Use::Ticket);
+            have |= mine(f);
+        }
+        if running || have || end > w.first + w.blocks || (early && tickets > 1) {
             return;
         }
-        self.drop_aheads(None);
+        let reserve = if early { 0 } else { AHEAD_RESERVE };
+        if !early {
+            self.drop_aheads(None);
+        }
         let lba = (block - w.first) * (self.block_size / SECTOR);
         let f = Inflight::new(IO_READ, block, len, lba, Use::Ahead { stale: false });
-        if self.free_pages() < f.pages + AHEAD_RESERVE {
+        if self.free_pages() < f.pages + reserve {
             return;
         }
         if let Ok(i) = self.room(f.pages) {
@@ -1453,7 +1488,7 @@ impl<T: Transport> Nvme<T> {
             let seq = f.block == self.seq_end;
             self.seq_end = f.block + f.len as u64 / self.block_size;
             if seq && f.len == self.step() {
-                self.read_ahead(self.seq_end, f.len);
+                self.read_ahead(self.seq_end, f.len, false);
             }
         }
         Poll::Ready(match st {

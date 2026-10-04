@@ -635,7 +635,7 @@ fn a_write_comes_back_only_after_its_completion_and_a_flush_after_it() {
 }
 
 #[test]
-fn sequential_reads_keep_one_read_ahead_in_flight_and_a_flush_waits_for_it() {
+fn sequential_reads_keep_the_next_hap_in_flight_and_a_flush_waits_for_it() {
     let (_m, mut n) = steps::<false>(true);
     let mut b = vec![0u8; HAP];
     read_held(&mut n, 0, 0, &mut b);
@@ -653,17 +653,71 @@ fn sequential_reads_keep_one_read_ahead_in_flight_and_a_flush_waits_for_it() {
     assert_eq!(poll(&mut n, &mut []), Poll::Ready(Ok(())));
     // De derde hap komt van de read-ahead: geen nieuwe lees, maar de
     // vierde staat alweer op de controller.
+    // De vierde gaat al bij het pakken van de derde, niet pas na zijn
+    // drain: twee happen tegelijk voor een lezer die alleen is.
     let before = io_log().len();
     n.start(Op::Read {
         lba: 2 * LBAS,
         len: HAP,
     })
     .unwrap();
+    assert_eq!(io_log().len(), before + 1);
+    assert_eq!(io_log().last(), Some(&(IO_READ, 3 * HB, HB as u32)));
     assert_eq!(poll(&mut n, &mut b), Poll::Ready(Ok(())));
     assert!(is_blocks(&b, 2 * HB));
     assert_eq!(n.ahead_hits, 1);
-    assert_eq!(io_log().len(), before + 1);
-    assert_eq!(io_log().last(), Some(&(IO_READ, 3 * HB, HB as u32)));
+    assert_eq!(
+        io_log().len(),
+        before + 1,
+        "no second read-ahead for the same hap"
+    );
+    // Hij komt terug en wordt gelezen zonder nieuwe lees.
+    release(0);
+    n.start(Op::Read {
+        lba: 3 * LBAS,
+        len: HAP,
+    })
+    .unwrap();
+    assert_eq!(poll(&mut n, &mut b), Poll::Ready(Ok(())));
+    assert!(is_blocks(&b, 3 * HB));
+    assert_eq!((n.ahead_hits, n.ahead_waste), (2, 0));
+}
+
+/// De vroege read-ahead neemt de laatste pagina's: niet als een ander op
+/// de controller staat. Dan komt hij pas na de drain, met de reserve. Met
+/// MDTS 16 KiB is een hap 256 KiB, dan zijn er pagina's genoeg en telt
+/// alleen of de lezer alleen is.
+#[test]
+fn the_early_read_ahead_waits_for_a_reader_that_is_not_alone() {
+    let (_m, mut n) = sim::<false>(12, 2);
+    let hap = n.step();
+    let lbas = hap as u64 / SECTOR;
+    let mut b = vec![0u8; hap];
+    for k in [0, 1] {
+        block_on(blk(&mut n).read(k * lbas, &mut b)).unwrap();
+    }
+    // De read-ahead van hap 2 is terug; een ander leest 4 KiB en wacht nog.
+    with(|c| c.hold = true);
+    n.start_tag(Op::Read {
+        lba: 999 * 8,
+        len: 4096,
+    })
+    .unwrap();
+    let before = io_log().len();
+    n.start(Op::Read {
+        lba: 2 * lbas,
+        len: hap,
+    })
+    .unwrap();
+    assert_eq!(io_log().len(), before, "not while another ticket is out");
+    assert_eq!(poll(&mut n, &mut b), Poll::Ready(Ok(())));
+    assert!(is_blocks(&b, 2 * hap as u64 / 4096));
+    let next = 3 * hap as u64 / 4096;
+    assert_eq!(
+        io_log().get(before).map(|e| e.1),
+        Some(next),
+        "after the drain"
+    );
 }
 
 #[test]

@@ -39,15 +39,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Agent op de Altra. NVMe lezen is traag, schrijven niet: O6N 4 KiB lezen 212 MB/s (19 us
-      per opdracht) tegen 537 schrijven, willekeurig lezen 15,6k IOPS met
-      één opdracht en 71k met 16 tegelijk (4,5 keer, niet 16), sequentieel
-      3038 tegen 3586; Altra 4 KiB lezen 24,5k tegen 141k schrijven (186k
-      met 16); M4 11,9k tegen 140k. Schrijven wordt uit de DRAM van de SSD
-      bevestigd, lezen moet naar het flash, dus één opdracht tegelijk is
-      latentie: de leesweg moet meer opdrachten in de lucht houden (de
-      read-ahead van hopfs voor sequentieel, de wachtrij van 16 voor
-      willekeurig, en kijken waar de 19 us per 4 KiB zit).
 - [ ] Agent op de Pi 4. rtt naar de kern p99 5 tot 9 ms terwijl p50 100 tot 300 us is: O6N
       7761, Pi 5 9141, Pi 4 5312, Altra 9218 in `all` (alleen 158); M4 146
       en Radxa 681 niet. Ook de timer-overslaap p99 2,7 tot 10 ms (M4,
