@@ -39,6 +39,12 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
+- [ ] Agent op de O6N en de M4: Hop in zijn eigen groep `hop` op een kleine
+      core (`hopos.hop.core-class=small`, nieuw naast `hopos.hop.sharegroup`;
+      een app deelt mee met `sharegroup: hop`, op last). Vandaag gezien:
+      Hop in `system` krijgt 1 % en de API zwijgt 10 s zodra vier apps de
+      OS-core bestoken. headfull en headless krijgen `hop` en `small`;
+      daarna HopOS 3.0.9 zodat de media die sleutel kennen.
 - [ ] De media met `hop image --config` op v3.0.8 (Derek): Radxa-kaart
       (v3.0.5 stormt na 2 GiB door de MMC-maskers), Altra-stick (v3.0.7
       boot daar niet), M4 via Recovery (Hop is daar nog 3.0.0 en de leader
@@ -47,11 +53,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       M4, de Blu-ray-backup op de O6N.
 ### Fixen
 
-- [ ] Hop op de OS-core verhongert als de OS-core vol zit: bij 4 of meer
-      apps die de kern bestoken krijgt Hop op de O6N nog 1 % en antwoorden
-      `/v1/agents` en de apps 10 s niet (04-10, nulmeting). Hop hoort een
-      gegarandeerd deel van de OS-core te hebben, of op borden met cores
-      genoeg niet op de OS-core te wonen.
 - [ ] NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
       eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
       zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
