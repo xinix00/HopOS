@@ -43,9 +43,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       van dit weekend), geland zijn 8.1, 8.2 en 8.3, 8.4, 8.5, 8.6, 8.9 (ebea7eb), 8.13
       (249963d), 8.15 en 8.16, en de restjes (92071eb: clock naar now,
       HOPOS_IRQ_STUCK en HOPOS_IRQ_STORM, de Hop-bootregel na een warme flip
-      met HOPOS_HOP_GROUP_COLD); 8.14 (de scripts, d4d8700); nog bezig 8.7 en 8.8 (arm64 en riscv, de
-      assembly: herbasseert), 8.10 en 8.11 (oneshot, de dubbele paden), 8.12
-      (pollen). Alles na 3.0.9
+      met HOPOS_HOP_GROUP_COLD); 8.12 (pollen, 88acb8b), 8.14 (de scripts, d4d8700); de laatste twee,
+      8.7 en 8.8 (arm64 en riscv, de assembly) en 8.10 en 8.11 (oneshot, de
+      dubbele paden), worden herbasseerd op 88acb8b. Alles na 3.0.9
       komt in een volgende release na een eigen ijzerronde (de bootregels
       per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
