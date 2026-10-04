@@ -240,23 +240,6 @@ pub fn or(medium: &'static str) -> &'static str {
     if t.is_empty() { medium } else { t }
 }
 
-/// Eén sleutel: eerst het venster, dan de `cmdline` (de bootargs). Het
-/// bestand wint, zoals op de Radxa.
-#[must_use]
-pub fn param(key: &'static str, cmdline: &'static str) -> &'static str {
-    first(text(), key, cmdline)
-}
-
-/// [`param`] met `file` als venstertekst.
-fn first<'a>(file: &'a str, key: &'a str, cmdline: &'a str) -> &'a str {
-    let v = fw::bootcfg::get(file, key);
-    if v.is_empty() {
-        fw::bootcfg::get_cmdline(cmdline, key)
-    } else {
-        v
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,15 +356,5 @@ mod tests {
         let mut odd = std::vec![0u8; 0x10];
         odd.extend_from_slice(&empty());
         assert_eq!(carry(&ours, &mut odd), Carry::NoWindow);
-    }
-
-    #[test]
-    fn the_window_wins_over_the_cmdline() {
-        let file = "hopos.stage=app\nhopos.cores=2\n";
-        let args = "console=ttyAMA0 hopos.stage=hop hopos.oscore=big";
-        assert_eq!(first(file, "hopos.stage", args), "app");
-        assert_eq!(first(file, "hopos.oscore", args), "big");
-        assert_eq!(first("", "hopos.stage", args), "hop");
-        assert_eq!(first(file, "hopos.node", args), "");
     }
 }

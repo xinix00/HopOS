@@ -22,8 +22,8 @@ driver-fb = { path = "../driver/fb" }
 bounded = { path = "../bounded" }
 # Het blokcontract van `NoDisk`, de schijf van een board zonder schijf.
 blkdev = { path = "../blkdev" }
-# De lezer van `hopos.cfg` (`cfgwin::param`, `Board::boot_param`): één
-# parser voor elk kanaal.
+# De lezer van `hopos.cfg` (`Board::boot_param`): één parser voor elk
+# kanaal.
 fw = { path = "../fw" }
 # De knop van het klokbeleid (`ClockKnob`): de trait en het niveau.
 driver-dvfs = { path = "../driver/dvfs" }

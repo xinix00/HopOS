@@ -195,6 +195,7 @@ use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
 use executor::Executor;
+use kern::nodecfg::NodeCfg;
 use kern::partmem::{Geometry, PartitionPool};
 use kern::pool::{Placement, Places};
 use kern::slots::{
@@ -288,14 +289,14 @@ pub(crate) fn start(
     role: Result<StagedRole, u64>,
     adopt: Option<Vec<kern::slots::SlotState>>,
     app_env: Vec<u8>,
-    hop_cfg: String,
+    cfg: NodeCfg<'static>,
 ) {
     let board = &crate::BOARD;
     // FLIP: een geadopteerde Hop zit waar hij zat, met zijn groep en core.
     let carried = adopt
         .as_ref()
         .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT));
-    init_hop_group(&hop_cfg, carried);
+    init_hop_group(&cfg, carried);
     let hop_core = carried.map(|st| st.core);
     let plan = match os_plan() {
         Ok(p) => p,
@@ -454,7 +455,7 @@ pub(crate) fn start(
     }
     let spawned = match role {
         Ok(StagedRole::App) => exec.spawn(place_first(exec, plan, app_env)),
-        Ok(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes, hop_cfg)),
+        Ok(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes, cfg)),
         Err(word) => {
             println!(
                 "slots: staged role word {word:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE"
@@ -604,7 +605,7 @@ const HOP_NODE: &str = "hopos-1";
 /// (`kern::nodecfg::default_node`), zodat elke node op de gedeelde config
 /// (image/cfg) een eigen naam heeft. Eén regel op de console als hij
 /// gebruikt wordt.
-fn default_node(cfg: &kern::nodecfg::NodeCfg<'_>) -> String {
+fn default_node(cfg: &NodeCfg<'_>) -> String {
     let Some(mac) = crate::net::uplink_mac() else {
         return HOP_NODE.into();
     };
@@ -623,7 +624,7 @@ async fn place_hop(
     exec: &'static Executor,
     plan: abi::layout::Plan,
     pool_bytes: u64,
-    hop_cfg: String,
+    cfg: NodeCfg<'static>,
 ) {
     let Some(img) = vslots::staged_image() else {
         println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
@@ -634,7 +635,6 @@ async fn place_hop(
     };
     let node_ip = wait_uplink(exec).await;
     // De env van Hop komt uit de config van het board (kern::nodecfg).
-    let cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
     let node = default_node(&cfg);
     let hop_group = kern::pool::hop_group();
     let facts = kern::nodecfg::Facts {
@@ -755,10 +755,7 @@ async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
 /// die groep `system` is (de klasse van die core koos `hopos.oscore`), en
 /// anders een eigen app-core, met `hopos.hop.core-class` als voorkeur voor
 /// de eerste core van de groep (`Placement::prefer`).
-fn hop_placement(
-    plan: &abi::layout::Plan,
-    cfg: &kern::nodecfg::NodeCfg<'_>,
-) -> kern::Result<Placement> {
+fn hop_placement(plan: &abi::layout::Plan, cfg: &NodeCfg<'_>) -> kern::Result<Placement> {
     let mut at = Placement::hop()?;
     let class = kern::nodecfg::hop_core_class(cfg);
     let want = cfg.one("hopos.hop.core-class");
@@ -816,8 +813,7 @@ fn hop_on_os() -> bool {
 /// jobs met zijn tag en een flipbundel komen naast hem, en de core-reclaim
 /// spaart hem. Vraagt de config iets anders, dan zegt één regel dat die
 /// pas bij een koude start geldt.
-fn init_hop_group(hop_cfg: &str, carried: Option<&kern::slots::SlotState>) {
-    let cfg = kern::nodecfg::NodeCfg::parse(hop_cfg);
+fn init_hop_group(cfg: &NodeCfg<'_>, carried: Option<&kern::slots::SlotState>) {
     let want = cfg.one("hopos.hop.sharegroup");
     let (cfg_name, cfg_why): (&[u8], &str) = match want {
         "" if arch::SHARES_OS_CORE => (kern::pool::SYSTEM_GROUP, "default"),

@@ -51,7 +51,6 @@ use driver_gicv3::{Gic, SysRegIcc};
 use driver_pl011::Pl011;
 use driver_virtioblk::{IrqAck as BlkAck, VirtioBlk};
 use driver_virtionet::{IrqAck, VirtioNet};
-use fw::fdt::Fdt;
 use sync::{Local, Signal};
 
 #[cfg(test)]
@@ -174,8 +173,8 @@ fn disk_ack() {
     }
 }
 
-/// Het adres van een geldige DTB, 0 = geen.
-static DTB: AtomicU64 = AtomicU64::new(0);
+/// De DTB van deze boot.
+static DTB: board::dtb::Dtb = board::dtb::Dtb::new();
 /// Het bij boot gevonden DRAM (bytes, 0 = onbekend).
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de FDT, 0 = onbekend.
@@ -194,32 +193,6 @@ fn console_write(b: &[u8]) {
 
 fn console_nowait(b: &[u8]) -> usize {
     UART.write_nowait(b)
-}
-
-/// De DTB op `pa` als slice, als er een geldige header staat.
-///
-/// Het is de enige plek waar dit board firmware-geheugen als bytes leest:
-/// eerst de acht header-bytes per woord (via `dev`), en pas als de
-/// gedeclareerde grootte klopt, de hele blob.
-fn dtb_at(pa: u64) -> Option<Fdt<'static>> {
-    if pa == 0 || !KERN_RAM.contains(Pa(pa)) || !pa.is_multiple_of(8) {
-        return None;
-    }
-    let mut head = [0u8; 8];
-    dev::copy_out(&mut head, Pa(pa));
-    let total = fw::fdt::total_size(&head)?;
-    if !KERN_RAM.contains(Pa(pa).add(total as u64 - 1)) {
-        return None;
-    }
-    // SAFETY: `[pa, pa+total)` ligt in de kern-RAM (hierboven getoetst), is
-    // gemapt als Normal, en wordt door niemand beschreven: de DTB ligt
-    // onder het image (link.ld begint op 0x4020_0000) en buiten de heap.
-    let blob = unsafe { core::slice::from_raw_parts(pa as usize as *const u8, total) };
-    Fdt::new(blob).ok()
-}
-
-fn fdt() -> Option<Fdt<'static>> {
-    dtb_at(DTB.load(Relaxed))
 }
 
 /// QEMU virt als board.
@@ -250,7 +223,7 @@ impl QemuVirt {
     fn find_virtio(is: impl Fn(Pa) -> bool) -> Option<(Pa, u32)> {
         let in_window =
             |pa: Pa| pa.0 >= VIRTIO_MMIO.0 && pa.0 < VIRTIO_MMIO.0 + VIRTIO_SLOTS * VIRTIO_STRIDE;
-        if let Some(list) = fdt().and_then(|f| f.virtio_mmio().ok()) {
+        if let Some(list) = DTB.fdt().and_then(|f| f.virtio_mmio().ok()) {
             return list
                 .iter()
                 .map(|t| (Pa(t.reg.base), t.intid))
@@ -316,14 +289,13 @@ impl Board for QemuVirt {
     fn discover(&self, dtb: u64) {
         let Some((pa, f)) = [dtb, DTB_FALLBACK.0]
             .into_iter()
-            .find_map(|pa| dtb_at(pa).map(|f| (pa, f)))
+            .find_map(|pa| DTB.find(pa, KERN_RAM).map(|f| (pa, f)))
         else {
             cpu::println!(
                 "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}) - trusting the static layout"
             );
             return;
         };
-        DTB.store(pa, Relaxed);
         MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
         CORES.store(f.cpu_count().unwrap_or(0), Relaxed);
         let gic_ok = f
@@ -485,13 +457,16 @@ impl Board for QemuVirt {
     }
 
     /// De OS-core die de config vraagt (`hopos.oscore=<small|mid|big|N>`,
-    /// het venster in het image en dan de bootargs, `board::cfgwin`), met
+    /// het venster in het image en dan de bootargs, `Board::boot_param`), met
     /// een reden als de vraag niet kon: dan de boot-core (0), luid. Op
     /// QEMU virt zijn alle cores big, dus `small` en `mid` vallen terug.
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        let args = fdt().and_then(|f| f.bootargs()).unwrap_or("");
-        let v = board::cfgwin::param("hopos.oscore", args);
-        board::os_core(v, self.cores(), |c| self.core_class(c), 0)
+        board::os_core(
+            self.boot_param("hopos.oscore"),
+            self.cores(),
+            |c| self.core_class(c),
+            0,
+        )
     }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`: de SGI naar
@@ -513,7 +488,7 @@ impl Board for QemuVirt {
 
     /// De FDT-bootargs (QEMU `-append`).
     fn bootargs(&self) -> &'static str {
-        fdt().and_then(|f| f.bootargs()).unwrap_or("")
+        DTB.fdt().and_then(|f| f.bootargs()).unwrap_or("")
     }
 
     /// Vindt en initialiseert de schijf (virtio-blk) in de schijf-helft van

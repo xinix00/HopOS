@@ -49,7 +49,7 @@ config-venster"), zoals op elk board. Drie wegen om hem te veranderen:
 herbouw met `CFG=`, `hop image` op het image of de kaart, of een sleutel in
 de APPEND-regel van `extlinux/extlinux.conf` (die blijft tekst). Let op:
 een sleutel in het venster wint van dezelfde sleutel in de APPEND
-(`board_rk3566::boot_param`); de standaardconfig zet geen `hopos.node`,
+(`Board::boot_param`); de standaardconfig zet geen `hopos.node`,
 dus die komt uit de APPEND. Een kaart met een kern zonder gevuld venster
 leest `hopos.cfg` uit de initrd, zoals vóór 04-10.
 

@@ -223,8 +223,10 @@ fn preflight(plan: &Plan) -> bool {
 /// slaat de voorproef over (de zelftest van de kern meldt het dan nog
 /// steeds), `hopos.cages=off` weigert altijd.
 pub fn plan(cores: usize, os_core: usize) -> abi::Result<Plan> {
-    let cfg = fwinfo::config_text();
-    let want = cages(fw::bootcfg::get(cfg, "hopos.cages"));
+    let want = cages(board::Board::boot_param(
+        &crate::Apple::new(),
+        "hopos.cages",
+    ));
     if want == Cages::Off {
         return Err(abi::Error::Missing("cages: hopos.cages=off"));
     }

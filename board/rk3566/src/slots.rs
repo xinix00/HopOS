@@ -165,7 +165,7 @@ pub(crate) static ROLE: AtomicU64 = AtomicU64::new(0);
 /// ELF-lezer en `abi::place`.
 #[must_use]
 pub fn staged_image() -> Option<&'static [u8]> {
-    crate::copied(&crate::STAGE_COPY)
+    crate::STAGE.get()
 }
 
 /// De rol van de staging; een onbekende `hopos.stage` komt als rauw woord

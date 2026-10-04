@@ -215,7 +215,7 @@ fn prepare(efi: &Efi, el: u8) -> Result<Enter, (&'static str, Status)> {
     let role = if facts::STAGE[1].load(Relaxed) == 0 {
         0
     } else {
-        stage_role(cfg_text())
+        stage_role(board::Board::boot_param(&crate::Uefi::new(), "hopos.stage"))
     };
     dev::write64(Pa(slots::STAGE_ROLE_PA), role);
     println!(
@@ -429,15 +429,10 @@ fn build_map(map: &Map) -> Result<Mmu, mmu::Error> {
     Ok(m)
 }
 
-/// `hopos.cfg` zoals de stub hem las (leeg zonder bestand).
-fn cfg_text() -> &'static str {
-    board::Board::config(&crate::Uefi::new())
-}
-
 /// De rol van de staging uit `hopos.stage` (0 = app, 1 = Hop; zonder
 /// sleutel Hop, zoals op de Pi's: op ijzer is wat er gestaged is Hop).
-fn stage_role(cfg: &str) -> u64 {
-    match fw::bootcfg::get(cfg, "hopos.stage") {
+fn stage_role(v: &str) -> u64 {
+    match v {
         "app" => 0,
         _ => 1,
     }

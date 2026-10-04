@@ -409,8 +409,7 @@ impl Uefi {
     /// als de vraag niet kon: dan de boot-core (0), luid.
     #[must_use]
     pub fn os_core_by(&self, class: impl Fn(usize) -> CoreClass) -> (usize, Option<&'static str>) {
-        let v = fw::bootcfg::get(self.config(), "hopos.oscore");
-        board::os_core(v, self.cores(), class, 0)
+        board::os_core(self.boot_param("hopos.oscore"), self.cores(), class, 0)
     }
 
     /// Een ACPI-tabel met signature `sig` (de eerste; `DSDT` via de FADT),

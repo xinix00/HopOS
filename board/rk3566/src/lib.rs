@@ -67,6 +67,7 @@ mod tests;
 
 use abi::layout::Pool;
 use abi::ring::Coherence;
+use board::dtb::Kept;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use cpu::irq::Line;
@@ -75,7 +76,6 @@ use driver_gicv3::{Gic, SysRegIcc};
 use driver_mdio::{Phy, rtl8211f};
 use driver_ns16550::Ns16550;
 use driver_stmmac::dwmac4::{self, CSR_100_150M, Dwmac4, IrqAck, Probe};
-use fw::fdt::Fdt;
 use netdev::AckSlot;
 use netdev::Mac;
 use sync::Signal;
@@ -220,14 +220,12 @@ fn nic_ack() {
     NIC_ACK.ack();
 }
 
-/// De kopie van de DTB in de heap (adres, lengte; 0 = geen).
-static DTB_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
-/// De hele initrd in de heap (de container, of de kale config).
-static INITRD_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
-/// De config (`hopos.cfg`): een stuk van [`INITRD_COPY`].
-static CFG_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
-/// Het image van de bewoner: een stuk van [`INITRD_COPY`], 0 = geen.
-pub(crate) static STAGE_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+/// De DTB van deze boot: een kopie in de heap.
+static DTB: board::dtb::Dtb = board::dtb::Dtb::new();
+/// De config (`hopos.cfg`): een stuk van de initrd in de heap.
+static CFG: Kept = Kept::new();
+/// Het image van de bewoner: een stuk van de initrd in de heap.
+pub(crate) static STAGE: Kept = Kept::new();
 /// Waar U-Boot de DTB en de initrd liet: gaten in de pool.
 static FW_HOLES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 /// Het bij boot gevonden DRAM (bytes, 0 = onbekend).
@@ -242,39 +240,20 @@ fn console_write(b: &[u8]) {
     UART.write_bytes(b);
 }
 
-/// Een blob die in de heap gekopieerd staat.
-pub(crate) fn copied(slot: &[AtomicUsize; 2]) -> Option<&'static [u8]> {
-    let [p, n] = slot;
-    let (p, n) = (p.load(Relaxed), n.load(Relaxed));
-    if p == 0 {
-        return None;
-    }
-    // SAFETY: `[p, p+n)` ligt in een heap-allocatie die `copy_to_heap`
-    // vulde en nooit vrijgeeft (`publish` zet alleen stukken daarvan);
-    // niemand schrijft er daarna nog in.
-    Some(unsafe { core::slice::from_raw_parts(p as *const u8, n) })
-}
-
 /// Kopieert `[pa, pa+len)` woordgewijs (via `dev`) naar een nieuwe
 /// heap-allocatie die blijft. `None` als de heap nee zegt.
-fn copy_to_heap(pa: u64, len: usize, slot: &[AtomicUsize; 2]) -> Option<&'static [u8]> {
+fn copy_to_heap(pa: u64, len: usize) -> Option<&'static [u8]> {
     let layout = core::alloc::Layout::from_size_align(len.max(1), 8).ok()?;
     // SAFETY: een geldige layout met maat > 0; null is afgehandeld.
     let p = unsafe { alloc::alloc::alloc(layout) };
     if p.is_null() {
         return None;
     }
-    // SAFETY: `p` is een verse, niet-gedeelde allocatie van `len` bytes.
+    // SAFETY: `p` is een verse, niet-gedeelde allocatie van `len` bytes die
+    // nooit vrijkomt.
     let dst = unsafe { core::slice::from_raw_parts_mut(p, len) };
     dev::copy_out(dst, Pa(pa));
-    publish(slot, dst);
-    copied(slot)
-}
-
-/// Zet een stuk van een blijvende heap-kopie in `slot`, voor [`copied`].
-fn publish(slot: &[AtomicUsize; 2], b: &'static [u8]) {
-    slot[0].store(b.as_ptr() as usize, Relaxed);
-    slot[1].store(b.len(), Relaxed);
+    Some(dst)
 }
 
 /// De initrd uit het DRAM naar de heap, gesplitst in config en image
@@ -286,12 +265,12 @@ fn take_initrd(start: u64, len: u64) {
         cpu::println!(
             "stage: initrd {start:#x}+{len:#x} outside the DRAM or over {INITRD_MAX} bytes, ignored HOPOS_STAGE_REFUSED"
         );
-    } else if let Some(blob) = copy_to_heap(start, len as usize, &INITRD_COPY) {
+    } else if let Some(blob) = copy_to_heap(start, len as usize) {
         match initrd::split(blob) {
             Ok(parts) => {
-                publish(&CFG_COPY, parts.cfg);
+                CFG.keep(parts.cfg);
                 if let Some(img) = parts.image {
-                    publish(&STAGE_COPY, img);
+                    STAGE.keep(img);
                 }
             }
             Err(e) => cpu::println!(
@@ -306,14 +285,14 @@ fn take_initrd(start: u64, len: u64) {
 /// De rol van de staging uit `hopos.stage` (config of APPEND), als woord
 /// zoals op de Pi's. Meldt wat er gestaged is.
 fn take_role() {
-    let role = board::stage::role_code(boot_param("hopos.stage"));
+    let role = board::stage::role_code(Rk3566.boot_param("hopos.stage"));
     slots::ROLE.store(role, Relaxed);
     let name = match role {
         0 => "app",
         1 => "hop",
         _ => "unknown (nothing will be placed)",
     };
-    match copied(&STAGE_COPY) {
+    match STAGE.get() {
         Some(img) => cpu::println!(
             "stage: {} KB image from the initrd at {:#x}, role {name}",
             img.len() >> 10,
@@ -326,35 +305,6 @@ fn take_role() {
 /// Ligt `[pa, pa+len)` in het DRAM dat de identity map dekt?
 fn in_dram(pa: u64, len: u64) -> bool {
     pa >= DRAM_BASE && pa.checked_add(len).is_some_and(|e| e <= RAM_MAPPED_END)
-}
-
-/// De FDT uit de heap-kopie.
-fn fdt() -> Option<Fdt<'static>> {
-    copied(&DTB_COPY).and_then(|b| Fdt::new(b).ok())
-}
-
-/// Het configbestand: het venster in het image (`board::cfgwin`) als het
-/// gevuld is, anders `hopos.cfg` uit de initrd; "" zonder.
-#[must_use]
-pub fn cfg_text() -> &'static str {
-    board::cfgwin::or(
-        copied(&CFG_COPY)
-            .and_then(|b| core::str::from_utf8(b).ok())
-            .unwrap_or(""),
-    )
-}
-
-/// De waarde van een boot-sleutel: eerst uit `hopos.cfg`, dan uit
-/// de bootargs (Go: `rk3566.BootParam`).
-#[must_use]
-pub fn boot_param(key: &'static str) -> &'static str {
-    Board::boot_param(&Rk3566, key)
-}
-
-/// De bootargs (de APPEND van extlinux.conf); "" zonder.
-#[must_use]
-pub fn bootargs() -> &'static str {
-    fdt().and_then(|f| f.bootargs()).unwrap_or("")
 }
 
 /// De ABI-staart van een slot Normal write-back in de kernmap (Go:
@@ -372,7 +322,7 @@ pub fn map_tail_normal(pa: u64, size: u64) -> Result<(), cpu::memattr::Error> {
 pub(crate) fn pool_now() -> Pool {
     let mut banks = [abi::Region::new(0, 0); fw::fdt::MAX_MEM_REGIONS];
     let mut nb = 0;
-    if let Some(regs) = fdt().and_then(|f| f.mem_regions().ok()) {
+    if let Some(regs) = DTB.fdt().and_then(|f| f.mem_regions().ok()) {
         for (slot, r) in banks.iter_mut().zip(regs.iter()) {
             *slot = *r;
             nb += 1;
@@ -383,7 +333,7 @@ pub(crate) fn pool_now() -> Pool {
     holes[0] = abi::Region::new(h(0), h(1));
     holes[1] = abi::Region::new(h(2), h(3));
     let mut nh = 2;
-    if let Some(f) = fdt() {
+    if let Some(f) = DTB.fdt() {
         for (slot, r) in holes.iter_mut().skip(2).zip(f.mem_reserve().iter()) {
             *slot = *r;
             nh += 1;
@@ -413,8 +363,8 @@ fn take_fdt(dtb: u64) {
     };
     let Some(f) = total
         .filter(|&n| in_dram(dtb, n as u64))
-        .and_then(|n| copy_to_heap(dtb, n, &DTB_COPY))
-        .and_then(|b| Fdt::new(b).ok())
+        .and_then(|n| copy_to_heap(dtb, n))
+        .and_then(|b| DTB.keep(b))
     else {
         cpu::println!(
             "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}) - trusting the static layout"
@@ -437,7 +387,7 @@ fn take_fdt(dtb: u64) {
         "fdt: {} bytes at {dtb:#x}, bootargs {:?}, hopos.cfg {} bytes{}",
         f.size(),
         f.bootargs().unwrap_or(""),
-        cfg_text().len(),
+        Rk3566.config().len(),
         if gic_ok {
             ""
         } else {
@@ -473,7 +423,10 @@ impl Rk3566 {
     /// board heeft geen MAC in een fuse waarvan we de registerkaart gemeten
     /// hebben, dus zou anders elke Radxa hetzelfde adres dragen.
     fn node_mac() -> Mac {
-        let (m, src) = net::nodemac::identity(boot_param("hopos.mac"), boot_param("hopos.node"));
+        let (m, src) = net::nodemac::identity(
+            Rk3566.boot_param("hopos.mac"),
+            Rk3566.boot_param("hopos.node"),
+        );
         if src == net::nodemac::Source::Fallback {
             cpu::println!(
                 "net: WARNING no hopos.mac and no hopos.node: the built-in MAC; a second Radxa Zero 3E on this LAN will collide HOPOS_MAC_FIXED"
@@ -804,7 +757,7 @@ impl Board for Rk3566 {
     /// `big` is core 0 en `small` of `mid` valt terug.
     fn os_core(&self) -> (usize, Option<&'static str>) {
         board::os_core(
-            boot_param("hopos.oscore"),
+            self.boot_param("hopos.oscore"),
             self.cores(),
             |c| self.core_class(c),
             0,
@@ -828,12 +781,16 @@ impl Board for Rk3566 {
 
     /// Het venster in het image, anders `hopos.cfg` uit de initrd.
     fn config(&self) -> &'static str {
-        cfg_text()
+        board::cfgwin::or(
+            CFG.get()
+                .and_then(|b| core::str::from_utf8(b).ok())
+                .unwrap_or(""),
+        )
     }
 
     /// De APPEND-regel van extlinux.conf.
     fn bootargs(&self) -> &'static str {
-        bootargs()
+        DTB.fdt().and_then(|f| f.bootargs()).unwrap_or("")
     }
 
     fn map_tail_normal(&self, pa: u64, size: u64) -> Option<Result<(), board::TailError>> {

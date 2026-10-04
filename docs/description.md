@@ -608,19 +608,35 @@ Nagelopen op 04-10; wat een fout was, is gerepareerd.
 
 ### 8.9 Config en firmware-feiten
 
-- "Eerst het bestand, dan de cmdline" drie keer: `cfgwin::first`,
-  `board_rk3566::boot_param`, `kern::nodecfg::text`. Hoort in
-  `fw::bootcfg`. H.
-- Config-toegang per board met andere namen (`config`, `boot_param`,
-  `cfg_text`, `bootargs`), en in hopos kiest elk module zelf. `NodeCfg::parse`
-  drie keer. Config-logica staat in `bench.rs`. Twee `boot_param`'s zonder
-  aanroeper. H. a6ceae5 heeft een deel opgeruimd.
-- De DTB lezen of kopiëren vijf keer; `bench::bootparam` kopieert de DTB bij
-  elke aanroep opnieuw (tot 1 MiB). H.
-- Het config-venster drie keer: `board/src/cfgwin.rs`, `image/hopcfg.py` en
-  `hop image` in de hop-repo. V dat hopcfg.py kan vervallen.
-- Geen gedeeld feitentype: `fdt::Fb` en `xnuboot::Fb`, de GIC als
-  `fdt::GicV3` of als tuples uit de MADT; elk board bouwt zijn eigen. V.
+Nagelopen op 04-10; wat dubbel was, is één keer.
+
+- **"Eerst de bootargs, dan het bestand, de laatste wint"** staat één keer:
+  `fw::bootcfg::layered` en `param`. `Board::boot_param` gebruikt hem,
+  `kern::nodecfg::NodeCfg` ook (drie lagen: de bank van QEMU, de bootargs,
+  het bestand); `cfgwin::param` en `nodecfg::text` zijn weg.
+- **Eén weg naar een sleutel**: `Board::config`, `Board::bootargs` en
+  `Board::boot_param`, voor de kern én het board zelf. Weg: de vrije
+  `boot_param` van de Pi's, de Radxa en de LicheeRV, `cfg_text` en
+  `bootargs` van de Radxa, de eigen lezers in de UEFI-stub en op Apple,
+  en `bench::bootparam`/`cfg_text` (die bij elke aanroep een `String`
+  bouwde). Apple las `hopos.cages` uit 0xF000 en niet uit het venster; nu
+  via het contract. `NodeCfg` wordt één keer gemaakt (main.rs) en gaat als
+  waarde naar de slots.
+- **Eén bewaarde DTB per boot**: `board::dtb::Dtb` (vinden, wegen, bewaren)
+  voor virt, riscv-virt en de Pi's; de Radxa bewaart zijn heap-kopie erin,
+  en `board::dtb::Kept` vervangt zijn `copied`/`publish`.
+- **Het config-venster** blijft op drie plekken, met elk een eigen taak:
+  `board/src/cfgwin.rs` leest het in de kern, `image/hopcfg.py` vult het bij
+  het bouwen (ook `image/apple/load.py` en `tools/qemu-test.sh` gebruiken
+  hem), `hop image` schrijft een kaart of stick van een operator.
+  `hopcfg.py` vervangen door `hop image` vraagt een gebouwde hop-CLI op de
+  bouwmachine bij elk image-script en elke QEMU-toets, een afhankelijkheid
+  tussen de repo's buiten de tags om, en `hop image` kent geen lagen.
+- **Geen gedeeld feitentype, bewust**: het gedeelde type van een
+  framebuffer is `driver_fb::Desc` (elk board zet zijn bron erin om);
+  `fdt::Fb` en `xnuboot::Fb` zijn de lezingen van twee formaten, en die van
+  xnuboot komt alleen in een bootregel. De GIC uit de MADT (versie, alle
+  GICR-bereiken) is een ander feit dan `fdt::GicV3`.
 
 ### 8.10 Verzoek en antwoord zonder bouwsteen
 

@@ -162,7 +162,7 @@ fi
 
 # 4. De initrd en de extlinux-regel. De APPEND-regel is het bootargs-kanaal,
 #    INITRD het bestand-kanaal; beide GEMETEN werkend op 05-08 (de kern
-#    leest ze in board_rk3566::boot_param). De config staat in het venster
+#    leest ze in Board::boot_param). De config staat in het venster
 #    van hopos.img (stap 2), dus hopos.cfg in de initrd blijft leeg: die is
 #    de terugval van een kern met een leeg venster. Een sleutel in het
 #    venster wint van dezelfde sleutel in de APPEND; de gedeelde config zet

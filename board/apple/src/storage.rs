@@ -123,11 +123,11 @@ fn open(asc: u64, nvmmu: u64, nvme: u64, secure_bar: bool) -> Result<Disk, &'sta
 
 /// Brengt de ANS op en geeft het venster na de partities van macOS.
 /// `Ok(None)` = geen ANS, geen gat, of `hopos.disk=off`.
-pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
+pub(crate) fn probe_disk(off: bool) -> Result<Option<Disk>, Error> {
     if DISK_CLAIMED.swap(true, Relaxed) {
         return Err(Error::Twice("probe_disk"));
     }
-    if fw::bootcfg::get(cfg, "hopos.disk") == "off" {
+    if off {
         println!("disk: hopos.disk=off, the internal SSD stays untouched");
         return Ok(None);
     }
@@ -217,8 +217,8 @@ pub(crate) fn probe_disk(cfg: &str) -> Result<Option<Disk>, Error> {
 /// De temperatuur van de die, één meting via de SMC (`hopos.smc=1`), en de
 /// SMC daarna weer in slaap. `None` = onbekend; een board zonder
 /// thermometer is een board zonder thermometer.
-pub(crate) fn temp_milli_c(cfg: &str) -> Option<i32> {
-    if fw::bootcfg::get(cfg, "hopos.smc") != "1" {
+pub(crate) fn temp_milli_c(smc: bool) -> Option<i32> {
+    if !smc {
         return None;
     }
     let (base, _) = fwinfo::reg("/arm-io/smc", 0)?;

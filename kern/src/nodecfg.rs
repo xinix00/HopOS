@@ -33,18 +33,19 @@
 //! `hopos.hop.core-class` ([`hop_core_class`]: de soort core die die groep
 //! als eerste krijgt).
 //!
-//! # Per board één tekst
+//! # Per board twee bronnen
 //!
-//! Elk board geeft zijn config als één tekst in het bestandsformaat
-//! ([`text`]): het venster in het kern-image (`board::cfgwin`, op elk
-//! board), of bij een leeg venster `hopos.cfg` van het bootmedium (de ESP op
-//! UEFI, 0xF000 op Apple, de initrd op de Radxa), met daarvóór de
-//! `hopos.*`-tokens van de bootargs (de Pi's, de Radxa, QEMU). De laatste
-//! waarde wint (`fw::bootcfg::get`, 04-10): zo is een config in lagen
-//! (image/cfg: default, bord, smaak) gewoon de aaneengeplakte tekst, en het
-//! bestand wint nog steeds van de bootargs (Go: `rk3566.BootParam`). Alleen
-//! QEMU, dat geen bootmedium heeft, krijgt voor Hop [`QEMU_CFG`] er nog
-//! vóór (Go: `board_virt.go`). Zonder
+//! Elk board geeft zijn config als bestand (`Board::config`): het venster
+//! in het kern-image (`board::cfgwin`, op elk board), of bij een leeg
+//! venster `hopos.cfg` van het bootmedium (de ESP op UEFI, 0xF000 op Apple,
+//! de initrd op de Radxa), en als bootargs (`Board::bootargs`: de Pi's, de
+//! Radxa, QEMU). [`NodeCfg::new`] leest ze in de volgorde van
+//! `fw::bootcfg::layered`: eerst de bootargs, dan het bestand, en de laatste
+//! waarde wint (04-10). Zo is een config in lagen (image/cfg: default, bord,
+//! smaak) gewoon de aaneengeplakte tekst, en het bestand wint nog steeds van
+//! de bootargs (Go: `rk3566.BootParam`). Alleen QEMU, dat geen bootmedium
+//! heeft, krijgt voor Hop [`QEMU_CFG`] er nog vóór ([`NodeCfg::on_bank`],
+//! Go: `board_virt.go`). Zonder
 //! `hopos.apikey` is een node open (API en console, [`insecure`]): hij
 //! draait uit de doos, ook als zijn config niet aankomt; een sleutel sluit.
 //!
@@ -114,49 +115,49 @@ const CLUSTER_KEYS: [(&str, &str); 7] = [
     ("hopos.ntp", "HOPOS_NTP"),
 ];
 
-/// De config van een board als één tekst in het bestandsformaat: elk
-/// `hopos.*`-token van de bootargs `args` als eigen regel (een bootarg
-/// heeft geen spatie, dus het token is de hele waarde), dan `file`
-/// (`hopos.cfg`, "" zonder bootmedium). De laatste waarde wint, dus het
-/// bestand wint van de bootargs.
-#[must_use]
-pub fn text(file: &str, args: &str) -> String {
-    let mut out = String::new();
-    for tok in args.split_ascii_whitespace() {
-        if tok.starts_with("hopos.") {
-            out.push_str(tok);
-            out.push('\n');
-        }
-    }
-    out.push_str(file);
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out
-}
-
-/// De tekst van een `hopos.cfg`, gelezen met `fw::bootcfg`.
+/// De config van een node: `hopos.cfg` met de bootargs ervóór
+/// (`fw::bootcfg::layered`), en op QEMU de bank daar nog vóór. De laatste
+/// waarde wint; een herhaalde sleutel telt alle lagen.
 #[derive(Copy, Clone, Debug)]
 pub struct NodeCfg<'a> {
-    text: &'a str,
+    bank: &'a str,
+    args: &'a str,
+    file: &'a str,
 }
 
 impl<'a> NodeCfg<'a> {
     /// De config uit de tekst van een configbestand.
     #[must_use]
     pub const fn parse(text: &'a str) -> Self {
-        Self { text }
+        Self::new(text, "")
+    }
+
+    /// De config van een board: het bestand `file` (`Board::config`) en de
+    /// bootargs `args` (`Board::bootargs`).
+    #[must_use]
+    pub const fn new(file: &'a str, args: &'a str) -> Self {
+        Self {
+            bank: "",
+            args,
+            file,
+        }
+    }
+
+    /// Met `bank` ([`QEMU_CFG`]) onder de rest: alles wint ervan.
+    #[must_use]
+    pub const fn on_bank(self, bank: &'a str) -> Self {
+        Self { bank, ..self }
     }
 
     /// De laatste waarde van `key`, of "" (de enkelvoudige sleutel).
     #[must_use]
     pub fn one(&self, key: &'a str) -> &'a str {
-        bootcfg::get(self.text, key)
+        self.all(key).last().unwrap_or("")
     }
 
     /// Alle waarden van `key` (de herhaalde sleutel, `hopos.init[]`).
     fn all(&self, key: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-        bootcfg::all(self.text, key)
+        bootcfg::all(self.bank, key).chain(bootcfg::layered(self.file, self.args, key))
     }
 }
 
@@ -518,8 +519,9 @@ mod tests {
         assert!(!on("hopos.apikey=geheim\n"));
         assert!(!on("hopos.insecure=0\n"));
         // De bootargs vullen aan wat het bestand niet zegt.
-        assert!(on(&text("hopos.node=a\n", "hopos.console=1")));
-        assert!(!on(&text("hopos.console=off", "hopos.console=1")));
+        let on2 = |f, a| console_enabled(&NodeCfg::new(f, a));
+        assert!(on2("hopos.node=a\n", "hopos.console=1"));
+        assert!(!on2("hopos.console=off", "hopos.console=1"));
     }
 
     #[test]
@@ -542,12 +544,11 @@ mod tests {
     fn a_node_with_a_key_and_no_console_line_stays_closed() {
         // DE REGRESSIE (01-10): elk board kreeg de QEMU-config, dus Hop
         // insecure en 5555 open naast een sleutel, en de init-jobs weg.
-        let cfg = text(
+        let cfg = NodeCfg::new(
             "hopos.node=pi5-1\nhopos.apikey=s3cr3t\n\
              hopos.init[]={\"name\":\"welcome\"}\n",
             "console=ttyAMA0 hopos.stage=hop",
         );
-        let cfg = NodeCfg::parse(&cfg);
         assert!(!console_enabled(&cfg));
         let b = build(&cfg, &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_NODE"), Some("pi5-1"));
@@ -560,21 +561,13 @@ mod tests {
     fn the_file_wins_from_the_bootargs_and_the_bootargs_from_qemu() {
         // De Radxa: hopos.cfg in de initrd en een APPEND met dezelfde
         // sleutel; het bestand wint (Go: rk3566.BootParam).
-        let radxa = text("hopos.node=radxa-2", "hopos.node=radxa-1 hopos.replay=30");
-        assert_eq!(
-            radxa,
-            "hopos.node=radxa-1\nhopos.replay=30\nhopos.node=radxa-2\n"
-        );
-        let cfg = NodeCfg::parse(&radxa);
+        let cfg = NodeCfg::new("hopos.node=radxa-2", "hopos.node=radxa-1 hopos.replay=30");
         assert_eq!(cfg.one("hopos.node"), "radxa-2");
         assert_eq!(replay_after(&cfg), 30);
         // QEMU: QEMU_CFG vóór de bootargs, dus een tweede node heet anders.
-        let mut qemu = String::from(QEMU_CFG);
-        qemu.push_str(&text(
-            "",
-            "hopos.node=hopos-qemu-2 hopos.apikey=k root=/dev/vda",
-        ));
-        let b = build(&NodeCfg::parse(&qemu), &FACTS).unwrap();
+        let qemu = NodeCfg::new("", "hopos.node=hopos-qemu-2 hopos.apikey=k root=/dev/vda")
+            .on_bank(QEMU_CFG);
+        let b = build(&qemu, &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_NODE"), Some("hopos-qemu-2"));
         assert_eq!(b.get("HOPOS_APIKEY"), Some("k"));
         assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "QEMU blijft de bank");
@@ -651,12 +644,10 @@ mod tests {
         // De Pi: de rol en een naam in cmdline.txt, en een sleutel die het
         // venster ook zet.
         let args = "console=ttyAMA0 hopos.stage=hop hopos.node=pi4-keuken hopos.insecure=0";
-        let t = text(cfg, args);
         // Het hele venster lezen is hetzelfde als de config alleen (Go las
         // het venster als bestand): de padding is commentaar.
-        let whole = text(&window, args);
-        for c in [&t, &whole] {
-            let b = build(&NodeCfg::parse(c), &FACTS).unwrap();
+        for c in [NodeCfg::new(cfg, args), NodeCfg::new(&window, args)] {
+            let b = build(&c, &FACTS).unwrap();
             assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "het venster wint");
             assert_eq!(
                 b.get("HOPOS_NODE"),
@@ -669,27 +660,26 @@ mod tests {
                     .unwrap()
                     .contains(r#""name":"welcome""#)
             );
-            assert!(console_enabled(&NodeCfg::parse(c)));
-            assert_eq!(NodeCfg::parse(c).one("hopos.hop.sharegroup"), "system");
+            assert!(console_enabled(&c));
+            assert_eq!(c.one("hopos.hop.sharegroup"), "system");
         }
     }
 
     #[test]
     fn qemu_bootargs_add_the_s3_keys() {
-        let mut cfg = String::from(QEMU_CFG);
-        cfg.push_str(&text(
+        let cfg = NodeCfg::new(
             "",
             "hopos.stage=hop hopos.s3.endpoint=http://10.0.2.2:9000 hopos.s3.bucket=hop \
              hopos.s3.secret=geheim hopos.ntp=10.0.2.2:10123",
-        ));
-        let b = build(&NodeCfg::parse(&cfg), &FACTS).unwrap();
+        )
+        .on_bank(QEMU_CFG);
+        let b = build(&cfg, &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_S3_ENDPOINT"), Some("http://10.0.2.2:9000"));
         assert_eq!(b.get("HOPOS_S3_BUCKET"), Some("hop"));
         assert_eq!(b.get("HOPOS_S3_REGION"), None);
         assert_eq!(b.get("HOPOS_NTP"), Some("10.0.2.2:10123"));
         assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "QEMU_CFG stays");
         assert!(!b.redacted().contains("geheim"));
-        assert_eq!(text("", ""), "");
     }
 
     #[test]

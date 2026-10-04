@@ -37,7 +37,6 @@
 #[cfg(feature = "media")]
 mod on {
     use crate::KernConsole;
-    use alloc::string::String;
     use alloc::vec::Vec;
     use bounded::BoundedVec;
     use core::time::Duration;
@@ -171,15 +170,9 @@ mod on {
         }
     }
 
-    /// Eén bootparameter, of "" (de bron van het board: FDT-bootargs op
-    /// virt, `hopos.cfg` op de UEFI-boards).
-    fn param(key: &'static str) -> String {
-        crate::bench::bootparam(key)
-    }
-
     /// De maat van de arena: `hopos.codec=<MB>`, of die van het board.
     fn arena_mb() -> u64 {
-        match param("hopos.codec").as_str() {
+        match board::Board::boot_param(&crate::BOARD, "hopos.codec") {
             "" => hw::DEFAULT_ARENA_MB,
             v => match v.parse::<u64>() {
                 Ok(n) => n,

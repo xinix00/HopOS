@@ -139,8 +139,8 @@ pub trait Soc: 'static {
     fn nic_diag() {}
 }
 
-/// Het adres van een geldige DTB, 0 = geen.
-static DTB: AtomicU64 = AtomicU64::new(0);
+/// De DTB van deze boot.
+static DTB: board::dtb::Dtb = board::dtb::Dtb::new();
 /// Het bij boot gevonden DRAM (bytes, 0 = onbekend).
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal cores uit de DTB (of `hopos.cores`), 0 = onbekend.
@@ -156,27 +156,17 @@ static MAC: AtomicU64 = AtomicU64::new(0);
 /// Zonder DTB: vier cores (elke Pi 4 en Pi 5).
 const CORES_DEFAULT: usize = 4;
 
-/// De DTB op `pa` als er een geldige header staat, binnen de vast gemapte
-/// Normal-RAM (kern-RAM of laadvenster).
-fn dtb_at(pa: u64) -> Option<Fdt<'static>> {
-    let lo = map::KERN_BASE;
-    let hi = map::LOADER.base + map::LOADER.size;
-    if pa < lo || pa >= hi || !pa.is_multiple_of(8) {
-        return None;
-    }
-    let mut head = [0u8; 8];
-    dev::copy_out(&mut head, Pa(pa));
-    let total = fw::fdt::total_size(&head)?;
-    if pa.checked_add(total as u64)? > hi {
-        return None;
-    }
-    Fdt::new(arch::dtb_slice(pa, total)?).ok()
-}
+/// Waar de DTB mag liggen: de vast gemapte Normal-RAM, van de kern-RAM tot
+/// het eind van het laadvenster.
+const DTB_RAM: board::Region = board::Region {
+    base: Pa(map::KERN_BASE),
+    size: map::LOADER.base + map::LOADER.size - map::KERN_BASE,
+};
 
 /// De DTB van deze boot.
 #[must_use]
 pub fn fdt() -> Option<Fdt<'static>> {
-    dtb_at(DTB.load(Relaxed))
+    DTB.fdt()
 }
 
 /// Staat het device met deze `compatible` aan in de DTB? `None` = geen DTB
@@ -184,15 +174,6 @@ pub fn fdt() -> Option<Fdt<'static>> {
 #[must_use]
 pub fn device_enabled(compatible: &str) -> Option<bool> {
     fdt()?.enabled(compatible)
-}
-
-/// Eén `hopos.*`-sleutel: het venster in het image (`board::cfgwin`), dan
-/// de cmdline (cmdline.txt, door de firmware in /chosen/bootargs gezet);
-/// "" = niet gezet. Hetzelfde als `Board::boot_param`, voor wie het board
-/// niet in de hand heeft.
-#[must_use]
-pub fn boot_param(key: &'static str) -> &'static str {
-    board::cfgwin::param(key, fdt().and_then(|f| f.bootargs()).unwrap_or(""))
 }
 
 /// De Pi als board, geparametriseerd met zijn SoC.
@@ -285,10 +266,7 @@ impl<S: Soc> Raspi<S> {
 
     /// De staging uit /chosen/linux,initrd-* en de rol uit de cmdline.
     fn stage(&self, f: &Fdt<'static>) -> AbiRegion {
-        let role = board::stage::role_code(board::cfgwin::param(
-            "hopos.stage",
-            f.bootargs().unwrap_or(""),
-        ));
+        let role = board::stage::role_code(self.boot_param("hopos.stage"));
         slots::ROLE.store(role, Relaxed);
         let Some((start, end)) = f.initrd() else {
             cpu::println!("stage: no initramfs in the DTB, nothing staged");
@@ -435,7 +413,7 @@ impl<S: Soc> Board for Raspi<S> {
     /// de kaart, de pool, de staging en de mailbox. Vroeg: wat de kern
     /// straks vraagt, staat daarna in statics.
     fn discover(&self, dtb: u64) {
-        let Some(f) = dtb_at(dtb) else {
+        let Some(f) = DTB.find(dtb, DTB_RAM) else {
             cpu::println!(
                 "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (x0={dtb:#x}), no pool, no staging"
             );
@@ -443,12 +421,9 @@ impl<S: Soc> Board for Raspi<S> {
             self.hardware();
             return;
         };
-        DTB.store(dtb, Relaxed);
         MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
         let fw_cores = f.cpu_count().unwrap_or(0);
-        let want = board::cfgwin::param("hopos.cores", f.bootargs().unwrap_or(""))
-            .parse::<usize>()
-            .unwrap_or(0);
+        let want = self.boot_param("hopos.cores").parse::<usize>().unwrap_or(0);
         CORES.store(cfg::cores(fw_cores, want), Relaxed);
         cpu::println!(
             "fdt: {} bytes at {dtb:#x}, model {:?}, serial {:?}, bootargs {:?}",
@@ -611,7 +586,7 @@ impl<S: Soc> Board for Raspi<S> {
     /// core die `enable` riep) en de stop van de boot-core op ijzer vragen,
     /// en die zijn hier niet bewezen.
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        match boot_param("hopos.oscore") {
+        match self.boot_param("hopos.oscore") {
             "" | "0" | "small" | "mid" | "big" => (0, None),
             _ => (0, Some("the Pi keeps the OS on core 0 (GIC-400 SPI route)")),
         }

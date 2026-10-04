@@ -22,7 +22,8 @@
 //!
 //! Naast de traits staan [`heap`]: de allocator met een plafond die het
 //! board over zijn kern-RAM legt, [`stage`]: het image dat een lader
-//! vóór de boot neerlegde, en [`cfgwin`]: `hopos.cfg` in het kern-image.
+//! vóór de boot neerlegde, [`cfgwin`]: `hopos.cfg` in het kern-image, en
+//! [`dtb`]: de DTB van deze boot, één keer gevonden en bewaard.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -36,6 +37,7 @@
 )]
 
 pub mod cfgwin;
+pub mod dtb;
 pub mod heap;
 pub mod stage;
 
@@ -595,15 +597,11 @@ pub trait Board: Sync + Watchdog + Thermal + ClockKnob {
         ""
     }
 
-    /// Eén sleutel: eerst [`Board::config`], dan [`Board::bootargs`]; ""
-    /// als hij niet gezet is. Het bestand wint (Go: `rk3566.BootParam`).
+    /// Eén sleutel uit [`Board::config`] en [`Board::bootargs`]
+    /// (`fw::bootcfg::param`: het bestand wint); "" als hij niet gezet is.
+    /// De enige weg naar een sleutel, voor de kern en voor het board zelf.
     fn boot_param(&self, key: &'static str) -> &'static str {
-        let v = fw::bootcfg::get(self.config(), key);
-        if v.is_empty() {
-            fw::bootcfg::get_cmdline(self.bootargs(), key)
-        } else {
-            v
-        }
+        fw::bootcfg::param(self.config(), self.bootargs(), key)
     }
 
     /// De ABI-staart van een slot Normal write-back in de kernmap (Go:

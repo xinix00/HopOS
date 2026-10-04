@@ -383,13 +383,13 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     load::start(exec); // de meetlat per slot (docs/apps.md)
     gui::start_screen_status(exec); // de meetregels naast de bunny
 
-    // De config van de node: de tekst van het board (bench::cfg_text,
-    // kern::nodecfg; het venster in het image wint, board::cfgwin), en alleen op QEMU, dat geen bootmedium heeft, voor Hop
-    // de vaste bankconfig ervóór (de laatste waarde wint, dus de rest
-    // wint van de bank). Hier al, vóór het net: de console over
-    // TCP (conport.rs) kiest uit dezelfde config, en haar listener start
-    // zodra de lease er is, ook na een flip waarin Hop niet opnieuw wordt
-    // geplaatst.
+    // De config van de node: het bestand en de bootargs van het board
+    // (kern::nodecfg; het venster in het image wint, board::cfgwin), en
+    // alleen op QEMU, dat geen bootmedium heeft, voor Hop de vaste
+    // bankconfig eronder (de laatste waarde wint, dus de rest wint van de
+    // bank). Hier al, vóór het net: de console over TCP (conport.rs) kiest
+    // uit dezelfde config, en haar listener start zodra de lease er is, ook
+    // na een flip waarin Hop niet opnieuw wordt geplaatst.
     match board::cfgwin::state() {
         board::cfgwin::State::Config(n) => println!(
             "cfg: hopos.cfg from the window in the kernel image, {n} bytes HOPOS_CFG_WINDOW"
@@ -399,11 +399,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         ),
         board::cfgwin::State::Empty => {}
     }
-    let mut hop_cfg = bench::cfg_text();
+    let mut node_cfg = kern::nodecfg::NodeCfg::new(board.config(), board.bootargs());
     if Machine::NO_BOOT_MEDIUM && role == Ok(StagedRole::Hop) {
-        hop_cfg.insert_str(0, kern::nodecfg::QEMU_CFG);
+        node_cfg = node_cfg.on_bank(kern::nodecfg::QEMU_CFG);
     }
-    let node_cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));
     REPLAY_AT.store(kern::nodecfg::replay_after(&node_cfg), Relaxed);
     TICK_LOG.store(node_cfg.one("hopos.tick") == "1", Relaxed);
@@ -439,10 +438,10 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
     flip::start(exec, landing.is_some());
     // De env van een gestagede app (appspike op QEMU): `hopos.appenv`.
     let app_env = match role {
-        Ok(StagedRole::App) => slots::app_env(&bench::bootparam("hopos.appenv")),
+        Ok(StagedRole::App) => slots::app_env(board.boot_param("hopos.appenv")),
         _ => alloc::vec::Vec::new(),
     };
-    slots::start(exec, role, landing.map(|h| h.slots), app_env, hop_cfg);
+    slots::start(exec, role, landing.map(|h| h.slots), app_env, node_cfg);
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core

@@ -40,7 +40,6 @@ use dev::Pa;
 use driver_ns16550::Ns16550;
 use driver_virtioblk::VirtioBlk;
 use driver_virtionet::{IrqAck, VirtioNet};
-use fw::fdt::Fdt;
 use sync::{Local, Signal};
 
 /// De ns16550 van virt (byte-stride).
@@ -118,8 +117,8 @@ fn nic_ack() {
     }
 }
 
-/// Het adres van een geldige DTB, 0 = geen.
-static DTB: AtomicU64 = AtomicU64::new(0);
+/// De DTB van deze boot.
+static DTB: board::dtb::Dtb = board::dtb::Dtb::new();
 /// Het bij boot gevonden DRAM.
 static MEM_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Het aantal harts uit de FDT.
@@ -135,32 +134,11 @@ fn console_write(b: &[u8]) {
     UART.write_bytes(b);
 }
 
-/// De DTB op `pa` als er een geldige header staat, binnen de eerste 4 GB
-/// DRAM (QEMU legt hem bovenin het RAM).
-fn dtb_at(pa: u64) -> Option<Fdt<'static>> {
-    let dram = Region {
-        base: DRAM,
-        size: 1 << 32,
-    };
-    if pa == 0 || !dram.contains(Pa(pa)) || !pa.is_multiple_of(8) {
-        return None;
-    }
-    let mut head = [0u8; 8];
-    dev::copy_out(&mut head, Pa(pa));
-    let total = fw::fdt::total_size(&head)?;
-    if !dram.contains(Pa(pa).add(total as u64 - 1)) {
-        return None;
-    }
-    // SAFETY: `[pa, pa+total)` ligt in het DRAM (hierboven getoetst) en
-    // wordt door niemand beschreven: QEMU legt de DTB boven alles wat het
-    // plan uitdeelt (slots.rs), buiten de heap. Alleen lezen.
-    let blob = unsafe { core::slice::from_raw_parts(pa as usize as *const u8, total) };
-    Fdt::new(blob).ok()
-}
-
-fn fdt() -> Option<Fdt<'static>> {
-    dtb_at(DTB.load(Relaxed))
-}
+/// Waar QEMU de DTB legt: bovenin de eerste 4 GB DRAM.
+const DTB_RAM: Region = Region {
+    base: DRAM,
+    size: 1 << 32,
+};
 
 /// QEMU virt (riscv64) als board.
 pub struct QemuVirtRiscv;
@@ -352,13 +330,12 @@ impl Board for QemuVirtRiscv {
             ),
         }
         cpu::println!("{}", cpu::riscv::trng::WARNING);
-        let Some(f) = dtb_at(dtb) else {
+        let Some(f) = DTB.find(dtb, DTB_RAM) else {
             cpu::println!(
                 "WARNING HOPOS_RAM_CHECK_SKIPPED: no valid DTB (a1={dtb:#x}) - trusting the static layout"
             );
             return;
         };
-        DTB.store(dtb, Relaxed);
         MEM_TOTAL.store(f.mem_total().unwrap_or(0), Relaxed);
         CORES.store(f.cpu_count().unwrap_or(0), Relaxed);
         cpu::println!(
@@ -467,9 +444,7 @@ impl Board for QemuVirtRiscv {
     /// `hopos.oscore`-vraag wordt luid genegeerd: de verhuizing bestaat hier
     /// niet.
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        let asked = fdt()
-            .and_then(|f| f.bootargs())
-            .is_some_and(|a| a.contains("hopos.oscore="));
+        let asked = !self.boot_param("hopos.oscore").is_empty();
         (
             0,
             asked.then_some("the riscv64 kern stays on its boot hart"),
@@ -496,7 +471,7 @@ impl Board for QemuVirtRiscv {
 
     /// De FDT-bootargs (QEMU `-append`).
     fn bootargs(&self) -> &'static str {
-        fdt().and_then(|f| f.bootargs()).unwrap_or("")
+        DTB.fdt().and_then(|f| f.bootargs()).unwrap_or("")
     }
 
     /// Vindt en initialiseert de schijf (virtio-blk). Eén keer.

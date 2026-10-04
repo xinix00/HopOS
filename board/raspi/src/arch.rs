@@ -25,11 +25,6 @@ pub(crate) fn stage_slice(start: u64, len: u64) -> Option<&'static [u8]> {
     imp::slice(start, len)
 }
 
-/// De DTB als slice van `len` bytes op `pa`.
-pub(crate) fn dtb_slice(pa: u64, len: usize) -> Option<&'static [u8]> {
-    imp::slice(pa, len as u64)
-}
-
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 mod imp {
     use core::arch::asm;

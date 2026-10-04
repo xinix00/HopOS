@@ -26,6 +26,11 @@
 //! bord, de smaak, en een eigen bestand erachter) gewoon de aaneengeplakte
 //! tekst; een herhaalde sleutel (`hopos.init[]`) telt alle lagen.
 //!
+//! De node heeft twee bronnen, en hun volgorde staat hier één keer
+//! ([`layered`], [`param`]): eerst de `hopos.*`-tokens van de bootargs, dan
+//! het bestand. Het bestand wint dus van de bootargs (Go:
+//! `rk3566.BootParam`), en een herhaalde sleutel telt beide.
+//!
 //! Geen allocatie: de waarden zijn slices van de tekst.
 
 /// Alle waarden van `key` uit een configbestand, in bestandsvolgorde.
@@ -61,6 +66,23 @@ pub fn get<'a>(text: &'a str, key: &'a str) -> &'a str {
 #[must_use]
 pub fn get_cmdline<'a>(args: &'a str, key: &'a str) -> &'a str {
     cmdline(args, key).last().unwrap_or("")
+}
+
+/// Alle waarden van `key` uit de twee bronnen van een node: eerst de
+/// bootargs `args`, dan het configbestand `file`.
+pub fn layered<'a>(
+    file: &'a str,
+    args: &'a str,
+    key: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
+    cmdline(args, key).chain(all(file, key))
+}
+
+/// De laatste waarde van `key` uit [`layered`], of "": het bestand wint van
+/// de bootargs.
+#[must_use]
+pub fn param<'a>(file: &'a str, args: &'a str, key: &'a str) -> &'a str {
+    layered(file, args, key).last().unwrap_or("")
 }
 
 #[cfg(test)]
@@ -119,5 +141,21 @@ mod tests {
         assert_eq!(get_cmdline("hopos.x=a hopos.x=b", "hopos.x"), "b");
         // Lagen: een uitgecommentarieerde regel in een latere laag telt niet.
         assert_eq!(get("hopos.x=a\n# hopos.x=b\n", "hopos.x"), "a");
+    }
+
+    /// Het bestand wint van de bootargs; een herhaalde sleutel telt beide.
+    #[test]
+    fn the_file_wins_over_the_bootargs() {
+        let file = "hopos.stage=app\nhopos.cores=2\nhopos.init[]=b\n";
+        let args = "console=ttyAMA0 hopos.stage=hop hopos.oscore=big hopos.init[]=a";
+        assert_eq!(param(file, args, "hopos.stage"), "app");
+        assert_eq!(param(file, args, "hopos.oscore"), "big");
+        assert_eq!(param("", args, "hopos.stage"), "hop");
+        assert_eq!(param(file, "", "hopos.cores"), "2");
+        assert_eq!(param(file, args, "hopos.node"), "");
+        assert_eq!(
+            layered(file, args, "hopos.init[]").collect::<Vec<_>>(),
+            ["a", "b"]
+        );
     }
 }

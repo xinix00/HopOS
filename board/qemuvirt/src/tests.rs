@@ -4,9 +4,9 @@ use super::*;
 
 #[test]
 fn a_dtb_outside_the_kern_ram_is_refused() {
-    assert!(dtb_at(0).is_none());
-    assert!(dtb_at(0x0900_0000).is_none());
-    assert!(dtb_at(DMA.base.0).is_none());
+    let d = board::dtb::Dtb::new();
+    assert!(d.find(0x0900_0000, KERN_RAM).is_none());
+    assert!(d.find(DMA.base.0, KERN_RAM).is_none());
 }
 
 #[test]

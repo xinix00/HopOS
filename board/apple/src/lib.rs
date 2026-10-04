@@ -165,7 +165,7 @@ impl Apple {
     /// in slaap (tot seconden, RTKit): niet voor een lus.
     #[must_use]
     pub fn smc_temp_milli_c(&self) -> Option<i32> {
-        storage::temp_milli_c(self.config())
+        storage::temp_milli_c(self.boot_param("hopos.smc") == "1")
     }
 
     /// De temperatuur in de bootlog: één meting met `hopos.smc=1`, anders
@@ -174,8 +174,8 @@ impl Apple {
     /// RTKit-coprocessor die niemand meer pollt loopt vol (driver_smc
     /// `open`). Dat is op ijzer niet uitgesloten, dus blijft het één
     /// bewuste knop per installatie.
-    fn report_temp(&self, cfg: &str) {
-        if fw::bootcfg::get(cfg, "hopos.smc") != "1" {
+    fn report_temp(&self) {
+        if self.boot_param("hopos.smc") != "1" {
             println!(
                 "smc: no die temperature (hopos.smc=1 measures once at boot; the SMC answer is unproven on metal, 31-08) HOPOS_APPLE_SMC_OFF"
             );
@@ -380,7 +380,7 @@ impl Board for Apple {
                 "cfg: no hopos.cfg (an empty window: CFG= of image/apple-m4.sh or hop image; no loader) HOPOS_CFG_NONE"
             ),
         }
-        self.report_temp(cfg);
+        self.report_temp();
         serror_check("the temperature probe (SMC)");
     }
 
@@ -440,7 +440,7 @@ impl Board for Apple {
     /// `discover`, want pas op de OS-core komen de regels op 5555, en de
     /// tune is precies wat op ijzer bewezen moet worden (01-10).
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
-        let ps = fw::bootcfg::get(self.config(), "hopos.pstate");
+        let ps = self.boot_param("hopos.pstate");
         match wdt::pstate_targets(ps) {
             Some(t) => wdt::pstate_tune(t, false, &serror_check),
             None => wdt::pstate_tune(wdt::PS_DEFAULT, true, &serror_check),
@@ -527,7 +527,7 @@ impl Board for Apple {
                 return Err(Error::Nic("no link"));
             }
         }
-        wire_nic(self.config(), &mut nic);
+        wire_nic(self.boot_param("hopos.nicirq"), &mut nic);
         NIC_CLAIMED.store(true, Relaxed);
         Ok(Some(nic))
     }
@@ -549,8 +549,12 @@ impl Board for Apple {
     /// opnieuw) en de voorproef van de kooien zakt op de timer-beurt
     /// (`HOPOS_APPLE_PREFLIGHT_FAIL`): de verhuizing kost de kooien, luid.
     fn os_core(&self) -> (usize, Option<&'static str>) {
-        let v = fw::bootcfg::get(self.config(), "hopos.oscore");
-        board::os_core(v, self.cores(), |c| self.core_class(c), self.this_core())
+        board::os_core(
+            self.boot_param("hopos.oscore"),
+            self.cores(),
+            |c| self.core_class(c),
+            self.this_core(),
+        )
     }
 
     /// De kick van de OS-core voor de rotatie van `cpu::el2`: de fast IPI
@@ -575,7 +579,7 @@ impl Board for Apple {
 
     /// De schijf: de ANS-NVMe, met het schrijfvenster uit de GPT.
     fn probe_disk(&self) -> Result<Option<storage::Disk>, Error> {
-        storage::probe_disk(self.config())
+        storage::probe_disk(self.boot_param("hopos.disk") == "off")
     }
 
     fn map_tail_normal(&self, pa: u64, size: u64) -> Option<Result<(), board::TailError>> {
@@ -595,8 +599,7 @@ impl Board for Apple {
 /// haar nam op 18-09 de node mee (Go bundel 18). Auto is het blok van de
 /// poort uit de ADT plus INTA (`pcie::INTA`, gemeten 19-09: 1249 + 4 =
 /// 1253). Komt de lijn niet aan, dan pollt de pomp zoals voorheen.
-fn wire_nic(cfg: &str, nic: &mut Tg3) {
-    let v = fw::bootcfg::get(cfg, "hopos.nicirq");
+fn wire_nic(v: &str, nic: &mut Tg3) {
     let base = pcie::port_irq_base();
     let line = match irq::NicIrq::parse(v) {
         Some(irq::NicIrq::Off) => {

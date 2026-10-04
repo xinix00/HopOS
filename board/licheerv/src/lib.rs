@@ -153,14 +153,6 @@ fn console_write(b: &[u8]) {
     UART.write_bytes(b);
 }
 
-/// De laatste waarde van een boot-sleutel uit `hopos.cfg`, het venster in
-/// het image (`board::cfgwin`); "" als hij er niet is. De FSBL geeft geen DTB en
-/// geen bootargs, dus dit is het enige kanaal.
-#[must_use]
-pub fn boot_param(key: &'static str) -> &'static str {
-    fw::bootcfg::get(board::cfgwin::text(), key)
-}
-
 /// Wacht `us` microseconden op de TIME-CSR.
 fn wait_us(us: u64) {
     dev::delay(cpu::riscv::idle::now, us.saturating_mul(1000));
@@ -284,7 +276,10 @@ impl LicheeRv {
     /// (`net::nodemac`), allebei uit het config-venster; zonder beide het
     /// ingebouwde adres, luid.
     fn node_mac() -> Mac {
-        let (m, src) = net::nodemac::identity(boot_param("hopos.mac"), boot_param("hopos.node"));
+        let (m, src) = net::nodemac::identity(
+            LicheeRv.boot_param("hopos.mac"),
+            LicheeRv.boot_param("hopos.node"),
+        );
         if src == net::nodemac::Source::Fallback {
             cpu::println!(
                 "net: WARNING no hopos.mac and no hopos.node: the built-in MAC; a second LicheeRV on this LAN will collide HOPOS_MAC_FIXED"

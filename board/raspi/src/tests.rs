@@ -155,10 +155,10 @@ fn cores_and_mac() {
 
 #[test]
 fn a_dtb_outside_the_mapped_ram_is_refused() {
-    assert!(dtb_at(0).is_none());
-    assert!(dtb_at(0x7_0000).is_none());
-    assert!(dtb_at(map::DEVICE_WINDOW.base).is_none());
-    assert!(dtb_at(map::DTB_PA + 3).is_none());
+    let d = board::dtb::Dtb::new();
+    assert!(d.find(0x7_0000, DTB_RAM).is_none());
+    assert!(d.find(map::DEVICE_WINDOW.base, DTB_RAM).is_none());
+    assert!(DTB_RAM.contains(Pa(map::DTB_PA)));
 }
 
 #[test]

@@ -31,6 +31,7 @@ use crate::Disk;
 use alloc::string::String;
 use alloc::vec::Vec;
 use blkdev::{AsyncBlockDevice, BlockIo, LBA_SIZE, Op, Paced, Queue, Spin, block_on};
+use board::Board;
 use core::sync::atomic::Ordering::Relaxed;
 use core::task::Poll;
 use core::time::Duration;
@@ -64,28 +65,12 @@ const QUEUE_DEPTH: usize = kern::rpc::FS_DEPTH;
 /// schaalt.
 const QUEUE_DEPTHS: [usize; 3] = [1, 4, QUEUE_DEPTH];
 
-/// Eén bootparameter: de laatste waarde van `key` in [`cfg_text`], of "" als
-/// hij niet gezet is.
-pub(crate) fn bootparam(key: &'static str) -> String {
-    String::from(fw::bootcfg::get(&cfg_text(), key))
-}
-
-/// De config van het board als één tekst (`kern::nodecfg::text`):
-/// `hopos.cfg` van het bootmedium (`Board::config`: het venster in het
-/// image, anders de ESP, de initrd of de loader) en de `hopos.*`-tokens van
-/// de bootargs (`Board::bootargs`: QEMU `-append`, de `cmdline.txt` van de
-/// Pi, de APPEND-regel van de Radxa), per board wat het heeft.
-pub(crate) fn cfg_text() -> String {
-    use board::Board;
-    kern::nodecfg::text(crate::BOARD.config(), crate::BOARD.bootargs())
-}
-
 /// Start wat de bootparameters vragen: de schijf-bench (synchroon, nu, op
 /// de geprobede schijf `disk`) en de idlestat-taak. Geeft de schijf terug
 /// voor `storage::start`: de bench leent hem alleen.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(exec: &'static Executor, mut disk: Option<Disk>) -> Option<Disk> {
-    let idle = bootparam("hopos.idlestat");
+    let idle = crate::BOARD.boot_param("hopos.idlestat");
     if !idle.is_empty() && idle != "0" {
         // `1` is elke seconde; een ander getal is de periode in seconden.
         let every = idle.parse::<u64>().unwrap_or(1).clamp(1, 3600);
@@ -103,7 +88,7 @@ pub(crate) fn start(exec: &'static Executor, mut disk: Option<Disk>) -> Option<D
             Err(_) => println!("bench: wdtest not spawned HOPOS_WDTEST_FAIL"),
         }
     }
-    if cfg!(feature = "nvmebench") || bootparam("hopos.nvmebench") == "1" {
+    if cfg!(feature = "nvmebench") || crate::BOARD.boot_param("hopos.nvmebench") == "1" {
         match disk.as_mut() {
             Some(d) => bench_disk(exec, d),
             None => println!("nvme bench: no disk on this board, skipped HOPOS_NVMEBENCH_NONE"),
