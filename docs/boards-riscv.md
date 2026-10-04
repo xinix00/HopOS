@@ -388,7 +388,8 @@ hop --agent <node>:8080 flip http://<mac>:8000/hopos-licheerv.flip $(cat target/
 Zonder `CFG=` krijgt de nieuwe kern het config-venster van de draaiende
 (`HOPOS_FLIP_CFG`). Een kern van vóór 04-10 droeg een eigen venster
 (`HOPOS.CFG.WINDOW`) en geeft het nieuwe niets mee: flip daarvandaan met
-`CFG=image/cfg/hop-config-licheerv.cfg` (of je eigen). Op de console (TCP 5555 of de UART), in volgorde:
+`CFG="image/cfg/default.cfg image/cfg/licheerv.cfg image/cfg/headless.cfg"`
+(of je eigen). Op de console (TCP 5555 of de UART), in volgorde:
 `HOP_FLIP_COLD_STOP`, `HOPOS_FLIP_COLD_ASKED`, `HOPOS_FLIP_CFG`,
 `HOPOS_FLIP_STAGED ... staged at 0x86900000, cold`, `HOPOS_FLIP_COLD
 stopped=N cores_off=1` (de C906L in reset), `HOPOS_FLIP_JUMP gen=G`, dan de

@@ -13,9 +13,12 @@
 #                                            FAT-bootpartitie van een kaart
 #                                            die er al een heeft (de snelle
 #                                            iteratie)
-#   CFG=~/lrv.cfg image/licheerv-agent.sh  → een andere hopos.cfg in het
-#                                            venster van het image (standaard
-#                                            image/cfg/hop-config-licheerv.cfg;
+#   CFG="a.cfg b.cfg" image/licheerv-agent.sh
+#                                          → een andere hopos.cfg in lagen in
+#                                            het venster van het image, de
+#                                            laatste waarde wint (standaard
+#                                            image/cfg/default.cfg,
+#                                            licheerv.cfg en headless.cfg;
 #                                            CFG= zonder pad: een leeg venster)
 #   STAGE=/pad/hop.elf image/licheerv-agent.sh
 #                                          → met die ELF in de kern gebakken
@@ -122,12 +125,15 @@ ELF="$DIR/target/$TARGET/release/hopos"
 ENTRY="$(python3 -c 'import struct,sys; print(hex(struct.unpack_from("<Q", open(sys.argv[1],"rb").read(32), 24)[0]))' "$ELF")"
 [ "$ENTRY" = "$RUNADDR" ] || { echo "WEIGER: entry $ENTRY is niet RUNADDR $RUNADDR (linkscript?)" >&2; exit 1; }
 "$OBJCOPY" -O binary "$ELF" "$OUT/monitor.bin"
-CFG="${CFG-$DIR/image/cfg/hop-config-licheerv.cfg}"
+CFG="${CFG-$DIR/image/cfg/default.cfg $DIR/image/cfg/licheerv.cfg $DIR/image/cfg/headless.cfg}"
 if [ -n "$CFG" ]; then
-	[ -f "$CFG" ] || { echo "config ontbreekt: $CFG" >&2; exit 1; }
+	for f in $CFG; do
+		[ -f "$f" ] || { echo "config ontbreekt: $f" >&2; exit 1; }
+	done
 	# Het venster van elke kern (board/src/cfgwin.rs): precies één, en de
 	# tekst moet passen en UTF-8 zijn, anders weigert image/hopcfg.py.
-	python3 "$DIR/image/hopcfg.py" set "$OUT/monitor.bin" "$CFG"
+	# shellcheck disable=SC2086 # CFG is een lijst bestanden
+	python3 "$DIR/image/hopcfg.py" set "$OUT/monitor.bin" $CFG
 else
 	echo "cfg: none (CFG=pad): the node boots on its defaults, HOPOS_MAC_FIXED" >&2
 fi

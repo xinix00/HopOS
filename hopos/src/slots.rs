@@ -658,7 +658,7 @@ async fn place_hop(
             return;
         }
     };
-    let at = match hop_placement(&plan) {
+    let at = match hop_placement(&plan, &cfg) {
         Ok(a) => a,
         Err(e) => {
             println!("slots: Hop placement: {e}, Hop not started HOPOS_HOP_FAIL");
@@ -688,11 +688,12 @@ async fn place_hop(
     let part = st.and_then(|s| s.partition).unwrap_or_default();
     let cpu = abi::layout::Core::new(core).map_or(core, |c| plan.phys_core(c));
     println!(
-        "HOPOS_HOP_START slot={slot} core={core} cpu={cpu} entry={entry:#x} part={:#x}+{:#x} image={} env={}",
+        "HOPOS_HOP_START slot={slot} core={core} cpu={cpu} entry={entry:#x} part={:#x}+{:#x} image={} env={} class={}",
         part.base,
         part.size,
         img.len(),
-        env.len()
+        env.len(),
+        crate::BOARD.core_class(cpu)
     );
     for port in [HOP_PORT, HOP_PORT.saturating_add(1000)] {
         match crate::net::publish(slot.get(), port).await {
@@ -751,18 +752,41 @@ async fn wait_uplink(exec: &'static Executor) -> Option<core::net::Ipv4Addr> {
     }
 }
 
-/// `Placement::hop`: sharegroup `hop`, die de OS-core met de kern deelt
-/// als het board dat wil ([`os_pool`]), en anders een eigen app-core. De
-/// klasse van die core koos de bootparameter (`hopos.oscore`), niet deze
-/// plaatsing.
-fn hop_placement(plan: &abi::layout::Plan) -> kern::Result<Placement> {
-    let at = Placement::hop()?;
+/// `Placement::hop`: de sharegroup van Hop, op de OS-core met de kern als
+/// die groep `system` is (de klasse van die core koos `hopos.oscore`), en
+/// anders een eigen app-core, met `hopos.hop.core-class` als voorkeur voor
+/// de eerste core van de groep (`Placement::prefer`).
+fn hop_placement(
+    plan: &abi::layout::Plan,
+    cfg: &kern::nodecfg::NodeCfg<'_>,
+) -> kern::Result<Placement> {
+    let mut at = Placement::hop()?;
+    let class = kern::nodecfg::hop_core_class(cfg);
+    let want = cfg.one("hopos.hop.core-class");
     if hop_on_os() {
         println!(
             "slots: Hop shares the OS core (cpu {}) with the kern, {} app core(s) stay free HOPOS_HOP_OS_CORE",
             plan.os_core(),
             plan.app_cores()
         );
+        if !want.is_empty() {
+            println!(
+                "slots: hopos.hop.core-class={want} not used: Hop is on the OS core (hopos.oscore picks it) HOPOS_HOP_CLASS"
+            );
+        }
+        return Ok(at);
+    }
+    match class {
+        Ok(Some(c)) => {
+            at.prefer = Some(c);
+            println!(
+                "slots: Hop prefers a {want} core for his group (hopos.hop.core-class) HOPOS_HOP_CLASS"
+            );
+        }
+        Ok(None) => {}
+        Err(v) => println!(
+            "slots: hopos.hop.core-class={v} is not small, mid or big, ignored HOPOS_HOP_CLASS"
+        ),
     }
     Ok(at)
 }

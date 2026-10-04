@@ -15,11 +15,12 @@
 #                                    overlays/bcm2712d0.dtbo liggen (standaard
 #                                    image/firmware/rpi5; herkomst in de
 #                                    LEESMIJ.txt daar)
-#   CFG=pad image/rpi5.sh            de config van de node (standaard
-#                                    image/cfg/hop-config-headless.cfg; met
-#                                    GUI=1 hoort hop-config-headfull.cfg
-#                                    erbij), in het venster van hop-agent5.img
-#                                    (board/src/cfgwin.rs, image/hopcfg.py)
+#   CFG="a.cfg b.cfg" image/rpi5.sh  de config van de node in lagen, in die
+#                                    volgorde (standaard image/cfg/default.cfg,
+#                                    rpi5.cfg en headless.cfg, met GUI=1
+#                                    headfull.cfg), in het venster van
+#                                    hop-agent5.img (board/src/cfgwin.rs,
+#                                    image/hopcfg.py); de laatste waarde wint
 #   EXTRA="hopos.node=..." image/... meer tokens in cmdline.txt; een
 #                                    sleutel die ook in het venster staat,
 #                                    neemt het venster
@@ -114,12 +115,15 @@ EOF
 # De config: in het venster van de kern (board/src/cfgwin.rs), zoals op
 # elk board; de kern leest eerst het venster en dan /chosen/bootargs
 # (cmdline.txt: alleen de rol en EXTRA).
-CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
-[ -f "$CFG" ] || {
-	echo "rpi5: CFG=$CFG does not exist" >&2
-	exit 1
-}
-python3 "$DIR/image/hopcfg.py" set "$OUT/hop-agent5.img" "$CFG"
+CFG="${CFG:-$DIR/image/cfg/default.cfg $DIR/image/cfg/rpi5.cfg $DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
+for f in $CFG; do
+	[ -f "$f" ] || {
+		echo "rpi5: CFG: $f does not exist" >&2
+		exit 1
+	}
+done
+# shellcheck disable=SC2086 # CFG is een lijst bestanden
+python3 "$DIR/image/hopcfg.py" set "$OUT/hop-agent5.img" $CFG
 echo "hopos.stage=${ROLE:-hop}${EXTRA:+ $EXTRA}" >"$OUT/cmdline.txt"
 
 echo "rpi5: $OUT/hop-agent5.img ($(wc -c <"$OUT/hop-agent5.img" | tr -d ' ') bytes), config.txt, cmdline.txt${IMAGE:+, hop.elf ($SIZE bytes, role $ROLE)}" >&2

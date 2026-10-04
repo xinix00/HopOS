@@ -91,8 +91,10 @@ gui-smaak op de boards met een framebuffer ([gui.md](gui.md)).
 
 De firmware van de boards staat in `image/firmware/<board>/` (de Pi's, de
 boot-keten van de Radxa, de donor van de LicheeRV; herkomst en sha256 in de
-`LEESMIJ.txt` ernaast). Elk image-script neemt standaard de gedeelde config
-`image/cfg/hop-config-headless.cfg`; `CFG=` vervangt hem. Hij komt op elk
+`LEESMIJ.txt` ernaast). Elk image-script neemt standaard de config in drie
+lagen uit `image/cfg` (`default.cfg`, `<board>.cfg`, `headless.cfg` of met
+`GUI=1` `headfull.cfg`; de laatste waarde wint); `CFG=` met een lijst
+bestanden vervangt ze. Hij komt op elk
 board in het venster van de kern (`image/hopcfg.py`; [boards.md](boards.md),
 "Het config-venster"), en `hop image` van de hop-repo zet er een andere in,
 in een image, een bundel of op een kaart. De kaarten en sticks bouwt

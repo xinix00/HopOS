@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """hopcfg: hopos.cfg in het config-venster van een kern-image zetten of lezen.
 
-    python3 image/hopcfg.py set  <bestand> <cfg>   de config in het venster
-    python3 image/hopcfg.py show <bestand>         de config uit het venster
+    python3 image/hopcfg.py set  <bestand> <cfg>...  de config in het venster
+    python3 image/hopcfg.py show <bestand>           de config uit het venster
+
+Meer dan één <cfg>: de lagen, aaneengeplakt in die volgorde (image/cfg:
+default.cfg, <bord>.cfg, headless.cfg of headfull.cfg, en desgewenst een
+eigen bestand erachter); de kern leest de laatste waarde van een sleutel.
 
 <bestand> is alles wat de kern draagt: de kern-ELF, kernel8.img, het
 arm64-Image van de Radxa, BOOTAA64.EFI, het bootobject van de M4,
@@ -86,12 +90,19 @@ def main():
         size, h, n = head(b, at)
         print(f"hopcfg: window of {size} bytes at {at:#x}, {n} bytes of config", file=sys.stderr)
         sys.stdout.buffer.write(b[at + h:at + h + n])
-    elif len(sys.argv) == 4 and sys.argv[1] == "set":
-        path, cfg = sys.argv[2], sys.argv[3]
+    elif len(sys.argv) >= 4 and sys.argv[1] == "set":
+        path, cfgs = sys.argv[2], sys.argv[3:]
         b = bytearray(open(path, "rb").read())
         at = one(b, path)
         size = head(b, at)[0]
-        w = window(open(cfg, "rb").read(), size)
+        text = b""
+        for c in cfgs:
+            layer = open(c, "rb").read()
+            if layer and not layer.endswith(b"\n"):
+                layer += b"\n"
+            text += layer
+        w = window(text, size)
+        cfg = " + ".join(cfgs)
         b[at:at + size] = w
         open(path, "r+b").write(b)
         n = head(w, 0)[2]

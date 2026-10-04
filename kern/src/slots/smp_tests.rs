@@ -20,6 +20,7 @@ fn group(name: &str) -> Placement {
         pool_cores: 1,
         cores: 1,
         class: None,
+        prefer: None,
     }
 }
 

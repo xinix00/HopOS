@@ -45,10 +45,21 @@ keek elke 1 tot 5 ms of er al iets lag.
 
 ## Welke core
 
-Waar Hop zelf woont zegt de config: `hopos.hop.sharegroup=system` (de
+Waar Hop zelf woont zegt de config (de bordlaag in `image/cfg`,
+[boards.md](boards.md), "De config"): `hopos.hop.sharegroup=system` (de
 OS-core naast de kern, de standaard waar de kern zijn core deelt) of een
-andere naam (een eigen app-core; jobs met dezelfde tag delen hem). Hop
-krijgt die naam als `HOPOS_HOP_GROUP` en telt haar vrij in zijn planning.
+andere naam, `hop` in de bordlagen (een eigen app-core; jobs met
+`"tags":{"sharegroup":"hop"}` delen hem en krijgen op last hun deel van de
+beurten, zoals in elke sharegroup). Hop krijgt die naam als
+`HOPOS_HOP_GROUP` en telt haar vrij in zijn planning. Met een eigen groep
+kiest `hopos.hop.core-class=small|mid|big` de soort core: de eerste core
+van de groep komt uit die klasse als er een vrij is, anders uit elke
+(`Placement::prefer` in `kern/src/pool.rs`; dezelfde namen als
+`tags.core-class` van een job). Op de M4 is small een E-core, op de O6N
+een A520; borden zonder klassen (de Pi's, de Radxa, de Altra, de LicheeRV)
+nemen de eerste vrije core, en op de OS-core (`system`) kiest
+`hopos.oscore` de core. Op de console: `HOPOS_HOP_GROUP`,
+`HOPOS_HOP_CLASS` en `class=` achteraan `HOPOS_HOP_START`.
 
 Welke core een slot krijgt, kiest de kern (`kern/src/pool.rs`): zonder
 `sharegroup` een eigen core (of `cores` aaneengesloten), met een

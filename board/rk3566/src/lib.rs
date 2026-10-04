@@ -353,7 +353,7 @@ pub fn cfg_text() -> &'static str {
     )
 }
 
-/// De eerste waarde van een boot-sleutel: eerst uit `hopos.cfg`, dan uit
+/// De waarde van een boot-sleutel: eerst uit `hopos.cfg`, dan uit
 /// de bootargs (Go: `rk3566.BootParam`).
 #[must_use]
 pub fn boot_param(key: &'static str) -> &'static str {

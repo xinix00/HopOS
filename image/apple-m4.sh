@@ -4,10 +4,12 @@
 # `kmutil configure-boot --raw --entry-point 2048`.
 #
 #   image/apple-m4.sh                       → target/apple-m4/hopos-apple.img
-#   CFG=hopos-m4.cfg image/apple-m4.sh      een andere hopos.cfg in het
-#                                           venster van het image (standaard
-#                                           image/cfg/hop-config-headless.cfg,
-#                                           CFG= zonder pad: een leeg venster)
+#   CFG="a.cfg b.cfg" image/apple-m4.sh     een andere hopos.cfg in lagen in
+#                                           het venster van het image, de
+#                                           laatste waarde wint (standaard
+#                                           image/cfg/default.cfg, apple.cfg
+#                                           en headless.cfg; CFG= zonder pad:
+#                                           een leeg venster)
 #   APP=appspike image/apple-m4.sh          + een app-ELF voor de staging
 #   APP=hop image/apple-m4.sh               + Hop (../hop/hop, rol hop)
 #   image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img [s]
@@ -77,11 +79,13 @@ fi
 # De toets: het parameterblok op 0x100 ("HOPASTUB", doel, grootte, entry)
 # moet kloppen met het ELF, de stub-ingang op 0x800 moet code zijn, en
 # 0xF000 (de plek van de loader) leeg: de linker legt er niets, head.rs.
-CFG="${CFG-$DIR/image/cfg/hop-config-headless.cfg}"
-if [ -n "$CFG" ] && [ ! -f "$CFG" ]; then
-	echo "apple-m4: CFG=$CFG does not exist" >&2
-	exit 1
-fi
+CFG="${CFG-$DIR/image/cfg/default.cfg $DIR/image/cfg/apple.cfg $DIR/image/cfg/headless.cfg}"
+for f in $CFG; do
+	[ -f "$f" ] || {
+		echo "apple-m4: CFG: $f does not exist" >&2
+		exit 1
+	}
+done
 if [ "${APP-}" = hop ] && [ -z "$CFG" ]; then
 	echo "apple-m4: WARNING: APP=hop without CFG= bakes no hopos.cfg into the image (Go 25-09: a node without config runs with a random name and an open API)" >&2
 fi
@@ -114,7 +118,8 @@ if not ok:
 print("apple-m4: stub ok: %d bytes, target %#x, entry %#x" % (size, dst, entry), file=sys.stderr)
 PY
 if [ -n "$CFG" ]; then
-	python3 "$DIR/image/hopcfg.py" set "$IMG" "$CFG"
+	# shellcheck disable=SC2086 # CFG is een lijst bestanden
+	python3 "$DIR/image/hopcfg.py" set "$IMG" $CFG
 fi
 
 # Het image voor de staging (optioneel): de loader legt het in de

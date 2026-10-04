@@ -12,12 +12,12 @@
 #   APP= image/...                       zonder image (HOPOS_SLOT_NONE)
 #   HOP_DIR=pad image/...                de hop-repo (standaard ../hop/hop)
 #   ROLE=hop|app image/...               de rol van het image (hopos.stage)
-#   CFG=pad image/...                    de config van de node (standaard
-#                                        image/cfg/hop-config-headless.cfg;
-#                                        met GUI=1 hoort
-#                                        hop-config-headfull.cfg erbij), in
-#                                        het venster van hopos.img
-#                                        (board/src/cfgwin.rs)
+#   CFG="a.cfg b.cfg" image/...          de config van de node in lagen
+#                                        (standaard image/cfg/default.cfg,
+#                                        radxa.cfg en headless.cfg, met
+#                                        GUI=1 headfull.cfg), in het venster
+#                                        van hopos.img (board/src/cfgwin.rs);
+#                                        de laatste waarde wint
 #   NODE=radxa-2 image/...               een andere hopos.node in de APPEND
 #                                        (ook de bron van het MAC-adres)
 #   RADXA_DONOR=pad image/...            een eigen donor-boot-blok (standaard
@@ -116,9 +116,12 @@ print(f"hopos.img: {len(img)} bytes, image_size {mem_end - IMAGE_BASE:#x}, entry
 PYEOF
 # De config in het venster van de kern (board/src/cfgwin.rs), zoals op elk
 # board: hij wint van hopos.cfg in de initrd en van de APPEND.
-CFG="${CFG:-$DIR/image/cfg/hop-config-headless.cfg}"
-[ -f "$CFG" ] || { echo "FOUT: CFG=$CFG bestaat niet" >&2; exit 1; }
-python3 "$DIR/image/hopcfg.py" set "$OUT/hopos.img" "$CFG"
+CFG="${CFG:-$DIR/image/cfg/default.cfg $DIR/image/cfg/radxa.cfg $DIR/image/cfg/$([ "${GUI:-0}" = 1 ] && echo headfull || echo headless).cfg}"
+for f in $CFG; do
+	[ -f "$f" ] || { echo "FOUT: CFG: $f bestaat niet" >&2; exit 1; }
+done
+# shellcheck disable=SC2086 # CFG is een lijst bestanden
+python3 "$DIR/image/hopcfg.py" set "$OUT/hopos.img" $CFG
 
 # 3. Het image van de bewoner: dezelfde keuzes als image/rpi4.sh. Gestript
 #    (Hop 19 MB naar 1,5 MB, 30-09): de kern haalt de hele initrd naar zijn
@@ -311,6 +314,6 @@ python3 "$DIR/image/hopcfg.py" show "$CARD" >"$RB/window.cfg"
 same "$RB/want.cfg" "$RB/window.cfg"
 
 echo "" >&2
-echo "$CARD klaar (dd-baar): hopos.img (config $(basename "$CFG") in het venster) + hopos.ird${IMAGE:+ (hop.elf, rol $ROLE)} + extlinux/extlinux.conf" >&2
+echo "$CARD klaar (dd-baar): hopos.img (config $CFG in het venster) + hopos.ird${IMAGE:+ (hop.elf, rol $ROLE)} + extlinux/extlinux.conf" >&2
 echo "flash:   diskutil unmountDisk /dev/diskN && sudo dd if=$CARD of=/dev/rdiskN bs=4m" >&2
 echo "console: 1500000 8N1 op de 40-pins header (pin 8 TX, 10 RX, 6 GND)" >&2

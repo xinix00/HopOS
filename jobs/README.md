@@ -44,7 +44,8 @@ https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64.e
 `tools/release.sh` bouwt ze (appspike, welcome, bench, display, vitals,
 cloudflared-lean, syncprobe en decode voor arm64; appspike en welcome ook
 voor riscv64) en zegt hoe ze in `apps` komen; de URL verschuift dus niet
-per versie, en de gedeelde configs (`image/cfg`) starten welcome van daar.
+per versie, en de headfull-laag van de config (`image/cfg/headfull.cfg`)
+start welcome van daar.
 De Go-apps (`go/apps-release.sh`, [go-apps.md](../docs/go-apps.md)) staan
 in dezelfde release als `<app>-<arch>-tamago.elf`; `job-cloudflared.json`
 wijst naar die vorm.

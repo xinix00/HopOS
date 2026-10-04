@@ -13,13 +13,15 @@
 #   APP=appspike image/uefi-run.sh    een app uit deze werkruimte als
 #                                     hopos-stage.elf op de ESP, rol app
 #   APP=/pad/elf ROLE=app|hop ...     een kant-en-klare ELF
-#   CFG=pad image/uefi-run.sh         hopos.cfg in het venster van
-#                                     BOOTAA64.EFI (standaard op o6n en altra
-#                                     image/cfg/hop-config-headless.cfg, met
-#                                     GUI=1 of MEDIA=1 hoort
-#                                     hop-config-headfull.cfg erbij; op QEMU
-#                                     een leeg venster en een minimale
-#                                     hopos.cfg op de ESP zonder sleutels)
+#   CFG="a.cfg b.cfg" image/uefi-run.sh
+#                                     hopos.cfg in lagen in het venster van
+#                                     BOOTAA64.EFI, de laatste waarde wint
+#                                     (standaard op o6n en altra
+#                                     image/cfg/default.cfg, <bord>.cfg en
+#                                     headless.cfg, met GUI=1 of MEDIA=1
+#                                     headfull.cfg; op QEMU een leeg venster
+#                                     en een minimale hopos.cfg op de ESP
+#                                     zonder sleutels)
 #   GUI=1 image/uefi-run.sh           de gui-smaak (`--features gui`, docs/gui.md):
 #                                     de console op de GOP; QEMU krijgt
 #                                     `-device ramfb` (EDK2 maakt er een GOP van)
@@ -182,11 +184,16 @@ fi
 # alleen de rol: de terugval van de stub (de QEMU-toetsen rekenen op een
 # dichte API, dus geen sleutels).
 if [ -z "${CFG:-}" ] && [ "$BOARD" != uefi ]; then
-	CFG="$DIR/image/cfg/hop-config-headless.cfg"
+	FLAVOR=headless
+	if [ "${GUI:-0}" = 1 ] || [ "${MEDIA:-0}" = 1 ]; then FLAVOR=headfull; fi
+	CFG="$DIR/image/cfg/default.cfg $DIR/image/cfg/$BOARD.cfg $DIR/image/cfg/$FLAVOR.cfg"
 fi
 if [ -n "${CFG:-}" ]; then
-	[ -f "$CFG" ] || { echo "uefi-run: CFG=$CFG does not exist" >&2; exit 1; }
-	grep -v '^hopos.stage=' "$CFG" >"$TDIR/hopos.cfg" || true
+	for f in $CFG; do
+		[ -f "$f" ] || { echo "uefi-run: CFG: $f does not exist" >&2; exit 1; }
+	done
+	# shellcheck disable=SC2086 # CFG is een lijst bestanden
+	cat $CFG | grep -v '^hopos.stage=' >"$TDIR/hopos.cfg" || true
 	if [ -n "$APP" ]; then echo "hopos.stage=$ROLE" >>"$TDIR/hopos.cfg"; fi
 	python3 "$DIR/image/hopcfg.py" set "$EFI" "$TDIR/hopos.cfg"
 	rm -f "$ESP/hopos.cfg"

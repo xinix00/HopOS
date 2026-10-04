@@ -377,7 +377,8 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
 
     // De config van de node: de tekst van het board (bench::cfg_text,
     // kern::nodecfg; het venster in het image wint, board::cfgwin), en alleen op QEMU, dat geen bootmedium heeft, voor Hop
-    // de vaste bankconfig erachter. Hier al, vóór het net: de console over
+    // de vaste bankconfig ervóór (de laatste waarde wint, dus de rest
+    // wint van de bank). Hier al, vóór het net: de console over
     // TCP (conport.rs) kiest uit dezelfde config, en haar listener start
     // zodra de lease er is, ook na een flip waarin Hop niet opnieuw wordt
     // geplaatst.
@@ -396,7 +397,7 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         feature = "board-qemuvirt-riscv"
     )) && role == Ok(StagedRole::Hop)
     {
-        hop_cfg.push_str(kern::nodecfg::QEMU_CFG);
+        hop_cfg.insert_str(0, kern::nodecfg::QEMU_CFG);
     }
     let node_cfg = kern::nodecfg::NodeCfg::parse(&hop_cfg);
     conport::enable(kern::nodecfg::console_enabled(&node_cfg));

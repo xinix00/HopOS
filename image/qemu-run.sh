@@ -56,12 +56,14 @@
 #   BOOTARGS="hopos.s3.bucket=hop" image/qemu-run.sh
 #                                    extra bootparameters, letterlijk achter
 #                                    de rest in -append
-#   CFG=pad image/qemu-run.sh        hopos.cfg in het venster van de kern
-#                                    (board/src/cfgwin.rs, image/hopcfg.py),
-#                                    in een kopie van de ELF: de build zelf
-#                                    blijft leeg. Het venster wint van de
-#                                    bootargs; QEMU_CFG van de kern komt
-#                                    voor Hop nog achter beide
+#   CFG="a.cfg b.cfg" image/qemu-run.sh
+#                                    hopos.cfg in lagen in het venster van de
+#                                    kern (board/src/cfgwin.rs,
+#                                    image/hopcfg.py), in een kopie van de
+#                                    ELF: de build zelf blijft leeg. De
+#                                    laatste waarde wint; het venster wint
+#                                    van de bootargs, en die van QEMU_CFG
+#                                    van de kern (voor Hop)
 #   WEBPORT=8081 image/qemu-run.sh   een vierde hostfwd: 127.0.0.1:$WEBPORT
 #   DNSPORT=15353 image/qemu-run.sh  een UDP-hostfwd naar :5353 (hopdns)
 #                                    naar poort 80 van de gast, de poort die
@@ -130,9 +132,12 @@ FEATURES="$FEATURES${EXTRA_FEATURES:+,$EXTRA_FEATURES}"
 cargo build --quiet --release --target "$TARGET" -p hopos --features "$FEATURES"
 KERNEL="$DIR/target/$TARGET/release/hopos"
 if [ -n "${CFG:-}" ]; then
-	[ -f "$CFG" ] || { echo "qemu-run: CFG=$CFG does not exist" >&2; exit 1; }
+	for f in $CFG; do
+		[ -f "$f" ] || { echo "qemu-run: CFG: $f does not exist" >&2; exit 1; }
+	done
 	cp "$KERNEL" "$KERNEL.cfg"
-	python3 "$DIR/image/hopcfg.py" set "$KERNEL.cfg" "$CFG"
+	# shellcheck disable=SC2086 # CFG is een lijst bestanden
+	python3 "$DIR/image/hopcfg.py" set "$KERNEL.cfg" $CFG
 	KERNEL="$KERNEL.cfg"
 fi
 

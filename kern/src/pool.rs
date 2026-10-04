@@ -53,6 +53,10 @@ pub struct Placement {
     pub cores: usize,
     /// De gevraagde klasse, of `None` voor elke klasse.
     pub class: Option<CoreClass>,
+    /// Een voorkeur, geen eis: een NIEUWE groep neemt eerst vrije cores van
+    /// deze klasse, en pas daarna andere (Hop met `hopos.hop.core-class`).
+    /// Wie bij een bestaande groep komt, krijgt de cores die er al zijn.
+    pub prefer: Option<CoreClass>,
 }
 
 /// De naam van Hops sharegroup als de config er geen noemt
@@ -114,15 +118,18 @@ impl Placement {
     /// Mag de groep de OS-core delen ([`CorePool::share_os_core`]), dan is
     /// het die; anders een app-core, zoals vóór 30-09.
     ///
-    /// Geen klasse meer: Hop woont waar de kern woont, en welke klasse dát
-    /// is, kiest de bootparameter van de OS-core (`hopos.oscore`), niet de
-    /// jobspec.
+    /// Geen klasse als eis: op de OS-core kiest de bootparameter
+    /// (`hopos.oscore`) de klasse, en op een app-core is
+    /// `hopos.hop.core-class` een voorkeur ([`Placement::prefer`]) die de
+    /// boot-plaatsing van Hop zelf zet. Een flipbundel komt zonder voorkeur
+    /// bij de groep die er al is.
     pub fn hop() -> Result<Placement> {
         Ok(Placement {
             group: Some(hop_group()),
             pool_cores: 1,
             cores: 1,
             class: None,
+            prefer: None,
         })
     }
 }
@@ -312,7 +319,7 @@ impl CorePool {
         }
         let gid = match self.group_id(name) {
             Some(g) => g,
-            None => self.new_group(cores, name, pool_cores, spec.class)?,
+            None => self.new_group(cores, name, pool_cores, spec)?,
         };
         let group = self
             .groups
@@ -373,6 +380,7 @@ impl CorePool {
             pool_cores: 1,
             cores: 1,
             class: spec.class,
+            prefer: None,
         };
         self.place(cores, slot, &sys).map(|c| (c, true))
     }
@@ -389,25 +397,30 @@ impl CorePool {
         cores: &impl Cores,
         name: &GroupName,
         pool_cores: usize,
-        class: Option<CoreClass>,
+        spec: &Placement,
     ) -> Result<usize> {
         let gid = self
             .groups
             .iter()
             .position(Option::is_none)
             .ok_or(Error::Full { cap: MAX_GROUPS })?;
-        let mut members = BoundedVec::new();
-        for c in 1..=cores.app_cores().min(CORE_CAP) {
-            if members.len() == pool_cores {
-                break;
-            }
-            if self.core_free(c)
-                && Self::class_ok(cores, c, class)
-                && let Some(core) = Core::new(c)
-            {
-                members.push(core).map_err(|_| Error::Full {
-                    cap: MAX_GROUP_CORES,
-                })?;
+        let mut members: BoundedVec<Core, MAX_GROUP_CORES> = BoundedVec::new();
+        // Eerst de voorkeur, dan elke core die de eis toelaat.
+        for want in [spec.prefer, None] {
+            for c in 1..=cores.app_cores().min(CORE_CAP) {
+                if members.len() == pool_cores {
+                    break;
+                }
+                if self.core_free(c)
+                    && Self::class_ok(cores, c, spec.class)
+                    && Self::class_ok(cores, c, want)
+                    && !members.iter().any(|m| m.get() == c)
+                    && let Some(core) = Core::new(c)
+                {
+                    members.push(core).map_err(|_| Error::Full {
+                        cap: MAX_GROUP_CORES,
+                    })?;
+                }
             }
         }
         if members.len() < pool_cores {
@@ -606,6 +619,7 @@ pub(crate) mod tests {
             pool_cores: 1,
             cores,
             class,
+            prefer: None,
         }
     }
 
@@ -615,6 +629,7 @@ pub(crate) mod tests {
             pool_cores: pool,
             cores: 1,
             class,
+            prefer: None,
         }
     }
 
@@ -871,6 +886,46 @@ pub(crate) mod tests {
         let buddy = p.place(&b, s(2), &Placement::hop().unwrap()).unwrap();
         assert_eq!(buddy, hop, "a trusted buddy did not share Hop's core");
         assert_eq!(p.place(&b, s(3), &ded(1, Some(Small))).unwrap().get(), 3);
+    }
+
+    // `hopos.hop.core-class` (04-10): de eerste core van de groep van Hop
+    // komt uit de gevraagde klasse, ook als er eerder een andere vrij is;
+    // is er geen vrij (of kent het board geen klassen), dan elke vrije core.
+    // Een buur in de groep krijgt Hop's core, wat zijn klasse ook is.
+    #[test]
+    fn hop_prefers_his_class_for_the_first_core_of_his_group() {
+        use CoreClass::{Big, Small};
+        let hop = |prefer| Placement {
+            prefer,
+            ..Placement::hop().unwrap()
+        };
+        // De O6N in het klein: een big core vóór de small cores.
+        let b = FakeCores::with(4, &[(1, Big), (2, Small), (3, Small), (4, Big)]);
+        let mut p = CorePool::new();
+        p.place(&b, s(9), &ded(1, Some(Small))).unwrap(); // core 2 bezet
+        assert_eq!(p.place(&b, s(1), &hop(Some(Small))).unwrap().get(), 3);
+        assert_eq!(p.place(&b, s(2), &hop(Some(Big))).unwrap().get(), 3);
+        assert_eq!(
+            p.place(&b, s(3), &shared("hop", 1, None)).unwrap().get(),
+            3,
+            "a job tagged hop did not share Hop's core"
+        );
+        // Geen small core vrij: elke vrije core, geen weigering.
+        let mut p = CorePool::new();
+        p.place(&b, s(8), &ded(1, Some(Small))).unwrap();
+        p.place(&b, s(9), &ded(1, Some(Small))).unwrap();
+        assert_eq!(p.place(&b, s(1), &hop(Some(Small))).unwrap().get(), 1);
+        // Een board zonder klassen (de Pi's, QEMU): de eerste vrije core.
+        let flat = FakeCores::new(3);
+        let mut p = CorePool::new();
+        assert_eq!(p.place(&flat, s(1), &hop(Some(Small))).unwrap().get(), 1);
+        // Een eis wint van de voorkeur.
+        let mut p = CorePool::new();
+        let spec = Placement {
+            class: Some(Big),
+            ..hop(Some(Small))
+        };
+        assert_eq!(p.place(&b, s(1), &spec).unwrap().get(), 1);
     }
 
     #[test]

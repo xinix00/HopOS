@@ -10,10 +10,14 @@
 #                                   de boot-regel (tools/qemu-test-flip.sh)
 #   GUI=1 image/flip-bundle.sh rpi5 de gui-smaak (de korte vorm van
 #                                   FEATURES=gui, zoals image/uefi-run.sh)
-#   CFG=node.cfg image/flip-bundle.sh <board>  hopos.cfg in het venster
-#                                   van de bundel (board/src/cfgwin.rs), op
-#                                   elk board; zonder CFG neemt de flip de
-#                                   config van de draaiende kern mee
+#   CFG="a.cfg b.cfg" image/flip-bundle.sh <board>  hopos.cfg in lagen in
+#                                   het venster van de bundel
+#                                   (board/src/cfgwin.rs), op elk board, de
+#                                   laatste waarde wint; zonder CFG neemt de
+#                                   flip de config van de draaiende kern mee
+#   CFG=headless|headfull image/flip-bundle.sh <board>  de lagen van
+#                                   image/cfg: default.cfg, <board>.cfg en
+#                                   die smaak
 #   STAGE=hop.elf image/flip-bundle.sh licheerv  de Hop die de kern in zich
 #                                   draagt (de LicheeRV heeft geen staging
 #                                   van een lader: Hop zit in het image);
@@ -161,12 +165,18 @@ fi
 # een andere config. Het venster valt buiten elke relocatie: in beide links
 # stonden dezelfde bytes.
 CFG="${CFG-}"
+case "$CFG" in
+headless | headfull) CFG="$DIR/image/cfg/default.cfg $DIR/image/cfg/$BOARD.cfg $DIR/image/cfg/$CFG.cfg" ;;
+esac
 if [ -n "$CFG" ]; then
-	[ -f "$CFG" ] || {
-		echo "flip-bundle: CFG=$CFG does not exist" >&2
-		exit 64
-	}
-	python3 "$DIR/image/hopcfg.py" set "$TD/flip-bundle.stripped" "$CFG"
+	for f in $CFG; do
+		[ -f "$f" ] || {
+			echo "flip-bundle: CFG: $f does not exist" >&2
+			exit 64
+		}
+	done
+	# shellcheck disable=SC2086 # CFG is een lijst bestanden
+	python3 "$DIR/image/hopcfg.py" set "$TD/flip-bundle.stripped" $CFG
 else
 	# Precies één leeg venster: de plek waar de flip de config neerlegt.
 	WIN="$(python3 "$DIR/image/hopcfg.py" show "$TD/flip-bundle.stripped" 2>/dev/null)"

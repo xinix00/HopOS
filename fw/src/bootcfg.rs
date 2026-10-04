@@ -21,6 +21,11 @@
 //! tekstformaat waarin een spatie een auth-poort opent is geen formaat om
 //! op te vertrouwen.
 //!
+//! Een enkelvoudige sleutel die vaker staat: de LAATSTE waarde wint
+//! ([`get`], 04-10). Zo is een config in lagen (image/cfg: default, het
+//! bord, de smaak, en een eigen bestand erachter) gewoon de aaneengeplakte
+//! tekst; een herhaalde sleutel (`hopos.init[]`) telt alle lagen.
+//!
 //! Geen allocatie: de waarden zijn slices van de tekst.
 
 /// Alle waarden van `key` uit een configbestand, in bestandsvolgorde.
@@ -44,18 +49,18 @@ pub fn cmdline<'a>(args: &'a str, key: &'a str) -> impl Iterator<Item = &'a str>
         .filter_map(move |tok| tok.strip_prefix(key)?.strip_prefix('='))
 }
 
-/// De eerste waarde van `key` uit een configbestand, of "": de
+/// De laatste waarde van `key` uit een configbestand, of "": de
 /// enkelvoudige-sleutel-vorm van [`all`].
 #[must_use]
 pub fn get<'a>(text: &'a str, key: &'a str) -> &'a str {
-    all(text, key).next().unwrap_or("")
+    all(text, key).last().unwrap_or("")
 }
 
-/// De eerste waarde van `key` uit een kernel-cmdline-regel, of "": de
+/// De laatste waarde van `key` uit een kernel-cmdline-regel, of "": de
 /// enkelvoudige-sleutel-vorm van [`cmdline`].
 #[must_use]
 pub fn get_cmdline<'a>(args: &'a str, key: &'a str) -> &'a str {
-    cmdline(args, key).next().unwrap_or("")
+    cmdline(args, key).last().unwrap_or("")
 }
 
 #[cfg(test)]
@@ -107,10 +112,12 @@ mod tests {
     }
 
     #[test]
-    fn get_of_nothing_is_empty_and_takes_the_first() {
+    fn get_of_nothing_is_empty_and_takes_the_last() {
         assert_eq!(get("", "hopos.node"), "");
         assert_eq!(get_cmdline("hopos.x=a hopos.x=b", "hopos.cores"), "");
-        assert_eq!(get("hopos.x=a\nhopos.x=b\n", "hopos.x"), "a");
-        assert_eq!(get_cmdline("hopos.x=a hopos.x=b", "hopos.x"), "a");
+        assert_eq!(get("hopos.x=a\nhopos.x=b\n", "hopos.x"), "b");
+        assert_eq!(get_cmdline("hopos.x=a hopos.x=b", "hopos.x"), "b");
+        // Lagen: een uitgecommentarieerde regel in een latere laag telt niet.
+        assert_eq!(get("hopos.x=a\n# hopos.x=b\n", "hopos.x"), "a");
     }
 }

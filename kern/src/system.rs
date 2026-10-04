@@ -2282,6 +2282,7 @@ fn placement(req: &StartReq<'_>) -> Result<Placement> {
             Wire::Mid => Some(CoreClass::Mid),
             Wire::Big => Some(CoreClass::Big),
         },
+        prefer: None,
     })
 }
 

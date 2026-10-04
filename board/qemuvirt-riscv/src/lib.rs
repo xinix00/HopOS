@@ -166,7 +166,7 @@ fn fdt() -> Option<Fdt<'static>> {
     dtb_at(DTB.load(Relaxed))
 }
 
-/// De eerste waarde van een boot-sleutel: het venster in het image
+/// De waarde van een boot-sleutel: het venster in het image
 /// (`board::cfgwin`), dan de FDT-bootargs (QEMU `-append`); leeg als hij er
 /// niet is.
 #[must_use]

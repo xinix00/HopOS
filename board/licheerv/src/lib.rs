@@ -22,7 +22,7 @@
 //! (700 MHz). Sinds 03-10 blijft de kern op de C906B, waar de FSBL hem
 //! start: alleen de PLIC van dat hart heeft de dwmac ([`GMAC_IRQ`]). Hij
 //! deelt zijn core als groep `system` (welcome en wat geen eigen core
-//! vindt), en de C906L is het app-hart van Hop (`hopos.hop.sharegroup=hop` in image/cfg/hop-config-licheerv.cfg). De
+//! vindt), en de C906L is het app-hart van Hop (`hopos.hop.sharegroup=hop` in de bordlaag image/cfg/licheerv.cfg). De
 //! C906L komt via het resetblok op ([`LicheeRv::start_little`]): reset
 //! vast, boot-vector zetten, reset los.
 //!
@@ -160,7 +160,7 @@ fn console_write(b: &[u8]) {
     UART.write_bytes(b);
 }
 
-/// De eerste waarde van een boot-sleutel uit `hopos.cfg`, het venster in
+/// De laatste waarde van een boot-sleutel uit `hopos.cfg`, het venster in
 /// het image (`board::cfgwin`); "" als hij er niet is. De FSBL geeft geen DTB en
 /// geen bootargs, dus dit is het enige kanaal.
 #[must_use]

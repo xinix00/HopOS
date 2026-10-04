@@ -29,14 +29,14 @@
 //!
 //! Een gevuld venster IS het configbestand van de node: het vervangt
 //! `hopos.cfg` van de ESP, de initrd van de Radxa en het venster van de
-//! m1n1-lader, en het wint van de bootargs (de eerste waarde wint, zoals op
+//! m1n1-lader, en het wint van de bootargs (zoals op
 //! de Radxa). Een leeg venster (`len=0000000000`, zo komt het uit de linker)
 //! laat die bronnen staan als terugval.
 
 use core::cell::UnsafeCell;
 
 /// De maat van het venster: 16 KiB, wat de UEFI-stub van `hopos.cfg` op de
-/// ESP las. De configs van `image/cfg` zijn ~1,5 KiB, de GUI-config van Go
+/// ESP las. De lagen van `image/cfg` samen zijn ~1,5 KiB, de GUI-config van Go
 /// was ~9 KiB.
 pub const SIZE: usize = 16 << 10;
 

@@ -1973,6 +1973,7 @@ pub(crate) mod tests {
             pool_cores: 1,
             cores,
             class: None,
+            prefer: None,
         }
     }
 

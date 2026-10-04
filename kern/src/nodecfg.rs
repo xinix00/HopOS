@@ -28,16 +28,23 @@
 //! ([`ColdFlip`]: kan dit board koud flippen), `HOPOS_MEMORY` en `DNS` (de
 //! server uit de lease, voor de resolver van applib).
 //!
+//! Twee sleutels zijn voor de kern zelf, de plaatsing van Hop:
+//! `hopos.hop.sharegroup` (zijn groep, `HOPOS_HOP_GROUP` in de env) en
+//! `hopos.hop.core-class` ([`hop_core_class`]: de soort core die die groep
+//! als eerste krijgt).
+//!
 //! # Per board één tekst
 //!
 //! Elk board geeft zijn config als één tekst in het bestandsformaat
 //! ([`text`]): het venster in het kern-image (`board::cfgwin`, op elk
 //! board), of bij een leeg venster `hopos.cfg` van het bootmedium (de ESP op
-//! UEFI, 0xF000 op Apple, de initrd op de Radxa), en daarachter de
-//! `hopos.*`-tokens van de bootargs (de Pi's, de Radxa, QEMU). De eerste
-//! waarde wint, dus het bestand wint van de bootargs (Go:
-//! `rk3566.BootParam`). Alleen QEMU, dat geen bootmedium heeft, krijgt
-//! voor Hop [`QEMU_CFG`] erachter (Go: `board_virt.go`). Zonder
+//! UEFI, 0xF000 op Apple, de initrd op de Radxa), met daarvóór de
+//! `hopos.*`-tokens van de bootargs (de Pi's, de Radxa, QEMU). De laatste
+//! waarde wint (`fw::bootcfg::get`, 04-10): zo is een config in lagen
+//! (image/cfg: default, bord, smaak) gewoon de aaneengeplakte tekst, en het
+//! bestand wint nog steeds van de bootargs (Go: `rk3566.BootParam`). Alleen
+//! QEMU, dat geen bootmedium heeft, krijgt voor Hop [`QEMU_CFG`] er nog
+//! vóór (Go: `board_virt.go`). Zonder
 //! `hopos.apikey` is een node open (API en console, [`insecure`]): hij
 //! draait uit de doos, ook als zijn config niet aankomt; een sleutel sluit.
 //!
@@ -61,6 +68,7 @@
 //! nodig), maar nooit op de console: [`EnvBlob::redacted`] vervangt die
 //! waarden door hun lengte.
 
+use crate::cage::CoreClass;
 use abi::hopabi::CTRL_ENV_MAX;
 use alloc::format;
 use alloc::string::String;
@@ -69,7 +77,7 @@ use core::net::Ipv4Addr;
 use fw::bootcfg;
 
 /// De config van Hop op QEMU, dat geen bootmedium heeft: de bank, open en
-/// luid, met de naam van de node. Achter de bootargs, dus die winnen (een
+/// luid, met de naam van de node. Vóór de bootargs, dus die winnen (een
 /// tweede node van een cluster zet zijn naam en de sleutel van de rest).
 pub const QEMU_CFG: &str = "hopos.node=hopos-qemu\nhopos.cluster=hopos\nhopos.insecure=1\n";
 
@@ -106,21 +114,23 @@ const CLUSTER_KEYS: [(&str, &str); 7] = [
     ("hopos.ntp", "HOPOS_NTP"),
 ];
 
-/// De config van een board als één tekst in het bestandsformaat: `file`
-/// (`hopos.cfg`, "" zonder bootmedium), dan elk `hopos.*`-token van de
-/// bootargs `args` als eigen regel (een bootarg heeft geen spatie, dus het
-/// token is de hele waarde).
+/// De config van een board als één tekst in het bestandsformaat: elk
+/// `hopos.*`-token van de bootargs `args` als eigen regel (een bootarg
+/// heeft geen spatie, dus het token is de hele waarde), dan `file`
+/// (`hopos.cfg`, "" zonder bootmedium). De laatste waarde wint, dus het
+/// bestand wint van de bootargs.
 #[must_use]
 pub fn text(file: &str, args: &str) -> String {
-    let mut out = String::from(file);
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
+    let mut out = String::new();
     for tok in args.split_ascii_whitespace() {
         if tok.starts_with("hopos.") {
             out.push_str(tok);
             out.push('\n');
         }
+    }
+    out.push_str(file);
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
     }
     out
 }
@@ -138,7 +148,7 @@ impl<'a> NodeCfg<'a> {
         Self { text }
     }
 
-    /// De eerste waarde van `key`, of "" (de enkelvoudige sleutel).
+    /// De laatste waarde van `key`, of "" (de enkelvoudige sleutel).
     #[must_use]
     pub fn one(&self, key: &'a str) -> &'a str {
         bootcfg::get(self.text, key)
@@ -303,6 +313,26 @@ impl fmt::Display for EnvError {
                 )
             }
         }
+    }
+}
+
+/// `hopos.hop.core-class`: de soort core waar de groep van Hop haar eerste
+/// core zoekt, met de namen van `tags.core-class` van een job (`small`,
+/// `mid`, `big`). Een voorkeur, geen eis (`pool::Placement::prefer`): is er
+/// geen vrije core van die klasse, of kent het board geen klassen (de Pi's,
+/// de Radxa, de Altra, de LicheeRV), dan een andere. Op de OS-core (groep
+/// `system`) doet hij niets: daar kiest `hopos.oscore` de core.
+///
+/// # Errors
+///
+/// De waarde zelf als het geen klasse is; `Ok(None)` zonder sleutel.
+pub fn hop_core_class<'a>(cfg: &NodeCfg<'a>) -> Result<Option<CoreClass>, &'a str> {
+    match cfg.one("hopos.hop.core-class") {
+        "" => Ok(None),
+        "small" => Ok(Some(CoreClass::Small)),
+        "mid" => Ok(Some(CoreClass::Mid)),
+        "big" => Ok(Some(CoreClass::Big)),
+        other => Err(other),
     }
 }
 
@@ -533,25 +563,85 @@ mod tests {
         let radxa = text("hopos.node=radxa-2", "hopos.node=radxa-1 hopos.replay=30");
         assert_eq!(
             radxa,
-            "hopos.node=radxa-2\nhopos.node=radxa-1\nhopos.replay=30\n"
+            "hopos.node=radxa-1\nhopos.replay=30\nhopos.node=radxa-2\n"
         );
         let cfg = NodeCfg::parse(&radxa);
         assert_eq!(cfg.one("hopos.node"), "radxa-2");
         assert_eq!(replay_after(&cfg), 30);
-        // QEMU: de bootargs vóór QEMU_CFG, dus een tweede node heet anders.
-        let mut qemu = text("", "hopos.node=hopos-qemu-2 hopos.apikey=k root=/dev/vda");
-        qemu.push_str(QEMU_CFG);
+        // QEMU: QEMU_CFG vóór de bootargs, dus een tweede node heet anders.
+        let mut qemu = String::from(QEMU_CFG);
+        qemu.push_str(&text(
+            "",
+            "hopos.node=hopos-qemu-2 hopos.apikey=k root=/dev/vda",
+        ));
         let b = build(&NodeCfg::parse(&qemu), &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_NODE"), Some("hopos-qemu-2"));
         assert_eq!(b.get("HOPOS_APIKEY"), Some("k"));
         assert_eq!(b.get("HOPOS_INSECURE"), Some("1"), "QEMU blijft de bank");
     }
 
+    /// De config in lagen zoals de image-scripts hem in het venster zetten
+    /// (image/cfg: default, het bord, de smaak).
+    fn layers(board: &str, flavor: &str) -> String {
+        let read = |f: &str| match f {
+            "default" => include_str!("../../image/cfg/default.cfg"),
+            "rpi4" => include_str!("../../image/cfg/rpi4.cfg"),
+            "o6n" => include_str!("../../image/cfg/o6n.cfg"),
+            "licheerv" => include_str!("../../image/cfg/licheerv.cfg"),
+            "headless" => include_str!("../../image/cfg/headless.cfg"),
+            _ => include_str!("../../image/cfg/headfull.cfg"),
+        };
+        format!("{}{}{}", read("default"), read(board), read(flavor))
+    }
+
+    #[test]
+    fn the_last_value_wins_so_the_layers_stack() {
+        let o6n = layers("o6n", "headless");
+        let cfg = NodeCfg::parse(&o6n);
+        assert_eq!(cfg.one("hopos.hop.sharegroup"), "hop");
+        assert_eq!(hop_core_class(&cfg), Ok(Some(CoreClass::Small)));
+        assert_eq!(cfg.one("hopos.cluster"), "hopos", "the default stays");
+        // Een eigen regel erachter wint van alle lagen.
+        let own = format!("{o6n}hopos.hop.sharegroup=system\nhopos.hop.core-class=big\n");
+        let cfg = NodeCfg::parse(&own);
+        assert_eq!(cfg.one("hopos.hop.sharegroup"), "system");
+        assert_eq!(hop_core_class(&cfg), Ok(Some(CoreClass::Big)));
+        // De Pi: Hop op de OS-core, geen klasse.
+        let pi = layers("rpi4", "headless");
+        let cfg = NodeCfg::parse(&pi);
+        assert_eq!(cfg.one("hopos.hop.sharegroup"), "system");
+        assert_eq!(hop_core_class(&cfg), Ok(None));
+        let lrv = layers("licheerv", "headless");
+        assert_eq!(NodeCfg::parse(&lrv).one("hopos.hop.sharegroup"), "hop");
+        // Alleen headfull draagt init-jobs (welcome); een herhaalde sleutel
+        // telt alle lagen.
+        assert_eq!(NodeCfg::parse(&pi).all("hopos.init[]").count(), 0);
+        let full = layers("rpi4", "headfull");
+        let b = build(&NodeCfg::parse(&full), &FACTS).unwrap();
+        assert_eq!(b.init_jobs, 1);
+        assert!(
+            b.get("HOPOS_INIT_JOBS")
+                .unwrap()
+                .contains(r#""name":"welcome""#)
+        );
+        // De sleutel is een klasse of niets.
+        for (v, want) in [
+            ("small", Ok(Some(CoreClass::Small))),
+            ("mid", Ok(Some(CoreClass::Mid))),
+            ("big", Ok(Some(CoreClass::Big))),
+            ("", Ok(None)),
+            ("e-core", Err("e-core")),
+        ] {
+            let t = format!("hopos.hop.core-class={v}\n");
+            assert_eq!(hop_core_class(&NodeCfg::parse(&t)), want, "{v}");
+        }
+    }
+
     #[test]
     fn the_window_with_the_shared_config_wins_from_the_cmdline() {
         // De gedeelde config zoals image/hopcfg.py hem in het venster van de
         // kern zet (board/src/cfgwin.rs): kopregel, config, '#'-padding.
-        let cfg = include_str!("../../image/cfg/hop-config-headless.cfg");
+        let cfg = &layers("rpi4", "headfull");
         let mut window = format!("#HOPCFG1 window=16384 len={:010}\n{cfg}", cfg.len());
         while window.len() < 16384 {
             let n = (16384 - window.len()).min(65);
@@ -586,12 +676,12 @@ mod tests {
 
     #[test]
     fn qemu_bootargs_add_the_s3_keys() {
-        let mut cfg = text(
+        let mut cfg = String::from(QEMU_CFG);
+        cfg.push_str(&text(
             "",
             "hopos.stage=hop hopos.s3.endpoint=http://10.0.2.2:9000 hopos.s3.bucket=hop \
              hopos.s3.secret=geheim hopos.ntp=10.0.2.2:10123",
-        );
-        cfg.push_str(QEMU_CFG);
+        ));
         let b = build(&NodeCfg::parse(&cfg), &FACTS).unwrap();
         assert_eq!(b.get("HOPOS_S3_ENDPOINT"), Some("http://10.0.2.2:9000"));
         assert_eq!(b.get("HOPOS_S3_BUCKET"), Some("hop"));
