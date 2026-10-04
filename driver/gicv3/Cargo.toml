@@ -11,5 +11,9 @@ dev = { path = "../../dev" }
 # De ICC-instructies van `SysRegIcc` (handboek §5: asm in cpu).
 cpu = { path = "../../cpu" }
 
+[dev-dependencies]
+# De bel van een lijn in de toets van de dispatcher op een nagebootste GIC.
+sync = { path = "../../sync" }
+
 [lints]
 workspace = true

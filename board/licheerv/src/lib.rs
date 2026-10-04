@@ -48,7 +48,7 @@ pub mod watchdog;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use cpu::irq::{Controller, Line};
+use cpu::irq::Line;
 use cpu::riscv::clint::Clint;
 use cpu::riscv::csr;
 use cpu::riscv::plic::{Plic, machine_context};
@@ -132,7 +132,7 @@ pub const HART_BIG: usize = 0;
 // SAFETY: de DW-APB-16550 van de SG2002 met 32-bit-stride; in machine mode
 // altijd bereikbaar, en de FSBL zette hem op 115200.
 static UART: Ns16550 = unsafe { Ns16550::new(UART0, 2) };
-// SAFETY: de PLIC van de CV181x.
+// SAFETY: de PLIC van de CV181x. De controller van `cpu::irq`.
 static PLIC_DEV: Plic = unsafe { Plic::new(PLIC, PLIC_SOURCES) };
 // SAFETY: de c900-CLINT, SiFive-indeling (msip en mtimecmp; geen mtime).
 const CLINT_DEV: Clint = unsafe { Clint::new(CLINT) };
@@ -140,9 +140,18 @@ const CLINT_DEV: Clint = unsafe { Clint::new(CLINT) };
 static CLINT_OK: AtomicBool = AtomicBool::new(false);
 /// De bel van de NIC: de dispatch luidt hem, de RX-pomp wacht erop.
 static NIC_BELL: Signal = Signal::new();
-/// De ack van de NIC-lijn, gezet door `probe_nic` als de lijn er is, gelezen
-/// door de dispatch-taak. Beide draaien op de executor van de kern.
+/// De ack van de NIC-lijn, gezet door `probe_nic`, gelezen door de
+/// dispatch-taak. Beide draaien op de executor van de kern.
 static NIC_IRQ: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+
+/// De device-ack van de NIC-lijn bij de dispatcher: masker dicht en status
+/// gewist (de level-lijn valt). De driver zet het masker weer open als de
+/// pomp de ring leeg las.
+fn nic_ack() {
+    if let Some(a) = NIC_IRQ.get().get() {
+        a.ack();
+    }
+}
 /// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
@@ -435,6 +444,7 @@ impl Board for LicheeRv {
         // 0x7020_2004). De 102 bronnen zijn die van de C906B, het hart van
         // de kern.
         PLIC_DEV.set_context(machine_context(self.clint_hart()));
+        cpu::irq::use_controller(&PLIC_DEV);
         cpu::println!("irq: {}", PLIC_DEV.describe());
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
         csr::restore(csr::MSTATUS_MIE);
@@ -442,30 +452,16 @@ impl Board for LicheeRv {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
-        let nic = NIC_IRQ.get().get();
-        let mut d = Dispatched::default();
-        cpu::riscv::trap::take_irq();
         CLINT_DEV.set_msip(self.clint_hart(), false);
-        while let Some(l) = PLIC_DEV.claim() {
-            match nic {
-                // De NIC: masker dicht en status gewist (de level-lijn
-                // valt), dan de bel. De driver zet het masker weer open als
-                // de pomp de ring leeg las.
-                Some(ack) if l.0 == GMAC_IRQ => {
-                    ack.ack();
-                    NIC_BELL.set();
-                    d.nic += 1;
-                }
-                // Niemand anders heeft een lijn: wat vuurt, gaat uit.
-                _ => {
-                    PLIC_DEV.disable(l);
-                    d.other += 1;
-                }
-            }
-            PLIC_DEV.complete(l);
-        }
+        // De NIC heeft een lijn; niemand anders: wat verder vuurt, gaat uit.
+        let pass = cpu::irq::global().dispatch();
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
-        d
+        let nic = pass.claims(Line(GMAC_IRQ));
+        Dispatched {
+            timer: 0,
+            nic,
+            other: pass.claimed.saturating_sub(nic),
+        }
     }
 
     /// De ethernet-keten (Go, board/licheerv/hop/net.go): klokken, leeft de
@@ -525,8 +521,8 @@ impl Board for LicheeRv {
         // dan pollt de pomp (300 µs). De kern hoort een app op de C906L op de
         // failsafe van de switch (1 ms): er is geen bel van de C906L naar de
         // C906B.
-        if PLIC_DEV.enable(Line(GMAC_IRQ)).is_ok() {
-            NIC_IRQ.get().set(Some(nic.irq_ack()));
+        NIC_IRQ.get().set(Some(nic.irq_ack()));
+        if cpu::irq::enable(Line(GMAC_IRQ), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
             nic.set_irq(&NIC_BELL);
             cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ");
         } else {

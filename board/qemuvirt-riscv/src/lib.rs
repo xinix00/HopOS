@@ -31,7 +31,7 @@ pub mod slots;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
-use cpu::irq::{Controller, Line};
+use cpu::irq::Line;
 use cpu::riscv::clint::Clint;
 use cpu::riscv::csr;
 use cpu::riscv::plic::{Plic, machine_context};
@@ -104,6 +104,7 @@ const CORES_DEFAULT: usize = 2;
 static UART: Ns16550 = unsafe { Ns16550::new(UART0, 0) };
 
 // SAFETY: de PLIC van QEMU virt, 96 bronnen, altijd bereikbaar in M-mode.
+// De controller van `cpu::irq`.
 static PLIC_DEV: Plic = unsafe { Plic::new(PLIC, PLIC_SOURCES) };
 
 // SAFETY: de CLINT van QEMU virt in de SiFive-indeling.
@@ -113,6 +114,13 @@ const CLINT_DEV: Clint = unsafe { Clint::new(CLINT) };
 static NIC_BELL: Signal = Signal::new();
 /// De NIC-lijn en zijn ack.
 static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None));
+
+/// De device-ack van de NIC-lijn bij de dispatcher: virtio InterruptACK.
+fn nic_ack() {
+    if let Some((_, a)) = NIC_IRQ.get().get() {
+        a.ack();
+    }
+}
 
 /// Het adres van een geldige DTB, 0 = geen.
 static DTB: AtomicU64 = AtomicU64::new(0);
@@ -457,6 +465,7 @@ impl Board for QemuVirtRiscv {
 
     fn start_interrupts(&self) -> Result<&'static Signal, Error> {
         PLIC_DEV.set_context(machine_context(self.this_core()));
+        cpu::irq::use_controller(&PLIC_DEV);
         cpu::println!("irq: {}", PLIC_DEV.describe());
         // Vanaf hier mag de trap komen: MEIE en MSIE aan, MIE aan. De
         // ingang zet de bron weer dicht tot de dispatch-taak claimde.
@@ -466,28 +475,18 @@ impl Board for QemuVirtRiscv {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
-        let nic = NIC_IRQ.get().get();
-        let mut d = Dispatched::default();
-        cpu::riscv::trap::take_irq();
         // De kick: de `msip` wissen, dan staat de bron weer open.
         CLINT_DEV.set_msip(self.this_core(), false);
-        while let Some(Line(id)) = PLIC_DEV.claim() {
-            match nic {
-                Some((line, ack)) if id == line => {
-                    ack.ack();
-                    NIC_BELL.set();
-                    d.nic += 1;
-                }
-                _ => {
-                    PLIC_DEV.disable(Line(id));
-                    d.other += 1;
-                }
-            }
-            PLIC_DEV.complete(Line(id));
-        }
+        // De PLIC: de NIC heeft een lijn, wat verder vuurt gaat uit.
+        let pass = cpu::irq::global().dispatch();
         // De ingang liet MEIE en MSIE dicht; de ronde is klaar.
         csr::mie_set(csr::MIP_MEIP | csr::MIP_MSIP);
-        d
+        let nic = NIC_IRQ.get().get().map_or(0, |(l, _)| pass.claims(Line(l)));
+        Dispatched {
+            timer: 0,
+            nic,
+            other: pass.claimed.saturating_sub(nic),
+        }
     }
 
     fn probe_nic(&self) -> Result<Option<Self::Nic>, Error> {
@@ -505,8 +504,8 @@ impl Board for QemuVirtRiscv {
         // is van deze driver alleen.
         let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size) }
             .map_err(|_| Error::Nic("virtio-net init failed"))?;
-        if PLIC_DEV.enable(Line(irq)).is_ok() {
-            NIC_IRQ.get().set(Some((irq, nic.irq_ack())));
+        NIC_IRQ.get().set(Some((irq, nic.irq_ack())));
+        if cpu::irq::enable(Line(irq), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
             nic.set_irq(&NIC_BELL);
         }
         cpu::println!(

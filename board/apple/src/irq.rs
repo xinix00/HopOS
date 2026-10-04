@@ -120,7 +120,8 @@ fn tg3_ack() {
     }
 }
 
-static TG3_ACK: fn() = tg3_ack;
+/// De bel van de NIC-lijn: de dispatch luidt hem, de RX-pomp wacht erop.
+static NIC_BELL: Signal = Signal::new();
 
 /// Hoe lang de gedwongen eerste interrupt mag doen over de aflevering:
 /// Linux' `tg3_test_interrupt` wacht 5 x 10 ms.
@@ -136,7 +137,8 @@ const NIC_TEST_NS: u64 = 50_000_000;
 /// een poort die INTA wél zag, staat bit 0 dan nog).
 pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (u32, u32))> {
     NIC_ACK.get().set(Some(nic.irq_ack()));
-    let bell = cpu::irq::enable(Line(line), Some(&TG3_ACK)).map_err(|e| {
+    let bell = &NIC_BELL;
+    cpu::irq::enable(Line(line), Some(tg3_ack), Some(bell)).map_err(|e| {
         let why = match e {
             cpu::irq::Error::NoController => "no AIC",
             _ => "the AIC refused the line",

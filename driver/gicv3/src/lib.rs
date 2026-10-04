@@ -1,8 +1,9 @@
-//! De GICv3-interruptcontroller: distributor, redistributor, claim en EOI.
+//! De GICv3-interruptcontroller: distributor, redistributor, claim en EOI,
+//! als [`cpu::irq::Controller`].
 //!
 //! Eén driver voor elk ARM-board met zo'n GIC: QEMU virt, de Radxa
 //! (GIC-600), de Altra, de Orion O6N (GIC-700). De Pi's hebben een GIC-400
-//! (v2) en krijgen hun eigen driver.
+//! (v2) en krijgen hun eigen driver; de distributor delen ze ([`dist`]).
 //!
 //! Group 1, niet Group 0 (09-09): op élk bord met TF-A op EL3 staat
 //! GICD_CTLR.DS=0 en is Group 0 het secure domein; voor ons (non-secure
@@ -38,16 +39,14 @@
 use core::fmt;
 use core::mem::offset_of;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use cpu::irq::{Controller, Line};
 use dev::{Pa, Reg};
+use dist::PRIORITY;
+pub use dist::{FIRST_SPECIAL, FIRST_SPI, SGI_COUNT};
 
+pub mod dist;
 pub mod its;
 
-/// De INTID van SPI 0.
-pub const FIRST_SPI: u32 = 32;
-/// Het aantal SGI's (INTID 0..=15): de IPI's van de GIC.
-pub const SGI_COUNT: u32 = 16;
-/// De eerste speciale INTID (1020-1023): "niets" bij een claim.
-pub const FIRST_SPECIAL: u32 = 1020;
 /// De SGI's die de niet-beveiligde wereld heeft: 0..=7. ARM raadt aan
 /// 8..=15 voor de secure wereld te houden, en TF-A doet dat
 /// (`ARM_IRQ_SEC_SGI_0` = 8 tot en met `ARM_IRQ_SEC_SGI_7` = 15, als Group 0
@@ -67,10 +66,6 @@ pub const fn is_ns_sgi(id: u32) -> bool {
     id < NS_SGI_COUNT
 }
 
-/// De prioriteit die wij onze lijnen geven: midden in het bereik, zodat
-/// een PMR van 0xff ze doorlaat en de firmware er nog boven en onder kan.
-const PRIORITY: u8 = 0xa0;
-
 /// De redistributor-frames: RD_base (64 KB) + SGI_base (64 KB) = 128 KB;
 /// bij VLPIS (GICv4) nog VLPI_base en een gereserveerd frame erbij.
 const FRAME: u64 = 0x1_0000;
@@ -78,44 +73,18 @@ const FRAME: u64 = 0x1_0000;
 /// De affiniteitsbits van MPIDR voor IROUTER: aff0-2 en aff3.
 const AFF_MASK: u64 = (0xff << 32) | 0xff_ffff;
 
-/// Het distributor-blok (ARM IHI 0069, tabel 12-25).
+/// Het distributor-blok (ARM IHI 0069, tabel 12-25): het gedeelde deel
+/// ([`dist::Gicd`]) en IROUTER.
 #[repr(C)]
 struct Gicd {
-    ctlr: Reg<u32>,
-    typer: Reg<u32>,
-    iidr: Reg<u32>,
-    _r0: [u32; 29],
-    igroupr: [Reg<u32>; 32],
-    isenabler: [Reg<u32>; 32],
-    icenabler: [Reg<u32>; 32],
-    ispendr: [Reg<u32>; 32],
-    icpendr: [Reg<u32>; 32],
-    isactiver: [Reg<u32>; 32],
-    icactiver: [Reg<u32>; 32],
-    ipriorityr: [Reg<u8>; 1024],
-    _r1: [u32; 256],
-    icfgr: [Reg<u32>; 64],
-    _r2: [u32; 5312],
+    d: dist::Gicd,
+    _r: [u32; 5312],
     /// IROUTER, geïndexeerd op INTID (de eerste 32 zijn gereserveerd): de
     /// INTID-basis ligt op 0x6000, IROUTER[32] op 0x6100.
     irouter: [Reg<u64>; 1020],
 }
 
-const _: () = {
-    assert!(offset_of!(Gicd, ctlr) == 0x0000);
-    assert!(offset_of!(Gicd, typer) == 0x0004);
-    assert!(offset_of!(Gicd, iidr) == 0x0008);
-    assert!(offset_of!(Gicd, igroupr) == 0x0080);
-    assert!(offset_of!(Gicd, isenabler) == 0x0100);
-    assert!(offset_of!(Gicd, icenabler) == 0x0180);
-    assert!(offset_of!(Gicd, ispendr) == 0x0200);
-    assert!(offset_of!(Gicd, icpendr) == 0x0280);
-    assert!(offset_of!(Gicd, isactiver) == 0x0300);
-    assert!(offset_of!(Gicd, icactiver) == 0x0380);
-    assert!(offset_of!(Gicd, ipriorityr) == 0x0400);
-    assert!(offset_of!(Gicd, icfgr) == 0x0c00);
-    assert!(offset_of!(Gicd, irouter) == 0x6000);
-};
+const _: () = assert!(offset_of!(Gicd, irouter) == 0x6000);
 
 /// Eén redistributor: het RD_base-frame en het SGI_base-frame erachter
 /// (ARM IHI 0069, tabellen 12-27 en 12-29).
@@ -360,6 +329,7 @@ impl<I: Icc> Gic<I> {
         self.icc.set_pmr(0xff);
         self.icc.set_grp1(true);
         self.d()
+            .d
             .ctlr
             .update(|c| c | CTLR_ARE_NS | CTLR_ENABLE_GRP1_NS);
         dev::mb();
@@ -368,7 +338,9 @@ impl<I: Icc> Gic<I> {
 
     /// Zet lijn `id` aan: route (SPI) naar de core met `mpidr`, Group 1,
     /// onze prioriteit, en dan pas enable. Route en groep staan vóór de
-    /// enable, anders kan de lijn één keer verkeerd afgaan.
+    /// enable, anders kan de lijn één keer verkeerd afgaan. De
+    /// [`Controller::enable`] van de dispatcher is dit met de MPIDR van de
+    /// aanroepende core.
     pub fn enable(&self, id: u32, mpidr: u64) -> Result<(), Error> {
         if id >= FIRST_SPECIAL {
             return Err(Error::BadIntId(id));
@@ -380,42 +352,14 @@ impl<I: Icc> Gic<I> {
             r.ipriorityr[id as usize].write(PRIORITY);
             dev::mb();
             r.isenabler0.write(bit);
+            dev::mb();
         } else {
             let d = self.d();
-            let n = (id / 32) as usize;
             d.irouter[id as usize].write(mpidr & AFF_MASK);
-            d.igroupr[n].update(|g| g | bit);
-            d.ipriorityr[id as usize].write(PRIORITY);
-            dev::mb();
-            d.isenabler[n].write(bit);
+            d.d.igroupr[(id / 32) as usize].update(|g| g | bit);
+            d.d.enable(id);
         }
-        dev::mb();
         Ok(())
-    }
-
-    /// Zet lijn `id` uit. ICENABLER is write-1-to-clear: nooit
-    /// lezen-aanpassen-schrijven, dat zou de buren raken.
-    pub fn disable(&self, id: u32) {
-        if id >= FIRST_SPECIAL {
-            return;
-        }
-        let bit = 1u32 << (id % 32);
-        if id < FIRST_SPI {
-            self.r().icenabler0.write(bit);
-        } else {
-            self.d().icenabler[(id / 32) as usize].write(bit);
-        }
-        dev::mb();
-    }
-
-    /// Claimt de hoogste wachtende interrupt (ICC_IAR1); `None` bij een
-    /// speciale INTID (1020 tot en met 1023: niets te doen). Een LPI
-    /// (8192 en hoger) is een gewone claim: tot 29-09 stond hier `id <
-    /// 1020`, en dat las elke MSI als "niets".
-    #[must_use]
-    pub fn claim(&self) -> Option<u32> {
-        let id = self.icc.iar1() & 0xff_ffff;
-        (!(FIRST_SPECIAL..FIRST_SPECIAL + 4).contains(&id)).then_some(id)
     }
 
     /// Zet de LPI's aan op de redistributor van deze core: de
@@ -430,9 +374,8 @@ impl<I: Icc> Gic<I> {
     /// geen poging: andermans tabel is [`Error::LpisTaken`] en de devices
     /// pollen.
     pub fn enable_lpis(&self, prop: Pa, pend: Pa) -> Result<bool, Error> {
-        let d = self.d();
         let r = self.r();
-        let dtyper = d.typer.read();
+        let dtyper = self.d().d.typer.read();
         if dtyper & TYPER_LPIS == 0 || r.typer.read() & RTYPER_PLPIS == 0 {
             return Err(Error::NoLpis);
         }
@@ -473,12 +416,6 @@ impl<I: Icc> Gic<I> {
         (self.gicr(), self.r().typer.read())
     }
 
-    /// Sluit een geclaimde interrupt af (ICC_EOIR1: priority drop én
-    /// deactivate).
-    pub fn eoi(&self, id: u32) {
-        self.icc.eoir1(id);
-    }
-
     /// Wat de redistributor van deze core over SGI of PPI `id` zegt: de
     /// ruwe GICR_IGROUPR0, ISENABLER0 en ISPENDR0. `None` voor een SPI of
     /// hoger, die niet in de redistributor wonen.
@@ -507,12 +444,53 @@ impl<I: Icc> Gic<I> {
     pub fn describe(&self) -> Describe {
         Describe {
             gicd: self.gicd,
-            gicd_iidr: self.d().iidr.read(),
-            gicd_ctlr: self.d().ctlr.read(),
+            gicd_iidr: self.d().d.iidr.read(),
+            gicd_ctlr: self.d().d.ctlr.read(),
             gicr: self.gicr(),
             gicr_iidr: self.r().iidr.read(),
             gicr_typer: self.r().typer.read(),
         }
+    }
+}
+
+/// De GICv3 als controller van `cpu::irq`. De soort van een lijn
+/// (`set_trigger`) blijft zoals de firmware hem zette: geen v3-board
+/// registreert een flank, en een LPI is er altijd een.
+impl<I: Icc> Controller for Gic<I> {
+    /// [`Gic::enable`] naar de aanroepende core.
+    fn enable(&self, l: Line) -> Result<(), cpu::irq::Error> {
+        Gic::enable(self, l.0, cpu::mpidr()).map_err(|_| cpu::irq::Error::Rejected { line: l.0 })
+    }
+
+    /// Zet lijn `l` uit: een SGI of PPI in de redistributor, een SPI in
+    /// de distributor. Een LPI gaat uit in de tabel van zijn ITS, niet
+    /// hier.
+    fn disable(&self, l: Line) {
+        let id = l.0;
+        if id >= FIRST_SPECIAL {
+            return;
+        }
+        if id < FIRST_SPI {
+            self.r().icenabler0.write(1 << (id % 32));
+            dev::mb();
+        } else {
+            self.d().d.disable(id);
+        }
+    }
+
+    /// Claimt de hoogste wachtende interrupt (ICC_IAR1); `None` bij een
+    /// speciale INTID (1020 tot en met 1023: niets te doen). Een LPI
+    /// (8192 en hoger) is een gewone claim: tot 29-09 stond hier `id <
+    /// 1020`, en dat las elke MSI als "niets".
+    fn claim(&self) -> Option<Line> {
+        let id = self.icc.iar1() & 0xff_ffff;
+        (!(FIRST_SPECIAL..FIRST_SPECIAL + 4).contains(&id)).then_some(Line(id))
+    }
+
+    /// Sluit een geclaimde interrupt af (ICC_EOIR1: priority drop én
+    /// deactivate).
+    fn complete(&self, l: Line) {
+        self.icc.eoir1(l.0);
     }
 }
 
@@ -723,7 +701,7 @@ mod tests {
         assert_eq!(dev::read32(pa(&mut r).add(0x1_0080)), 1 << 30);
         assert_eq!(dev::read32(pa(&mut r).add(0x1_0100)), 1 << 30);
         assert_eq!(dev::read8(pa(&mut r).add(0x1_0400 + 30)), PRIORITY);
-        gic.disable(30);
+        gic.disable(Line(30));
         assert_eq!(dev::read32(pa(&mut r).add(0x1_0180)), 1 << 30);
         // De distributor is niet aangeraakt.
         assert!(d.iter().all(|&w| w == 0));
@@ -742,10 +720,118 @@ mod tests {
         assert!(icc.sre.get() && icc.grp1.get());
         assert_eq!(icc.pmr.get(), 0xff);
         icc.pending.borrow_mut().extend([1023, 30]);
-        assert_eq!(gic.claim(), Some(30));
-        gic.eoi(30);
+        assert_eq!(gic.claim(), Some(Line(30)));
+        gic.complete(Line(30));
         assert_eq!(gic.claim(), None);
         assert_eq!(*icc.eoi.borrow(), vec![30]);
+    }
+
+    /// Een nagebootste GICv3 achter de dispatcher van `cpu::irq`: de vorm
+    /// van qemuvirt, rk3566 en uefi. Alles gelekt, want de dispatcher wil
+    /// een `&'static dyn Controller`.
+    fn dispatcher() -> (
+        &'static cpu::irq::Dispatcher,
+        &'static FakeIcc,
+        &'static mut [u64],
+        &'static mut [u64],
+    ) {
+        let d: &'static mut [u64] = Vec::leak(vec![0; 0x8000 / 8]);
+        let r: &'static mut [u64] = Vec::leak(vec![0; 0x2_0000 / 8]);
+        let icc: &'static FakeIcc = Box::leak(Box::default());
+        // SAFETY: de gelekte vectoren leven de hele test en zijn groot genoeg.
+        let gic: &'static Gic<&'static FakeIcc> =
+            Box::leak(Box::new(unsafe { Gic::new(pa(d), pa(r), icc) }));
+        let disp: &'static cpu::irq::Dispatcher = Box::leak(Box::default());
+        disp.use_controller(gic);
+        (disp, icc, d, r)
+    }
+
+    // De ronde van een v3-board: de timer-PPI (ack zet hem uit), de kick
+    // (ack telt), de NIC-SPI (ack en bel) en een lijn die niemand kent
+    // (uit in de distributor). Elke claim krijgt zijn EOI, en de ronde telt
+    // per lijn wat het board in `Dispatched` zet.
+    #[test]
+    fn the_dispatcher_claims_acks_rings_and_eois_on_a_gicv3() {
+        use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
+        static TIMER: AtomicU32 = AtomicU32::new(0);
+        static KICK: AtomicU32 = AtomicU32::new(0);
+        static NIC: sync::Signal = sync::Signal::new();
+        let (disp, icc, d, r) = dispatcher();
+        let timer: fn() = || {
+            TIMER.fetch_add(1, SeqCst);
+        };
+        let kick: fn() = || {
+            KICK.fetch_add(1, SeqCst);
+        };
+        disp.enable(Line(30), Some(timer), None).unwrap();
+        disp.enable(Line(1), Some(kick), None).unwrap();
+        disp.enable(Line(64), Some(|| {}), Some(&NIC)).unwrap();
+        // PPI en SGI in de redistributor (de groep; ISENABLER0 is
+        // write-1-to-set en het nep-blok bewaart alleen de laatste), de SPI
+        // in de distributor met zijn route (de host-MPIDR is 0), groep en
+        // enable.
+        assert_eq!(dev::read32(pa(r).add(0x1_0080)), (1 << 30) | (1 << 1));
+        assert_eq!(dev::read32(pa(r).add(0x1_0100)), 1 << 1);
+        assert_eq!(dev::read64(pa(d).add(0x6000 + 8 * 64)), 0);
+        assert_eq!(dev::read32(pa(d).add(0x80 + 4 * 2)), 1);
+        assert_eq!(dev::read32(pa(d).add(0x100 + 4 * 2)), 1);
+        assert_eq!(dev::read8(pa(d).add(0x400 + 64)), PRIORITY);
+        // De FakeIcc claimt van achter naar voren.
+        icc.pending.borrow_mut().extend([99, 64, 1, 30, 64]);
+        let pass = disp.dispatch();
+        assert_eq!(pass.claimed, 5);
+        assert_eq!(
+            (
+                pass.claims(Line(30)),
+                pass.claims(Line(1)),
+                pass.claims(Line(64)),
+                pass.unknown
+            ),
+            (1, 1, 2, 1)
+        );
+        assert_eq!((TIMER.load(SeqCst), KICK.load(SeqCst)), (1, 1));
+        assert!(NIC.take());
+        assert_eq!(*icc.eoi.borrow(), vec![64, 30, 1, 64, 99]);
+        // SPI 99 is uit: ICENABLER[3] bit 3, en alleen die.
+        assert_eq!(pass.disabled, Some(Line(99)));
+        assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 3)), 1 << 3);
+        assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 2)), 0);
+        assert!(icc.pending.borrow().is_empty());
+    }
+
+    // Een NIC onder last (een ack per claim) breekt de ronde af op
+    // STRAY_LIMIT en blijft aan; een level-SPI zonder ack die blijft
+    // terugkomen gaat uit in de distributor. Een LPI die niemand kent krijgt
+    // zijn EOI, en de distributor blijft ongemoeid (een LPI woont in de
+    // tabel van zijn ITS).
+    #[test]
+    fn a_storm_on_a_gicv3_ends_the_pass_and_a_stuck_spi_goes_off() {
+        use cpu::irq::STRAY_LIMIT;
+        let (disp, icc, d, _r) = dispatcher();
+        disp.enable(Line(64), Some(|| {}), None).unwrap();
+        let n = STRAY_LIMIT as usize + 10;
+        icc.pending.borrow_mut().extend(std::iter::repeat_n(64, n));
+        let pass = disp.dispatch();
+        assert_eq!(pass.stray, Some(Line(64)));
+        assert_eq!(pass.stuck, None);
+        assert_eq!(pass.claimed, STRAY_LIMIT + 1);
+        assert_eq!(icc.eoi.borrow().len(), STRAY_LIMIT as usize + 1);
+        assert_eq!(icc.pending.borrow().len(), 9);
+        assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 2)), 0);
+
+        let (disp, icc, d, _r) = dispatcher();
+        disp.enable(Line(65), None, None).unwrap();
+        icc.pending.borrow_mut().extend(std::iter::repeat_n(65, n));
+        let pass = disp.dispatch();
+        assert_eq!(pass.stuck, Some(Line(65)));
+        assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 2)), 1 << 1);
+
+        let (disp, icc, d, _r) = dispatcher();
+        icc.pending.borrow_mut().push(FIRST_LPI + 8);
+        let pass = disp.dispatch();
+        assert_eq!((pass.claimed, pass.unknown), (1, 1));
+        assert_eq!(*icc.eoi.borrow(), vec![FIRST_LPI + 8]);
+        assert!(d.iter().all(|&w| w == 0));
     }
 
     #[test]

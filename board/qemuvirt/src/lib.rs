@@ -45,6 +45,7 @@ mod usb;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use cpu::irq::Line;
 use dev::Pa;
 use driver_gicv3::{Gic, SysRegIcc};
 use driver_pl011::Pl011;
@@ -141,8 +142,9 @@ const CORES_DEFAULT: usize = 4;
 // identity map in `mmu` zet de eerste gigabyte als Device).
 static UART: Pl011 = unsafe { Pl011::new(UART0) };
 
-/// De GIC. Het redistributor-frame is dat van de OS-core; `start_interrupts`
-/// zoekt het op met `find_redistributor` en zet het.
+/// De GIC, de controller van `cpu::irq`. Het redistributor-frame is dat van
+/// de OS-core; `start_interrupts` zoekt het op met `find_redistributor` en
+/// zet het.
 // SAFETY: GICD en GICR zijn de GICv3-blokken van QEMU virt en liggen in de
 // Device-gigabyte van de identity map.
 static GIC: Gic<SysRegIcc> = unsafe { Gic::new(GICD, GICR, SysRegIcc) };
@@ -154,6 +156,14 @@ static NIC_BELL: Signal = Signal::new();
 /// dispatch-taak. Beide draaien op de executor van core 0.
 static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None));
 
+/// De device-ack van de NIC-lijn bij de dispatcher: virtio InterruptACK,
+/// de lijn valt.
+fn nic_ack() {
+    if let Some((_, a)) = NIC_IRQ.get().get() {
+        a.ack();
+    }
+}
+
 /// De bel van de schijf: de dispatch luidt hem, de hopfs-actor wacht erop
 /// tijdens een blok-verzoek (`blkdev::InFlight::done`).
 static DISK_BELL: Signal = Signal::new();
@@ -161,6 +171,13 @@ static DISK_BELL: Signal = Signal::new();
 /// De schijflijn en zijn ack, gezet door `probe_disk`, scherp gezet door
 /// `start_interrupts` (de GIC is dan op) en gelezen door de dispatch-taak.
 static DISK_IRQ: Local<Cell<Option<(u32, BlkAck)>>> = Local::new(Cell::new(None));
+
+/// De device-ack van de schijflijn bij de dispatcher.
+fn disk_ack() {
+    if let Some((_, a)) = DISK_IRQ.get().get() {
+        a.ack();
+    }
+}
 
 /// Het adres van een geldige DTB, 0 = geen.
 static DTB: AtomicU64 = AtomicU64::new(0);
@@ -431,23 +448,27 @@ impl Board for QemuVirt {
         unsafe { GIC.set_redistributor(rd) };
         GIC.init()
             .map_err(|_| Error::Irq("redistributor stays asleep"))?;
+        cpu::irq::use_controller(&GIC);
         // De timer-PPI moet scherp staan in de GIC: anders bereikt hij de
-        // core niet en wekt hij de WFI van de slaap nooit.
-        GIC.enable(TIMER_PPI, mpidr)
+        // core niet en wekt hij de WFI van de slaap nooit. Zijn ack zet hem
+        // uit tot de volgende slaap hem op de nieuwe deadline zet; zo valt
+        // de lijn en wekt hij niet opnieuw.
+        cpu::irq::enable(Line(TIMER_PPI), Some(cpu::idle::timer_off), None)
             .map_err(|_| Error::Irq("timer PPI refused"))?;
         // De OS-core: de EL2-timer (de deadline tijdens de beurt van een
         // bewoner) en de kick van de app-cores. Zonder scherpe lijn trapt
         // geen van beide naar EL2 en houdt een bewoner de core tot hij zelf
-        // yieldt.
-        GIC.enable(HYP_TIMER_PPI, mpidr)
+        // yieldt. De kick heeft zijn werk al gedaan als hij geclaimd wordt
+        // (de core is terug bij de kern): alleen tellen.
+        cpu::irq::enable(Line(HYP_TIMER_PPI), Some(cpu::idle::hyp_timer_off), None)
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
-        GIC.enable(KICK_SGI, mpidr)
+        cpu::irq::enable(Line(KICK_SGI), Some(cpu::el2::count_kick), None)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
         // De schijf (als `probe_disk` hem vond): een weigering is geen
         // reden om zonder interrupts te draaien, de actor valt terug op de
         // vangrail.
         if let Some((id, _)) = DISK_IRQ.get().get()
-            && GIC.enable(id, mpidr).is_err()
+            && cpu::irq::enable(Line(id), Some(disk_ack), Some(&DISK_BELL)).is_err()
         {
             cpu::println!("irq: disk INTID {id} refused, the disk waits on its 10 ms guard");
         }
@@ -459,52 +480,23 @@ impl Board for QemuVirt {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
-        let nic = NIC_IRQ.get().get();
-        let disk = DISK_IRQ.get().get();
-        let mut d = Dispatched::default();
-        while let Some(id) = GIC.claim() {
-            // De schijf: de device-kant ack, dan de bel van de actor. Geteld
-            // onder `other`, zodat de tik zijn vorm houdt.
-            if let Some((line, ack)) = disk
-                && id == line
-            {
-                ack.ack();
-                DISK_BELL.set();
-                d.other += 1;
-                GIC.eoi(id);
-                continue;
-            }
-            match (id, nic) {
-                // De timer: uit tot de volgende slaap hem op de nieuwe
-                // deadline zet. Zo valt de lijn en wekt hij niet opnieuw.
-                (TIMER_PPI, _) => {
-                    cpu::idle::timer_off();
-                    d.timer += 1;
-                }
-                // De EL2-timer: normaal zet de rotatie hem zelf uit bij de
-                // terugkeer, en dan valt de lijn vóór hij geclaimd wordt.
-                (HYP_TIMER_PPI, _) => {
-                    cpu::idle::hyp_timer_off();
-                    d.timer += 1;
-                }
-                // De kick: hij heeft zijn werk al gedaan (de core is terug
-                // bij de kern); alleen tellen en afsluiten.
-                (KICK_SGI, _) => {
-                    cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
-                }
-                // De NIC: de device-kant ack (de lijn valt), dan de bel.
-                (id, Some((line, ack))) if id == line => {
-                    ack.ack();
-                    NIC_BELL.set();
-                    d.nic += 1;
-                }
-                _ => d.other += 1,
-            }
-            GIC.eoi(id);
-        }
+        let pass = cpu::irq::global().dispatch();
         // De vector liet I dicht; de ronde is klaar, dus weer open.
         cpu::irq::unmask();
-        d
+        // De kick telt nergens (hij staat in `os(kicks=)`); de schijf en
+        // wat niemand kent onder `other`, zodat de tik zijn vorm houdt.
+        let timer = pass
+            .claims(Line(TIMER_PPI))
+            .saturating_add(pass.claims(Line(HYP_TIMER_PPI)));
+        let nic = NIC_IRQ.get().get().map_or(0, |(l, _)| pass.claims(Line(l)));
+        let kick = pass.claims(Line(KICK_SGI));
+        Dispatched {
+            timer,
+            nic,
+            other: pass
+                .claimed
+                .saturating_sub(timer.saturating_add(nic).saturating_add(kick)),
+        }
     }
 
     fn usb_hosts(&self) -> board::UsbHosts {
@@ -530,9 +522,11 @@ impl Board for QemuVirt {
         // non-cacheable gemapt, en door niets anders uitgedeeld.
         let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size) }
             .map_err(|_| Error::Nic("virtio-net init failed"))?;
-        if intid != 0 && GIC.enable(intid, cpu::mpidr()).is_ok() {
+        if intid != 0 {
             NIC_IRQ.get().set(Some((intid, nic.irq_ack())));
-            nic.set_irq(&NIC_BELL);
+            if cpu::irq::enable(Line(intid), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
+                nic.set_irq(&NIC_BELL);
+            }
         }
         cpu::println!(
             "net: virtio-net at {:#x}, intid {intid}, queue {}",

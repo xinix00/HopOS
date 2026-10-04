@@ -69,6 +69,7 @@ use abi::layout::Pool;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use cpu::irq::Line;
 use dev::Pa;
 use driver_gicv3::{Gic, SysRegIcc};
 use driver_mdio::{Phy, rtl8211f};
@@ -206,17 +207,27 @@ const _: () = {
 // met zijn klok open (U-Boot print erover).
 static UART: Ns16550 = unsafe { Ns16550::new(UART2, 2) };
 
-/// De GIC. Het redistributor-frame is dat van de OS-core;
-/// `start_interrupts` zoekt het op met `find_redistributor` en zet het.
+/// De GIC, de controller van `cpu::irq`. Het redistributor-frame is dat van
+/// de OS-core; `start_interrupts` zoekt het op met `find_redistributor` en
+/// zet het.
 // SAFETY: GICD en GICR zijn de GIC-600-blokken van de RK3566 (Device).
 static GIC: Gic<SysRegIcc> = unsafe { Gic::new(GICD, GICR, SysRegIcc) };
 
 /// De bel van de NIC: de dispatch luidt hem, de RX-pomp wacht erop.
 static NIC_BELL: Signal = Signal::new();
 
-/// De NIC-lijn en zijn ack, gezet door `probe_nic`, gelezen door de
+/// De ack van de NIC-lijn, gezet door `probe_nic`, gelezen door de
 /// dispatch-taak. Beide draaien op de executor van core 0.
-static NIC_IRQ: Local<Cell<Option<(u32, IrqAck)>>> = Local::new(Cell::new(None));
+static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+
+/// De device-ack van de NIC-lijn bij de dispatcher: masker dicht en status
+/// gewist (de level-lijn valt). De driver zet het masker weer open als de
+/// pomp de ring leeg las.
+fn nic_ack() {
+    if let Some(a) = NIC_ACK.get().get() {
+        a.ack();
+    }
+}
 
 /// De kopie van de DTB in de heap (adres, lengte; 0 = geen).
 static DTB_COPY: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
@@ -678,12 +689,14 @@ impl Board for Rk3566 {
         unsafe { GIC.set_redistributor(rd) };
         GIC.init()
             .map_err(|_| Error::Irq("redistributor stays asleep"))?;
-        GIC.enable(TIMER_PPI, mpidr)
+        cpu::irq::use_controller(&GIC);
+        cpu::irq::enable(Line(TIMER_PPI), Some(cpu::idle::timer_off), None)
             .map_err(|_| Error::Irq("timer PPI refused"))?;
-        // De OS-core: de EL2-timer en de kick van de app-cores.
-        GIC.enable(HYP_TIMER_PPI, mpidr)
+        // De OS-core: de EL2-timer en de kick van de app-cores (die alleen
+        // telt).
+        cpu::irq::enable(Line(HYP_TIMER_PPI), Some(cpu::idle::hyp_timer_off), None)
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
-        GIC.enable(KICK_SGI, mpidr)
+        cpu::irq::enable(Line(KICK_SGI), Some(cpu::el2::count_kick), None)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
         cpu::println!("irq: {}", GIC.describe());
         cpu::irq::unmask();
@@ -691,35 +704,21 @@ impl Board for Rk3566 {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
-        let nic = NIC_IRQ.get().get();
-        let mut d = Dispatched::default();
-        while let Some(id) = GIC.claim() {
-            match (id, nic) {
-                (TIMER_PPI, _) => {
-                    cpu::idle::timer_off();
-                    d.timer += 1;
-                }
-                (HYP_TIMER_PPI, _) => {
-                    cpu::idle::hyp_timer_off();
-                    d.timer += 1;
-                }
-                (KICK_SGI, _) => {
-                    cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
-                }
-                // De NIC: masker dicht en status gewist (de level-lijn valt),
-                // dan de bel. De driver zet het masker weer open als de pomp
-                // de ring leeg las.
-                (id, Some((line, ack))) if id == line => {
-                    ack.ack();
-                    NIC_BELL.set();
-                    d.nic += 1;
-                }
-                _ => d.other += 1,
-            }
-            GIC.eoi(id);
-        }
+        let pass = cpu::irq::global().dispatch();
         cpu::irq::unmask();
-        d
+        // De kick telt nergens (hij staat in `os(kicks=)`).
+        let timer = pass
+            .claims(Line(TIMER_PPI))
+            .saturating_add(pass.claims(Line(HYP_TIMER_PPI)));
+        let nic = pass.claims(Line(GMAC1_INTID));
+        let kick = pass.claims(Line(KICK_SGI));
+        Dispatched {
+            timer,
+            nic,
+            other: pass
+                .claimed
+                .saturating_sub(timer.saturating_add(nic).saturating_add(kick)),
+        }
     }
 
     /// De ethernet-keten, en die is op dit board langer dan op alle andere:
@@ -775,8 +774,8 @@ impl Board for Rk3566 {
                     Error::Nic("dwmac4 start failed")
                 })?;
         // 9. De lijn. Een lijn die niet aan wil, laat de NIC pollen.
-        if GIC.enable(GMAC1_INTID, cpu::mpidr()).is_ok() {
-            NIC_IRQ.get().set(Some((GMAC1_INTID, nic.irq_ack())));
+        NIC_ACK.get().set(Some(nic.irq_ack()));
+        if cpu::irq::enable(Line(GMAC1_INTID), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
             nic.set_irq(&NIC_BELL);
         }
         cpu::println!(

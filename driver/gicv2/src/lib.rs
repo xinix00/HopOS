@@ -1,8 +1,9 @@
 //! De GIC-400 (GICv2): distributor plus de memory-mapped CPU-interface van
 //! de aanroepende core, als [`cpu::irq::Controller`]. De Pi 4 en de Pi 5
-//! (BCM2711/BCM2712) hebben deze GIC; de v3-boards draaien `driver-gicv3`.
-//! Registers en volgorde naar Linux' `drivers/irqchip/irq-gic.c` en
-//! `include/linux/irqchip/arm-gic.h`.
+//! (BCM2711/BCM2712) hebben deze GIC; de v3-boards draaien `driver-gicv3`,
+//! en de distributor delen ze (`driver_gicv3::dist`, de vorm van Linux'
+//! `irq-gic-common.c`). Registers en volgorde naar Linux'
+//! `drivers/irqchip/irq-gic.c` en `include/linux/irqchip/arm-gic.h`.
 //!
 //! Dezelfde twee regels als de v3-driver: alleen de lijnen aanraken die wij
 //! aanzetten (de firmware heeft er ook), en elke SPI expliciet naar déze
@@ -38,57 +39,22 @@ use core::mem::offset_of;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering::Relaxed};
 use cpu::irq::{Controller, Error, Line, Trigger};
 use dev::{Pa, Reg};
+use driver_gicv3::dist;
+pub use driver_gicv3::dist::{FIRST_SPECIAL, FIRST_SPI, SGI_COUNT};
 
-/// Het aantal SGI's (INTID 0..=15).
-pub const SGI_COUNT: u32 = 16;
-/// De INTID van SPI 0.
-pub const FIRST_SPI: u32 = 32;
-/// IAR: 1020..1023 is "niets" (1023 = spurious).
-pub const FIRST_SPECIAL: u32 = 1020;
-/// GICD_INT_DEF_PRI: onder de firmware, boven de vloer.
-const PRIORITY: u8 = 0xa0;
 /// De NS-view van GICD_CTLR en GICC_CTLR: Group 1 aan.
 const ENABLE_GRP1: u32 = 1;
 
-/// De distributor (ARM IHI 0048B, tabel 4-1).
+/// De distributor (ARM IHI 0048B, tabel 4-1): het gedeelde deel
+/// ([`dist::Gicd`]) en GICD_SGIR.
 #[repr(C)]
 struct Gicd {
-    ctlr: Reg<u32>,
-    typer: Reg<u32>,
-    iidr: Reg<u32>,
-    _r0: [u32; 29],
-    igroupr: [Reg<u32>; 32],
-    isenabler: [Reg<u32>; 32],
-    icenabler: [Reg<u32>; 32],
-    ispendr: [Reg<u32>; 32],
-    icpendr: [Reg<u32>; 32],
-    isactiver: [Reg<u32>; 32],
-    icactiver: [Reg<u32>; 32],
-    ipriorityr: [Reg<u8>; 1020],
-    _r1: u32,
-    itargetsr: [Reg<u8>; 1020],
-    _r2: u32,
-    icfgr: [Reg<u32>; 64],
-    _r3: [u32; 128],
+    d: dist::Gicd,
+    _r: [u32; 128],
     sgir: Reg<u32>,
 }
 
-const _: () = {
-    assert!(offset_of!(Gicd, ctlr) == 0x000);
-    assert!(offset_of!(Gicd, typer) == 0x004);
-    assert!(offset_of!(Gicd, iidr) == 0x008);
-    assert!(offset_of!(Gicd, igroupr) == 0x080);
-    assert!(offset_of!(Gicd, isenabler) == 0x100);
-    assert!(offset_of!(Gicd, icenabler) == 0x180);
-    assert!(offset_of!(Gicd, ispendr) == 0x200);
-    assert!(offset_of!(Gicd, icpendr) == 0x280);
-    assert!(offset_of!(Gicd, isactiver) == 0x300);
-    assert!(offset_of!(Gicd, icactiver) == 0x380);
-    assert!(offset_of!(Gicd, ipriorityr) == 0x400);
-    assert!(offset_of!(Gicd, itargetsr) == 0x800);
-    assert!(offset_of!(Gicd, icfgr) == 0xc00);
-    assert!(offset_of!(Gicd, sgir) == 0xf00);
-};
+const _: () = assert!(offset_of!(Gicd, sgir) == 0xf00);
 
 /// De CPU-interface (ARM IHI 0048B, tabel 4-2).
 #[repr(C)]
@@ -161,7 +127,7 @@ impl Gic {
     /// distributor. Idempotent. Een masker van 0 (een GIC die maar één
     /// interface heeft mag RAZ zijn) wordt interface 0.
     pub fn init(&self) {
-        let d = self.d();
+        let d = &self.d().d;
         let mut mask = 0u8;
         for t in d.itargetsr.iter().take(4) {
             mask |= t.read();
@@ -190,7 +156,7 @@ impl Gic {
     /// PPI's) zijn gebankt per core en van de app-cores die doordraaien.
     /// Woorden boven het lijnental van de GIC zijn WI.
     pub fn quiesce_spis(&self) {
-        let d = self.d();
+        let d = &self.d().d;
         for i in 1..32 {
             if let Some(r) = d.icenabler.get(i) {
                 r.write(0xffff_ffff);
@@ -241,28 +207,15 @@ impl Gic {
         self.c().hppir.read() & 0x3ff
     }
 
-    /// ICFGR van SPI `id`: bit 1 van zijn paar is de flank (IHI 0048B
-    /// 4.3.13; bit 0 is gereserveerd). Een SGI is altijd een flank en een
-    /// PPI is op de GIC-400 vast: die blijven zoals ze zijn.
-    fn config(&self, id: u32, edge: bool) {
-        if !(FIRST_SPI..FIRST_SPECIAL).contains(&id) {
-            return;
-        }
-        if let Some(r) = self.d().icfgr.get((id / 16) as usize) {
-            let bit = 2 << (2 * (id % 16));
-            r.update(|v| if edge { v | bit } else { v & !bit });
-            dev::mb();
-        }
-    }
-
     /// Eén regel voor de bootlog.
     #[must_use]
     pub fn describe(&self) -> Describe {
+        let d = &self.d().d;
         Describe {
             gicd: self.gicd,
-            gicd_iidr: self.d().iidr.read(),
-            gicd_ctlr: self.d().ctlr.read(),
-            lines: (self.d().typer.read() & 0x1f).saturating_add(1) * 32,
+            gicd_iidr: d.iidr.read(),
+            gicd_ctlr: d.ctlr.read(),
+            lines: (d.typer.read() & 0x1f).saturating_add(1) * 32,
             gicc: self.gicc,
             gicc_iidr: self.c().iidr.read(),
             gicc_ctlr: self.c().ctlr.read(),
@@ -281,7 +234,7 @@ impl Controller for Gic {
         if l.0 >= FIRST_SPECIAL {
             return Err(Error::Rejected { line: l.0 });
         }
-        self.config(l.0, t == Trigger::Edge);
+        self.d().d.set_edge(l.0, t == Trigger::Edge);
         Ok(())
     }
 
@@ -296,35 +249,25 @@ impl Controller for Gic {
         if id >= FIRST_SPECIAL {
             return Err(Error::Rejected { line: id });
         }
-        let d = self.d();
-        let i = id as usize;
-        let (Some(pri), Some(tgt), Some(en)) = (
-            d.ipriorityr.get(i),
-            d.itargetsr.get(i),
-            d.isenabler.get(i / 32),
-        ) else {
-            return Err(Error::Rejected { line: id });
-        };
-        pri.write(PRIORITY);
-        if id >= FIRST_SPI {
+        let d = &self.d().d;
+        if id >= FIRST_SPI
+            && let Some(tgt) = d.itargetsr.get(id as usize)
+        {
             tgt.write(self.cpu_mask().max(1));
         }
-        dev::mb();
-        en.write(1 << (id % 32));
-        dev::mb();
-        Ok(())
+        if d.enable(id) {
+            Ok(())
+        } else {
+            Err(Error::Rejected { line: id })
+        }
     }
 
-    /// ICENABLER is write-1-to-clear: nooit lezen-aanpassen-schrijven, dat
-    /// zou de buren raken.
+    /// Zie [`dist::Gicd::disable`].
     fn disable(&self, l: Line) {
         if l.0 >= FIRST_SPECIAL {
             return;
         }
-        if let Some(r) = self.d().icenabler.get((l.0 / 32) as usize) {
-            r.write(1 << (l.0 % 32));
-            dev::mb();
-        }
+        self.d().d.disable(l.0);
     }
 
     /// GICC_IAR: de claim. 1020 en hoger is "niets". De rauwe waarde blijft
@@ -448,7 +391,7 @@ mod tests {
         g.init();
         // De GEM op de Pi 5: MIP-vector 6 wordt SPI 134, INTID 166.
         g.enable(Line(166)).unwrap();
-        assert_eq!(dev::read8(dp.add(0x400 + 166)), PRIORITY);
+        assert_eq!(dev::read8(dp.add(0x400 + 166)), dist::PRIORITY);
         assert_eq!(dev::read8(dp.add(0x800 + 166)), 1);
         assert_eq!(dev::read32(dp.add(0x100 + 4 * 5)), 1 << (166 % 32));
         g.set_trigger(Line(166), Trigger::Edge).unwrap();
@@ -473,13 +416,14 @@ mod tests {
         g.init();
         let disp: &'static Dispatcher = Box::leak(Box::new(Dispatcher::new()));
         disp.use_controller(g);
-        disp.enable_as(Line(166), Trigger::Edge, None).unwrap();
+        disp.enable_as(Line(166), Trigger::Edge, None, None)
+            .unwrap();
         let icfgr10 = dev::read32(dp.add(0xc00 + 4 * 10));
         assert_eq!(icfgr10 & (2 << (2 * (166 % 16))), 2 << (2 * (166 % 16)));
         assert_eq!(dev::read32(dp.add(0x100 + 4 * 5)), 1 << (166 % 32));
         // SPI 157 (INTID 189): stond op flank, wordt level.
         dev::write32(dp.add(0xc00 + 4 * 11), u32::MAX);
-        disp.enable(Line(189), None).unwrap();
+        disp.enable(Line(189), None, None).unwrap();
         let icfgr11 = dev::read32(dp.add(0xc00 + 4 * 11));
         assert_eq!(icfgr11 & (2 << (2 * (189 % 16))), 0);
         assert_eq!(icfgr11 | (2 << (2 * (189 % 16))), u32::MAX);
@@ -501,7 +445,7 @@ mod tests {
         assert_eq!(dev::read32(dp.add(0x100)), 1 << 30);
         // De kick-SGI: prioriteit en enable, geen target.
         g.enable(Line(8)).unwrap();
-        assert_eq!(dev::read8(dp.add(0x400 + 8)), PRIORITY);
+        assert_eq!(dev::read8(dp.add(0x400 + 8)), dist::PRIORITY);
         assert_eq!(dev::read8(dp.add(0x800 + 8)), 0);
         assert_eq!(dev::read32(dp.add(0x100)), 1 << 8);
         assert_eq!(g.enable(Line(1020)), Err(Error::Rejected { line: 1020 }));

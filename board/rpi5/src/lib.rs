@@ -387,7 +387,8 @@ fn gem_ack() {
     unsafe { driver_gem::ack_irq(RP1_ETH) };
 }
 
-static GEM_ACK: fn() = gem_ack;
+/// De bel van de GEM-lijn: de dispatch luidt hem, de RX-pomp wacht erop.
+static GEM_BELL: sync::Signal = sync::Signal::new();
 
 /// De GIC-lijn van MIP-vector `v`, en zijn soort: SPI 128 + v, en een flank.
 ///
@@ -438,8 +439,8 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     dev::mb();
     let (line, trigger) = mip_line(RP1_INT_ETH);
     let id = line.0;
-    let bell =
-        cpu::irq::enable_as(line, trigger, Some(&GEM_ACK)).map_err(|_| "gic: line refused")?;
+    cpu::irq::enable_as(line, trigger, Some(gem_ack), Some(&GEM_BELL))
+        .map_err(|_| "gic: line refused")?;
 
     // 3. De RP1: MSI aan in IACK-modus, en de GEM zelf open.
     dev::write32(
@@ -455,7 +456,7 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     // maar er kwam geen MSI meer, irq(nic=0). Op een koude boot doet de
     // IACK niets.
     rp1_iack();
-    nic.set_irq(bell, rp1_iack);
+    nic.set_irq(&GEM_BELL, rp1_iack);
     Ok(id)
 }
 

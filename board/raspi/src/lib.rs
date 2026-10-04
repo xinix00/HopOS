@@ -419,17 +419,6 @@ pub const HYP_TIMER_PPI: u32 = 26;
 /// NOG NIET GEMETEN (docs/boards-pi.md).
 pub const KICK_SGI: u32 = 8;
 
-/// De device-ack van de CNTHP.
-static HYP_TIMER_ACK: fn() = cpu::idle::hyp_timer_off;
-
-/// De "ack" van de kick: er is geen device om los te laten (de core is al
-/// terug bij de kern); alleen tellen.
-static KICK_ACK: fn() = count_kick;
-
-fn count_kick() {
-    cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
-}
-
 /// De peek van de OS-core: GICC_HPPIR van de GIC-400 van deze SoC.
 fn hppir<S: Soc>() -> u32 {
     S::gic().hppir()
@@ -561,14 +550,21 @@ impl<S: Soc> Board for Raspi<S> {
         // De EL2-timer: de deadline van de executor terwijl een bewoner de
         // OS-core heeft (`cpu::el2::OsCore`). Zijn ack zet hem uit, zodat de
         // lijn valt tot de volgende beurt hem weer zet.
-        if cpu::irq::enable(cpu::irq::Line(HYP_TIMER_PPI), Some(&HYP_TIMER_ACK)).is_err() {
+        if cpu::irq::enable(
+            cpu::irq::Line(HYP_TIMER_PPI),
+            Some(cpu::idle::hyp_timer_off),
+            None,
+        )
+        .is_err()
+        {
             cpu::println!(
                 "irq: CNTHP PPI {HYP_TIMER_PPI} refused, the OS-core rotation runs without its timer"
             );
         }
         // De kick van de app-cores: zonder vermelding in de dispatch zou de
-        // eerste claim hem als onbekende lijn uitzetten.
-        if cpu::irq::enable(cpu::irq::Line(KICK_SGI), Some(&KICK_ACK)).is_err() {
+        // eerste claim hem als onbekende lijn uitzetten. Zijn "ack" telt
+        // alleen: er is geen device om los te laten.
+        if cpu::irq::enable(cpu::irq::Line(KICK_SGI), Some(cpu::el2::count_kick), None).is_err() {
             cpu::println!(
                 "irq: kick SGI {KICK_SGI} refused, the OS core hears app cores only on its timer"
             );

@@ -72,7 +72,8 @@ pub mod watchdog;
 
 use board::heap::Heap;
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
-use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use cpu::irq::{Controller, Line};
 use dev::Pa;
 use driver_gicv3::{Gic, SysRegIcc};
 use driver_ns16550::Ns16550;
@@ -267,41 +268,6 @@ const KICK_LOST_LINES: u32 = 2;
 /// Meetlat: kicks van [`Uefi::kick_self`] die niet pending kwamen.
 pub static KICKS_LOST: AtomicU32 = AtomicU32::new(0);
 
-/// Zoveel eigen lijnen kan een board aanzetten ([`Uefi::enable_line`]).
-pub const LINES: usize = 8;
-
-/// De lijnen van [`Uefi::enable_line`]: INTID (0 = vrij), bel en ack. Eén
-/// schrijver bij boot, daarna gelezen door de dispatch.
-static LINE_IDS: [AtomicU32; LINES] = [const { AtomicU32::new(0) }; LINES];
-static LINE_BELLS: [AtomicPtr<Signal>; LINES] =
-    [const { AtomicPtr::new(core::ptr::null_mut()) }; LINES];
-static LINE_ACKS: [AtomicPtr<()>; LINES] = [const { AtomicPtr::new(core::ptr::null_mut()) }; LINES];
-
-/// Een eigen lijn in de dispatch: ack, bel. `false` = niet van ons.
-fn own_line(id: u32) -> bool {
-    let Some(i) = LINE_IDS.iter().position(|l| l.load(Relaxed) == id) else {
-        return false;
-    };
-    let ack = LINE_ACKS
-        .get(i)
-        .map_or(core::ptr::null_mut(), |a| a.load(Relaxed));
-    if !ack.is_null() {
-        // SAFETY: `LINE_ACKS` wordt alleen door `enable_line` geschreven, met
-        // een geldige `fn()`; een functiepointer en een datapointer zijn op
-        // onze targets even groot.
-        let f = unsafe { core::mem::transmute::<*mut (), fn()>(ack) };
-        f();
-    }
-    let bell = LINE_BELLS
-        .get(i)
-        .map_or(core::ptr::null_mut(), |b| b.load(Relaxed));
-    // SAFETY: `enable_line` zette hier een `&'static Signal`.
-    if let Some(b) = unsafe { bell.as_ref() } {
-        b.set();
-    }
-    true
-}
-
 /// De PCIe-segmenten die we afzoeken, en hoeveel functies per segment we
 /// in de bootlog noemen.
 const PCI_LOG_MAX: usize = 32;
@@ -360,6 +326,43 @@ fn console_nowait(b: &[u8]) -> usize {
     // alleen bij een PL011.
     let u = unsafe { Pl011::new(Pa(base)) };
     u.write_nowait(b)
+}
+
+/// De controller van `cpu::irq` op een UEFI-machine: de GIC uit de feiten
+/// ([`gic`], per aanroep, zoals de adressen pas bij boot bekend zijn), met
+/// de LPI's via hun ITS ([`irq`]): Linux' ITS als eigen domein boven de
+/// GICv3, in het klein.
+struct Irqchip;
+
+/// De ene [`Irqchip`].
+static IRQCHIP: Irqchip = Irqchip;
+
+impl Controller for Irqchip {
+    /// Een LPI gaat aan in de configuratietabel van zijn ITS, een SGI, PPI
+    /// of SPI in de GIC, naar deze core.
+    fn enable(&self, l: Line) -> Result<(), cpu::irq::Error> {
+        if irq::is_lpi(l.0) {
+            return irq::enable_lpi(l.0).map_err(|_| cpu::irq::Error::Rejected { line: l.0 });
+        }
+        Controller::enable(&gic(), l)
+    }
+
+    /// Een LPI blijft zoals hij is: een flank die de ITS één keer stuurt,
+    /// en een LPI die niemand kent heeft geen route (`start_its` wist de
+    /// ITS). Zo was het vóór de dispatcher ook.
+    fn disable(&self, l: Line) {
+        if !irq::is_lpi(l.0) {
+            gic().disable(l);
+        }
+    }
+
+    fn claim(&self) -> Option<Line> {
+        gic().claim()
+    }
+
+    fn complete(&self, l: Line) {
+        gic().complete(l);
+    }
 }
 
 /// De GIC, uit de feiten.
@@ -524,22 +527,13 @@ impl Uefi {
     /// hij komt; `ack` draait in de dispatch vóór de EOI (de device-kant van
     /// een level-lijn, zodat hij valt). Een LPI komt van de ITS
     /// ([`irq::wire_msix`]) en gaat aan in zijn configuratietabel, niet in
-    /// de distributor. Hoogstens [`LINES`] lijnen.
+    /// de distributor. De lijn staat in de tabel van `cpu::irq`, en de
+    /// dispatch telt hem als NIC-lijn.
     pub fn enable_line(&self, intid: u32, bell: &'static Signal, ack: fn()) -> Result<(), Error> {
-        let slot = LINE_IDS
-            .iter()
-            .position(|l| l.compare_exchange(0, intid, Relaxed, Relaxed).is_ok())
-            .ok_or(Error::Irq("no free interrupt line slot"))?;
-        if let (Some(b), Some(a)) = (LINE_BELLS.get(slot), LINE_ACKS.get(slot)) {
-            b.store(core::ptr::from_ref(bell).cast_mut(), Relaxed);
-            a.store(ack as *mut (), Relaxed);
-        }
-        if irq::is_lpi(intid) {
-            return irq::enable_lpi(intid);
-        }
-        gic()
-            .enable(intid, cpu::mpidr())
-            .map_err(|_| Error::Irq("line refused"))
+        cpu::irq::enable(Line(intid), Some(ack), Some(bell)).map_err(|e| match e {
+            cpu::irq::Error::Full { .. } => Error::Irq("no free interrupt line slot"),
+            _ => Error::Irq("line refused"),
+        })
     }
 
     /// De config van de node: het venster in het image
@@ -764,13 +758,17 @@ impl Board for Uefi {
         let gic = gic();
         gic.init()
             .map_err(|_| Error::Irq("redistributor stays asleep"))?;
-        gic.enable(facts::TIMER_PPI.load(Relaxed), mpidr)
+        cpu::irq::use_controller(&IRQCHIP);
+        let timer = Line(facts::TIMER_PPI.load(Relaxed));
+        cpu::irq::enable(timer, Some(arch::timer_off), None)
             .map_err(|_| Error::Irq("timer PPI refused"))?;
         // De OS-core: de EL2-timer (de deadline tijdens de beurt van een
-        // bewoner) en de kick van de app-cores, zoals op virt.
-        gic.enable(facts::HYP_TIMER_PPI.load(Relaxed), mpidr)
+        // bewoner) en de kick van de app-cores (die alleen telt), zoals op
+        // virt.
+        let hyp = Line(facts::HYP_TIMER_PPI.load(Relaxed));
+        cpu::irq::enable(hyp, Some(cpu::idle::hyp_timer_off), None)
             .map_err(|_| Error::Irq("hyp timer PPI refused"))?;
-        gic.enable(KICK_SGI, mpidr)
+        cpu::irq::enable(Line(KICK_SGI), Some(cpu::el2::count_kick), None)
             .map_err(|_| Error::Irq("kick SGI refused"))?;
         // Leest de enable terug als 0, dan is de SGI niet van ons (secure,
         // RAZ/WI) en hoort de OS-core de app-cores alleen op zijn timer.
@@ -790,28 +788,21 @@ impl Board for Uefi {
     }
 
     fn dispatch_interrupts(&self) -> Dispatched {
-        let gic = gic();
-        let timer = facts::TIMER_PPI.load(Relaxed);
-        let hyp = facts::HYP_TIMER_PPI.load(Relaxed);
-        let mut d = Dispatched::default();
-        while let Some(id) = gic.claim() {
-            if id == timer {
-                arch::timer_off();
-                d.timer += 1;
-            } else if id == hyp {
-                cpu::idle::hyp_timer_off();
-                d.timer += 1;
-            } else if id == KICK_SGI {
-                cpu::el2::OS_STATS.kicks.fetch_add(1, Relaxed);
-            } else if own_line(id) {
-                d.nic += 1;
-            } else {
-                d.other += 1;
-            }
-            gic.eoi(id);
-        }
+        let pass = cpu::irq::global().dispatch();
         cpu::irq::unmask();
-        d
+        // De kick telt nergens (hij staat in `os(kicks=)`); elke lijn van
+        // `enable_line` is een NIC-lijn, en wat niemand kent is `other`.
+        let timer = pass
+            .claims(Line(facts::TIMER_PPI.load(Relaxed)))
+            .saturating_add(pass.claims(Line(facts::HYP_TIMER_PPI.load(Relaxed))));
+        let kick = pass.claims(Line(KICK_SGI));
+        Dispatched {
+            timer,
+            nic: pass
+                .claimed
+                .saturating_sub(timer.saturating_add(kick).saturating_add(pass.unknown)),
+            other: pass.unknown,
+        }
     }
 
     fn framebuffer(&self) -> Option<board::fb::Desc> {

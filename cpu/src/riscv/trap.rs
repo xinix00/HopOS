@@ -2,10 +2,10 @@
 //! kern): de riscv-tegenhanger van `cpu::vectors`.
 //!
 //! Het contract is dat van de Go-kern en van de arm64-vector: een interrupt
-//! is een wek-signaal, geen plek om code te draaien. De ingang zet
-//! [`IRQ_FLAG`], zet de BRON uit in `mie` (MEIE voor de PLIC, MSIE voor de
-//! kick, MTIE voor een verdwaalde timer) en wekt de dispatcher
-//! ([`crate::irq::on_irq`]). Op ARM keert de vector terug met I gemaskeerd;
+//! is een wek-signaal, geen plek om code te draaien. De ingang zet de BRON
+//! uit in `mie` (MEIE voor de PLIC, MSIE voor de kick, MTIE voor een
+//! verdwaalde timer) en wekt de dispatcher ([`crate::irq::on_irq`], dezelfde
+//! vlag als op arm64). Op ARM keert de vector terug met I gemaskeerd;
 //! hier kan dat niet per bron via `mstatus` (MPIE zet MIE bij `mret` terug),
 //! dus is het de `mie`-bit van de bron die dicht blijft tot de dispatch-taak
 //! geclaimd heeft en hem weer opent. Zonder dat is een level-lijn van de
@@ -18,13 +18,8 @@
 //! laat klobberen. De FP-registers niet: de Rust-kant hieronder raakt alleen
 //! atomics en een waker aan, en rekent niet in floating point.
 
-use core::sync::atomic::{
-    AtomicU32, AtomicU64,
-    Ordering::{AcqRel, Acquire, Relaxed, Release},
-};
+use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-/// De IRQ-vlag: gezet door de trap-ingang.
-pub static IRQ_FLAG: AtomicU32 = AtomicU32::new(0);
 /// Meetlat: hoe vaak de ingang voor een interrupt liep.
 pub static IRQ_ENTRIES: AtomicU64 = AtomicU64::new(0);
 /// Meetlat: timer-traps. Hoort nul te zijn: de slaap armt de timer alleen
@@ -39,17 +34,6 @@ pub const IRQ_MSI: u64 = 3;
 pub const IRQ_MTI: u64 = 7;
 /// Machine external interrupt (de PLIC).
 pub const IRQ_MEI: u64 = 11;
-
-/// Staat de IRQ-vlag? Kijken, niet wissen.
-#[must_use]
-pub fn irq_pending() -> bool {
-    IRQ_FLAG.load(Acquire) != 0
-}
-
-/// Wist de IRQ-vlag en zegt of hij stond.
-pub fn take_irq() -> bool {
-    IRQ_FLAG.swap(0, AcqRel) != 0
-}
 
 /// Wat de ingang met een interrupt doet: welke `mie`-bit dicht moet en of
 /// de dispatcher gewekt wordt. Puur, zodat de host-test het contract toetst.
@@ -81,7 +65,6 @@ extern "C" fn trap_entry(cause: u64, epc: u64, tval: u64) {
         STRAY_TIMER.fetch_add(1, Relaxed);
     }
     if wake {
-        IRQ_FLAG.store(1, Release);
         IRQ_ENTRIES.fetch_add(1, Relaxed);
         crate::irq::on_irq();
     }
@@ -183,11 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn the_door_takes_the_flag_once() {
-        IRQ_FLAG.store(1, Relaxed);
-        assert!(irq_pending());
-        assert!(take_irq());
-        assert!(!take_irq());
+    fn the_cause_has_a_name() {
         assert_eq!(cause_name(7), "store/AMO access fault");
     }
 }

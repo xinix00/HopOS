@@ -450,6 +450,13 @@ pub static STATS: Stats = Stats {
     longest: AtomicU64::new(0),
 };
 
+/// De device-ack van de kick-SGI bij de dispatcher (`cpu::irq`): er is geen
+/// device om los te laten (de core is al terug bij de kern), alleen tellen
+/// in [`Stats::kicks`].
+pub fn count_kick() {
+    STATS.kicks.fetch_add(1, Relaxed);
+}
+
 /// De rotatie van de OS-core. Eén, eigendom van de slaap van de executor
 /// op die core (`cpu::idle::ArmSleeper::host`).
 ///

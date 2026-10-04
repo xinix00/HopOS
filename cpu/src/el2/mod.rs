@@ -39,9 +39,9 @@ pub use dispatch::{
     prepare_smp, revoke, rx_due, unwind_cold,
 };
 pub use oscore::{
-    Back, Bell, Next, OsCore, Probe, STATS as OS_STATS, TURN_CAP_NS, Turn, apple_ipi_ack, due,
-    held, hold, host, hosts, last_fault, next, prepare, recall, rehost, release_held,
-    selftest_tries,
+    Back, Bell, Next, OsCore, Probe, STATS as OS_STATS, TURN_CAP_NS, Turn, apple_ipi_ack,
+    count_kick, due, held, hold, host, hosts, last_fault, next, prepare, recall, rehost,
+    release_held, selftest_tries,
 };
 
 use core::fmt;

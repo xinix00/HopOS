@@ -9,6 +9,8 @@ description = "De GIC-400 (GICv2) van de Pi 4 en 5: distributor en memory-mapped
 [dependencies]
 dev = { path = "../../dev" }
 cpu = { path = "../../cpu" }
+# De distributor die v2 en v3 delen (`driver_gicv3::dist`).
+driver-gicv3 = { path = "../gicv3" }
 
 [lints]
 workspace = true

@@ -1,36 +1,35 @@
-//! Het interrupt-contract van HopOS: een lijn, een controller, en één
-//! werkwoord: [`wait`].
+//! Het interrupt-contract van HopOS: een lijn, een controller, en de
+//! dispatcher die ze verbindt.
 //!
-//! Dit bezit: de tabel lijn-naar-wachter, één [`Signal`] per lijn, en de
-//! dispatcher die claimt, het device ackt, het signaal zet en completeert.
-//! Niet van hier: de controller zelf (driver/gicv3, straks de AIC) en de
-//! vector (het boot-spoor), die alleen [`on_irq`] roept.
+//! Dit bezit: de tabel lijn-naar-wachter (per lijn de device-ack en de bel
+//! van de wachter) en de dispatcher die claimt, het device ackt, de bel
+//! luidt en completeert. Niet van hier: de controllers zelf (driver/gicv3,
+//! driver/gicv2, driver/aic, de PLIC in [`crate::riscv::plic`]) en de vector
+//! (het boot-spoor), die alleen [`on_irq`] roept.
 //!
 //! Tot 02-09 had HopOS géén interrupt-afhandeling: DAIF gemaskeerd, alles
 //! gepold, en HOP's RX-lus sliep 300 µs per ronde, ruim 3.000 wekmomenten
 //! per seconde op een node die niets doet en 300 µs latency op élk
 //! app-pakket. Het model sindsdien, en hier in Rust-vorm: de vector zet een
-//! vlag en keert terug met I gemaskeerd; de dispatcher-taak ([`run`]) ziet
-//! de vlag, claimt tot de controller niets meer heeft, en opent I weer. Geen
-//! logica in exception-context (handboek §5): op de Ampere gaf runtime-code
-//! in de vector een stille hang binnen seconden (19-09), op de M4 een
-//! verloren heropening van het I-masker onder load (21-09).
+//! vlag en keert terug met I gemaskeerd; de dispatch-taak van de kern
+//! (`Board::dispatch_interrupts`) ziet de vlag, laat [`Dispatcher::dispatch`]
+//! claimen tot de controller niets meer heeft, en opent I weer. Geen logica
+//! in exception-context (handboek §5): op de Ampere gaf runtime-code in de
+//! vector een stille hang binnen seconden (19-09), op de M4 een verloren
+//! heropening van het I-masker onder load (21-09).
 //!
 //! Twee regels, beide isolatie:
 //!
 //! - Interrupts zijn uitsluitend HOP-werk. Een app-core wordt nooit een
 //!   target van de controller en houdt zijn maskers dicht; een app heeft
-//!   geen lijn, geen controller en geen `wait`.
-//! - Een verloren flank mag nooit een hang worden: [`wait`] heeft een
-//!   maximum, en de wachter behandelt een time-out als "kijk toch maar"
+//!   geen lijn en geen controller.
+//! - Een verloren flank mag nooit een hang worden: de wachter op een bel
+//!   heeft een maximum en behandelt een time-out als "kijk toch maar"
 //!   (liever pollen dan hangen).
 
 use core::cell::{Cell, RefCell};
 use core::fmt;
-use core::future::Future;
-use core::pin::Pin;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use core::task::{Context, Poll};
 use sync::{Local, Signal};
 
 /// Hoeveel lijnen er tegelijk een wachter kunnen hebben. HOP bedient een
@@ -75,8 +74,9 @@ pub enum Trigger {
 
 /// De device-kant van de bevestiging: wat het device nodig heeft om zijn
 /// lijn weer los te laten (virtio: InterruptACK), gedaan vóór de wachter
-/// gewekt wordt.
-pub type Ack = &'static dyn Fn();
+/// gewekt wordt. Een kale functie: wat hij nodig heeft (de ack-waarde van
+/// de driver) leest hij uit een `static` van het board.
+pub type Ack = fn();
 
 /// Wat een interrupt-controller moet kunnen. Vier werkwoorden en een
 /// instelling, en niets over prioriteiten of groepen: die zijn van de
@@ -150,27 +150,46 @@ pub struct Stats {
     pub stuck: AtomicU64,
 }
 
-/// Wat één dispatch-ronde zag; de dispatcher-taak logt het.
+/// Wat één dispatch-ronde zag; het board telt er zijn `Dispatched` uit.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Pass {
-    /// Aantal claims in deze ronde.
+    /// Aantal claims in deze ronde, alle lijnen.
     pub claimed: u32,
+    /// Claims van lijnen zonder wachter (elk uitgezet).
+    pub unknown: u32,
     /// Een lijn zonder wachter die vuurde en is uitgezet (de laatste).
     pub disabled: Option<Line>,
     /// De lijn waarop de ronde werd afgebroken ([`STRAY_LIMIT`]).
     pub stray: Option<Line>,
     /// Een level-lijn zonder device-ack die op [`STRAY_LIMIT`] uitgezet is.
     pub stuck: Option<Line>,
+    /// Claims per geregistreerde lijn (INTID, aantal), op de plek van de
+    /// tabel.
+    seen: [(u32, u32); MAX_LINES],
+}
+
+impl Pass {
+    /// Hoe vaak lijn `l` in deze ronde geclaimd werd (0 voor een lijn
+    /// zonder wachter: die telt in [`Pass::unknown`]).
+    #[must_use]
+    pub fn claims(&self, l: Line) -> u32 {
+        self.seen
+            .iter()
+            .filter(|&&(id, _)| id == l.0)
+            .map(|&(_, n)| n)
+            .sum()
+    }
 }
 
 #[derive(Copy, Clone)]
 struct Entry {
     line: Line,
     ack: Option<Ack>,
+    bell: Option<&'static Signal>,
     trigger: Trigger,
 }
 
-/// De dispatcher: de tabel lijn-naar-wachter en een signaal per lijn.
+/// De dispatcher: de tabel lijn-naar-wachter.
 ///
 /// Eén per systeem, op HOP's core; [`global`] is die ene. Hij woont in een
 /// [`Local`]: alleen taken op HOP's executor raken hem aan, nooit een ISR
@@ -178,7 +197,6 @@ struct Entry {
 pub struct Dispatcher {
     ctrl: Cell<Option<&'static dyn Controller>>,
     lines: RefCell<[Option<Entry>; MAX_LINES]>,
-    signals: [Signal; MAX_LINES],
     /// De meetlat.
     pub stats: Stats,
 }
@@ -196,7 +214,6 @@ impl Dispatcher {
         Self {
             ctrl: Cell::new(None),
             lines: RefCell::new([None; MAX_LINES]),
-            signals: [const { Signal::new() }; MAX_LINES],
             stats: Stats {
                 fired: AtomicU64::new(0),
                 passes: AtomicU64::new(0),
@@ -219,23 +236,30 @@ impl Dispatcher {
         self.ctrl.get().is_some()
     }
 
-    /// Registreert `l` als level-wek-doel (met de device-ack) en maakt hem
-    /// scherp bij de controller. Geeft het signaal van de lijn.
-    pub fn enable(&'static self, l: Line, ack: Option<Ack>) -> Result<&'static Signal, Error> {
-        self.enable_as(l, Trigger::Level, ack)
+    /// Registreert `l` als level-wek-doel (met de device-ack en de bel van
+    /// de wachter) en maakt hem scherp bij de controller.
+    pub fn enable(
+        &self,
+        l: Line,
+        ack: Option<Ack>,
+        bell: Option<&'static Signal>,
+    ) -> Result<(), Error> {
+        self.enable_as(l, Trigger::Level, ack, bell)
     }
 
     /// Registreert `l` als wek-doel van soort `trigger` (met de
-    /// device-ack), zet de soort bij de controller en maakt hem dan pas
-    /// scherp. Geeft het signaal van de lijn.
+    /// device-ack en de bel van de wachter), zet de soort bij de controller
+    /// en maakt hem dan pas scherp. Een lijn zonder bel (een timer, de kick)
+    /// heeft alleen zijn ack.
     pub fn enable_as(
-        &'static self,
+        &self,
         l: Line,
         trigger: Trigger,
         ack: Option<Ack>,
-    ) -> Result<&'static Signal, Error> {
+        bell: Option<&'static Signal>,
+    ) -> Result<(), Error> {
         let ctrl = self.ctrl.get().ok_or(Error::NoController)?;
-        let i = {
+        {
             let mut lines = self.lines.borrow_mut();
             let pos = lines
                 .iter()
@@ -246,24 +270,13 @@ impl Dispatcher {
                 *slot = Some(Entry {
                     line: l,
                     ack,
+                    bell,
                     trigger,
                 });
             }
-            pos
-        };
+        }
         ctrl.set_trigger(l, trigger)?;
-        ctrl.enable(l)?;
-        self.signals.get(i).ok_or(Error::Full { line: l.0 })
-    }
-
-    /// Het signaal van een geregistreerde lijn.
-    fn signal(&'static self, l: Line) -> Option<&'static Signal> {
-        let i = self
-            .lines
-            .borrow()
-            .iter()
-            .position(|e| e.is_some_and(|e| e.line == l))?;
-        self.signals.get(i)
+        ctrl.enable(l)
     }
 
     fn entry(&self, l: Line) -> Option<(usize, Entry)> {
@@ -275,14 +288,14 @@ impl Dispatcher {
     }
 
     /// Eén ronde: alle gevuurde lijnen claimen, per lijn het device acken,
-    /// de wachter wekken en de lijn completeren.
+    /// de bel luiden en de lijn completeren.
     ///
     /// Onbekend = meteen uit (een lijn die de firmware aan liet staan:
     /// UEFI-timer, UART, een watchdog-waarschuwing). Een level-lijn zonder
     /// device-ack die [`STRAY_LIMIT`] keer terugkomt, laat niemand ooit
-    /// zakken: uit, en luid (`pass.stuck`); zijn wachter valt terug op het
-    /// maximum van [`wait`], liever pollen dan een dispatcher die de
-    /// rotatie van de OS-core voor eeuwig onderbreekt (de vrees van 30-09
+    /// zakken: uit (`pass.stuck`); zijn wachter valt terug op zijn maximum,
+    /// liever pollen dan een dispatcher die de rotatie van de OS-core voor
+    /// eeuwig onderbreekt (de vrees van 30-09
     /// bij de eerste Pi 5-boot). Bekend met een ack, of een flank, maar
     /// blijvend = de ronde afbreken na [`STRAY_LIMIT`], en de lijn NIET
     /// uitzetten: een
@@ -299,7 +312,6 @@ impl Dispatcher {
             return pass;
         };
         self.stats.passes.fetch_add(1, Relaxed);
-        let mut seen = [0u32; MAX_LINES];
         while let Some(l) = ctrl.claim() {
             pass.claimed = pass.claimed.saturating_add(1);
             self.stats.fired.fetch_add(1, Relaxed);
@@ -307,6 +319,7 @@ impl Dispatcher {
                 ctrl.disable(l);
                 ctrl.complete(l);
                 self.stats.unknown.fetch_add(1, Relaxed);
+                pass.unknown = pass.unknown.saturating_add(1);
                 pass.disabled = Some(l);
                 continue;
             };
@@ -314,13 +327,15 @@ impl Dispatcher {
                 ack();
             }
             // Al gewekt en nog niet opgehaald: één is genoeg (level).
-            if let Some(s) = self.signals.get(i) {
-                s.set();
+            if let Some(b) = e.bell {
+                b.set();
             }
             ctrl.complete(l);
-            let Some(n) = seen.get_mut(i) else { continue };
-            *n += 1;
-            if *n > STRAY_LIMIT {
+            let Some(seen) = pass.seen.get_mut(i) else {
+                continue;
+            };
+            *seen = (l.0, seen.1.saturating_add(1));
+            if seen.1 > STRAY_LIMIT {
                 self.stats.stray_passes.fetch_add(1, Relaxed);
                 pass.stray = Some(l);
                 if e.trigger == Trigger::Level && e.ack.is_none() {
@@ -335,7 +350,8 @@ impl Dispatcher {
     }
 }
 
-/// De vlag van de vector: gezet in exception-context, gewacht door [`run`].
+/// De vlag van de vector: gezet in exception-context, gewacht door de
+/// dispatch-taak van de kern (de bel van `Board::start_interrupts`).
 ///
 /// Een kale `Signal` (atomic plus waker) buiten elke `Local`, want de ISR
 /// raakt nooit een `Local` (handboek §1.1).
@@ -346,7 +362,7 @@ pub static IRQ_PENDING: Signal = Signal::new();
 ///
 /// De vector keert daarna terug met I gemaskeerd (SPSR_EL1.I gezet): de
 /// lijn staat nog tot de dispatcher hem claimt, en met I open werd dat een
-/// storm. [`run`] opent I weer na zijn ronde.
+/// storm. De dispatch-taak opent I weer na zijn ronde ([`unmask`]).
 pub fn on_irq() {
     IRQ_PENDING.set();
 }
@@ -364,110 +380,27 @@ pub fn use_controller(c: &'static dyn Controller) {
     global().use_controller(c);
 }
 
-/// Maakt level-lijn `l` scherp met optionele device-ack; geeft zijn
-/// signaal.
-pub fn enable(l: Line, ack: Option<Ack>) -> Result<&'static Signal, Error> {
-    global().enable(l, ack)
+/// Maakt level-lijn `l` scherp met optionele device-ack en bel
+/// ([`Dispatcher::enable`]).
+pub fn enable(l: Line, ack: Option<Ack>, bell: Option<&'static Signal>) -> Result<(), Error> {
+    global().enable(l, ack, bell)
 }
 
-/// Maakt lijn `l` van soort `trigger` scherp met optionele device-ack;
-/// geeft zijn signaal ([`Dispatcher::enable_as`]).
-pub fn enable_as(l: Line, trigger: Trigger, ack: Option<Ack>) -> Result<&'static Signal, Error> {
-    global().enable_as(l, trigger, ack)
-}
-
-/// Wacht tot lijn `l` vuurde of tot `max` afloopt: `true` = gevuurd.
-///
-/// `max` is een timer-future van de executor (`EXEC.after(d)`), zodat deze
-/// crate niet aan één executor-type vastzit. Een lijn die niet
-/// geregistreerd is wacht gewoon `max`: dat is de poll-terugval, geen fout.
-pub fn wait<T: Future<Output = ()>>(l: Line, max: T) -> Wait<T> {
-    Wait {
-        signal: global().signal(l),
-        max,
-    }
-}
-
-/// De future van [`wait`].
-#[must_use = "een future doet niets tot hij gepolld wordt"]
-pub struct Wait<T> {
-    signal: Option<&'static Signal>,
-    max: T,
-}
-
-impl<T: Future<Output = ()>> Future for Wait<T> {
-    type Output = bool;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<bool> {
-        // SAFETY: structurele pinning: `max` wordt nooit uit `self`
-        // verplaatst en `Wait` heeft geen `Drop`-impl.
-        let this = unsafe { self.get_unchecked_mut() };
-        if let Some(s) = this.signal
-            && Pin::new(&mut s.wait()).poll(cx).is_ready()
-        {
-            return Poll::Ready(true);
-        }
-        // SAFETY: zie hierboven.
-        let max = unsafe { Pin::new_unchecked(&mut this.max) };
-        max.poll(cx).map(|()| false)
-    }
-}
-
-/// De dispatcher-taak van HOP's core: wacht op de vector, draait een ronde,
-/// meldt wat opviel en opent I weer. Spawnen na [`use_controller`].
-///
-/// `log` krijgt één Engelse regel per bijzonderheid: de eerste drie claims
-/// en de eerste vijf rondes als bewijs dat het pad leeft, elke uitgezette
-/// onbekende lijn, en de eerste drie afgebroken rondes.
-pub async fn run(log: fn(fmt::Arguments<'_>)) {
-    let d = global();
-    loop {
-        IRQ_PENDING.wait().await;
-        let before = d.stats.fired.load(Relaxed);
-        let pass = d.dispatch();
-        report(d, before, pass, log);
-        unmask();
-    }
+/// Maakt lijn `l` van soort `trigger` scherp met optionele device-ack en
+/// bel ([`Dispatcher::enable_as`]).
+pub fn enable_as(
+    l: Line,
+    trigger: Trigger,
+    ack: Option<Ack>,
+    bell: Option<&'static Signal>,
+) -> Result<(), Error> {
+    global().enable_as(l, trigger, ack, bell)
 }
 
 /// Opent I (DAIFClr #2) op deze core: het einde van elke dispatch-ronde (de
 /// vector keert gemaskeerd terug).
 pub fn unmask() {
     arch::unmask_irq();
-}
-
-fn report(d: &Dispatcher, before: u64, pass: Pass, log: fn(fmt::Arguments<'_>)) {
-    if before < 3 && pass.claimed > 0 {
-        log(format_args!(
-            "irq: first claims arrived ({} this pass)",
-            pass.claimed
-        ));
-    }
-    let n = d.stats.passes.load(Relaxed);
-    if n <= 5 {
-        log(format_args!("irq: isr pass #{n} done"));
-    }
-    if let Some(l) = pass.disabled {
-        log(format_args!(
-            "irq: INTID {} fired but nobody serves it (left enabled by the firmware?), line disabled",
-            l.0
-        ));
-    }
-    if let Some(l) = pass.stuck {
-        log(format_args!(
-            "irq: INTID {} came back {STRAY_LIMIT} times in one pass, a level line without a device ack that nobody lowers: line disabled, its waiter polls HOPOS_IRQ_STUCK",
-            l.0
-        ));
-        return;
-    }
-    if let Some(l) = pass.stray
-        && d.stats.stray_passes.load(Relaxed) <= 3
-    {
-        log(format_args!(
-            "irq: INTID {} came back {STRAY_LIMIT} times in one pass, pass ended, line stays enabled",
-            l.0
-        ));
-    }
 }
 
 #[cfg(all(target_os = "none", target_arch = "aarch64"))]
@@ -538,29 +471,75 @@ mod tests {
         (d, f)
     }
 
-    #[test]
-    fn enable_without_controller_fails() {
-        let d: &'static Dispatcher = Box::leak(Box::new(Dispatcher::new()));
-        assert_eq!(d.enable(Line(33), None).err(), Some(Error::NoController));
+    fn bell() -> &'static Signal {
+        Box::leak(Box::new(Signal::new()))
     }
 
     #[test]
-    fn known_line_acks_signals_and_completes() {
+    fn enable_without_controller_fails() {
+        let d: &'static Dispatcher = Box::leak(Box::new(Dispatcher::new()));
+        assert_eq!(
+            d.enable(Line(33), None, None).err(),
+            Some(Error::NoController)
+        );
+    }
+
+    #[test]
+    fn known_line_acks_rings_and_completes() {
         static ACKS: AtomicU32 = AtomicU32::new(0);
-        static ACK: fn() = || {
-            ACKS.fetch_add(1, SeqCst);
-        };
         let (d, f) = setup(Fake::default());
-        let s = d.enable(Line(79), Some(&ACK)).unwrap();
+        let s = bell();
+        d.enable(
+            Line(79),
+            Some(|| {
+                ACKS.fetch_add(1, SeqCst);
+            }),
+            Some(s),
+        )
+        .unwrap();
         assert!(!s.is_set());
         f.pending.borrow_mut().extend([79, 79]);
         let pass = d.dispatch();
         assert_eq!(pass.claimed, 2);
-        assert_eq!(pass.disabled, None);
+        assert_eq!(pass.claims(Line(79)), 2);
+        assert_eq!((pass.unknown, pass.disabled), (0, None));
         assert_eq!(ACKS.load(SeqCst), 2);
         assert!(s.take()); // twee vuren, één wek: level, samengevoegd
         assert_eq!(*f.log.borrow(), [('e', 79), ('c', 79), ('c', 79)]);
         assert_eq!(d.stats.fired.load(SeqCst), 2);
+    }
+
+    // Een lijn zonder bel (een timer, de kick) heeft alleen zijn ack; de
+    // ronde telt per lijn, zodat het board timer, NIC en de rest uit één
+    // ronde haalt.
+    #[test]
+    fn a_line_without_a_bell_and_the_count_per_line() {
+        static TIMER: AtomicU32 = AtomicU32::new(0);
+        let (d, f) = setup(Fake::default());
+        d.enable(
+            Line(30),
+            Some(|| {
+                TIMER.fetch_add(1, SeqCst);
+            }),
+            None,
+        )
+        .unwrap();
+        let nic = bell();
+        d.enable(Line(79), Some(|| {}), Some(nic)).unwrap();
+        f.pending.borrow_mut().extend([30, 79, 27, 79]);
+        let pass = d.dispatch();
+        assert_eq!(TIMER.load(SeqCst), 1);
+        assert_eq!(
+            (
+                pass.claimed,
+                pass.claims(Line(30)),
+                pass.claims(Line(79)),
+                pass.unknown
+            ),
+            (4, 1, 2, 1)
+        );
+        assert_eq!(pass.claims(Line(27)), 0);
+        assert!(nic.is_set());
     }
 
     #[test]
@@ -569,22 +548,24 @@ mod tests {
         f.pending.borrow_mut().push(27);
         let pass = d.dispatch();
         assert_eq!(pass.disabled, Some(Line(27)));
+        assert_eq!(pass.unknown, 1);
         assert_eq!(*f.log.borrow(), [('d', 27), ('c', 27)]);
         assert_eq!(d.stats.unknown.load(SeqCst), 1);
     }
 
     #[test]
     fn stray_line_ends_the_pass_but_stays_enabled() {
-        static ACK: fn() = || {};
         let (d, f) = setup(Fake::default());
         // Een NIC onder last: bediend (een ack per claim), dus nooit uit.
-        let s = d.enable(Line(40), Some(&ACK)).unwrap();
+        let s = bell();
+        d.enable(Line(40), Some(|| {}), Some(s)).unwrap();
         f.pending
             .borrow_mut()
             .extend(core::iter::repeat_n(40, STRAY_LIMIT as usize + 10));
         let pass = d.dispatch();
         assert_eq!(pass.stray, Some(Line(40)));
         assert_eq!(pass.claimed, STRAY_LIMIT + 1);
+        assert_eq!(pass.claims(Line(40)), STRAY_LIMIT + 1);
         assert!(s.is_set());
         assert!(!f.log.borrow().iter().any(|&(op, _)| op == 'd'));
         // De rest blijft pending voor de volgende ronde.
@@ -598,7 +579,8 @@ mod tests {
     #[test]
     fn stuck_level_line_without_ack_is_disabled_an_edge_is_not() {
         let (d, f) = setup(Fake::default());
-        let s = d.enable(Line(41), None).unwrap();
+        let s = bell();
+        d.enable(Line(41), None, Some(s)).unwrap();
         f.pending
             .borrow_mut()
             .extend(core::iter::repeat_n(41, STRAY_LIMIT as usize + 10));
@@ -610,7 +592,7 @@ mod tests {
         assert_eq!(d.stats.stuck.load(SeqCst), 1);
 
         let (d, f) = setup(Fake::default());
-        d.enable_as(Line(166), Trigger::Edge, None).unwrap();
+        d.enable_as(Line(166), Trigger::Edge, None, None).unwrap();
         assert_eq!(f.log.borrow()[..2], [('f', 166), ('e', 166)]);
         f.pending
             .borrow_mut()
@@ -628,44 +610,18 @@ mod tests {
             ..Fake::default()
         });
         assert_eq!(
-            d.enable(Line(5), None).err(),
+            d.enable(Line(5), None, None).err(),
             Some(Error::Rejected { line: 5 })
         );
         let (d, _) = setup(Fake::default());
         for i in 0..MAX_LINES as u32 {
-            d.enable(Line(100 + i), None).unwrap();
+            d.enable(Line(100 + i), None, None).unwrap();
         }
-        assert_eq!(d.enable(Line(7), None).err(), Some(Error::Full { line: 7 }));
+        assert_eq!(
+            d.enable(Line(7), None, None).err(),
+            Some(Error::Full { line: 7 })
+        );
         // Opnieuw een bestaande lijn is een her-registratie, geen nieuwe plaats.
-        assert!(d.enable(Line(100), None).is_ok());
-    }
-
-    #[test]
-    fn wait_resolves_on_signal_or_timeout() {
-        use std::sync::Arc;
-        use std::task::Wake;
-        struct Nop;
-        impl Wake for Nop {
-            fn wake(self: Arc<Self>) {}
-        }
-        let w = std::task::Waker::from(Arc::new(Nop));
-        let mut cx = Context::from_waker(&w);
-        let (d, f) = setup(Fake::default());
-        let s = d.enable(Line(9), None).unwrap();
-        let mut fut = core::pin::pin!(Wait {
-            signal: d.signal(Line(9)),
-            max: core::future::pending::<()>(),
-        });
-        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Pending);
-        f.pending.borrow_mut().push(9);
-        d.dispatch();
-        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(true));
-        assert!(!s.is_set());
-        // Onbekende lijn: alleen het maximum telt.
-        let mut t = core::pin::pin!(Wait {
-            signal: d.signal(Line(10)),
-            max: core::future::ready(()),
-        });
-        assert_eq!(t.as_mut().poll(&mut cx), Poll::Ready(false));
+        assert!(d.enable(Line(100), None, None).is_ok());
     }
 }
