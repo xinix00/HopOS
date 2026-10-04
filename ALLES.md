@@ -79,9 +79,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       paar vindt, dus pas met een 3.0.8-stick) en de nieuwe flip-ingang op
       de M4 en de Pi's (op de O6N gezien: O2 koud op met de doos van de
       toetskern, O2 warm naar main landt).
-- [ ] Pi 4: de genet leest nu uit WB met een veeg (blok 160 Normal-WB in
-      de boot-map, in dezelfde patch als de GEM van de Pi 5); op ijzer te
-      zien: pull richting 110 met bad=0, push gelijk aan 112.
 - [ ] Altra: de koude flip (met de boot-stack-fix moet hij nu lukken).
 - [ ] Core-reclaim in een sharegroup met een rekenaar
       (`HOPOS_CORE_RECLAIM` na 2 s).
@@ -94,6 +91,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
+- [ ] Pi 4 ontvangen 65 MB/s tegen zenden 113: de genet leest sinds bca6c70
+      uit WB met een veeg en dat gaf niets (P70 64,8, daarvoor 52 tot 72),
+      dus de rem zit in de gepolde RX-weg zelf (geen IRQ-lijn: de pomp pollt
+      de ring), niet in de kopie. Meten waar de tijd per frame zit.
 - [ ] De pull van de O6N naar Pi 5 en Radxa zakte van 111 MB/s (gisteravond
       en 08:45) naar 85 (vanaf 10:00) en bleef daar, ook na een koude boot
       van de O6N en met de oude bench-ELF aan beide kanten (A/B: nieuw 85,

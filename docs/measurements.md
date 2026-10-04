@@ -345,8 +345,8 @@ Daarvoor: P2g, 03-10. Vitals met 1 core, 128 MiB, slot 3
 
 | Meting | v3 | v2 | Run |
 | --- | --- | --- | --- |
-| De node in, MB/s | **71,9 (bench pull van de O6N, 256 MiB; O6N druk, wordt overgedaan) (P40, 04-10)**; 41,1–43,8 (van de O6N; de ontvangkant is de grens) (F, 30-09) | 6,6 (2.2.6, gepold) | P40 04-10 |
-| De node uit, MB/s | **112,6 (bench push naar de O6N, 256 MiB; O6N druk, wordt overgedaan) (P40, 04-10)**; 83,7–92,8 (naar de Pi 5) (F, 30-09) | 42,3 | P40 04-10 |
+| De node in, MB/s | **64,8 (bench pull van de O6N op een big core, 256 MiB; de genet leest uit WB met een veeg sinds bca6c70, dat gaf niets: de gepolde RX-weg is de rem) (P70, 04-10)**; 71,9 (bench pull van de O6N, 256 MiB; O6N druk) (P40, 04-10); 41,1–43,8 (van de O6N; de ontvangkant is de grens) (F, 30-09) | 6,6 (2.2.6, gepold) | P40 04-10 |
+| De node uit, MB/s | **112,9 (bench push naar de O6N, 256 MiB) (P70, 04-10)**; 112,6 (P40, 04-10); 83,7–92,8 (naar de Pi 5) (F, 30-09) | 42,3 | P40 04-10 |
 | rtt over de draad p50, µs | **1213 (naar de O6N), koud 1224 (O6N druk, wordt overgedaan) (P40, 04-10)**; 1212–1213 (naar de O6N), koud 1290–1300 (H, 30-09) | | P40 04-10 |
 | Verbindingscyclus p50, ms | **2,43 (vitals storm n=1 naar /ping van de O6N; O6N druk, wordt overgedaan) (P40, 04-10)**; 2,43–4,86 (naar de O6N) (H, 30-09) | | P40 04-10 |
 | Storm, hairpin naar zichzelf, conn/s (p99 ms) | **1942–1989 (5,6–6,8; vijf runs, geen MASQ_SLOT_FULL) (P40, 04-10)**; 1896–1917 (6,2–6,4) (P6g, 03-10) | | P40 04-10 |
