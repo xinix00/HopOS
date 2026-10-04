@@ -30,6 +30,20 @@ pub const HAND_VERSION: u64 = 6;
 pub const HANDOFF_TAIL: usize = 0x40000;
 /// De volle conntrack van de switch (`hopswitch.MaxFlows`).
 pub const MAX_FLOWS: usize = 4096;
+// De grenzen van wat het blob per slot draagt. Eén set voor beide kanten:
+// de export (`slots::Lifecycle::snapshot`) weigert erboven vóór de sprong,
+// en `decode` neemt niet meer (tot 04-10 las hij 64 volumes van 4096
+// bytes, terwijl er nooit meer dan 32 van 256 in gingen).
+/// Hoogstens zoveel poorten per slot.
+pub const MAX_FLIP_PORTS: usize = 64;
+/// De langste job- en groepsnaam.
+pub const MAX_FLIP_JOB: usize = 256;
+/// Zoveel volumes: wat een start draagt (`abi`), want een volume dat de
+/// start aannam maar de flip niet kan overdragen, zou een flip later
+/// weigeren om iets dat bij de start al vaststond.
+pub const MAX_FLIP_MOUNTS: usize = abi::systemapi::MAX_START_MOUNTS;
+/// Het langste volumepad, om dezelfde reden gelijk aan dat van een start.
+pub const MAX_FLIP_PATH: usize = abi::systemapi::MAX_MOUNT_PATH;
 const HAND_HEAD: usize = 128;
 const SLOT_HEAD: usize = 80;
 
@@ -285,7 +299,7 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
         let job_len = r.u64()?;
         s.cores = r.u64()? as usize;
         let n_mounts = r.u64()?;
-        let group_len = bounded(r.u64()?, 256, r.pos)?;
+        let group_len = bounded(r.u64()?, MAX_FLIP_JOB as u64, r.pos)?;
         let n_group = bounded(r.u64()?, 1024, r.pos)?;
         if n_group * 8 + group_len > r.left() {
             return Err(Error::Corrupt { at: r.pos });
@@ -295,8 +309,8 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
         }
         s.share_group = crate::slots::try_vec(r.bytes(group_len)?)?;
         r.align();
-        let n_ports = bounded(n_ports, 64, r.pos)?;
-        let job_len = bounded(job_len, 256, r.pos)?;
+        let n_ports = bounded(n_ports, MAX_FLIP_PORTS as u64, r.pos)?;
+        let job_len = bounded(job_len, MAX_FLIP_JOB as u64, r.pos)?;
         if n_ports * 8 + job_len > r.left() {
             return Err(Error::Corrupt { at: r.pos });
         }
@@ -305,9 +319,9 @@ pub fn decode(b: &[u8]) -> Result<Handoff> {
         }
         s.job = crate::slots::try_vec(r.bytes(job_len)?)?;
         r.align();
-        for _ in 0..bounded(n_mounts, 64, r.pos)? {
-            let ll = bounded(r.u64()?, 4096, r.pos)?;
-            let sl = bounded(r.u64()?, 4096, r.pos)?;
+        for _ in 0..bounded(n_mounts, MAX_FLIP_MOUNTS as u64, r.pos)? {
+            let ll = bounded(r.u64()?, MAX_FLIP_PATH as u64, r.pos)?;
+            let sl = bounded(r.u64()?, MAX_FLIP_PATH as u64, r.pos)?;
             let local = crate::slots::try_vec(r.bytes(ll)?)?;
             let shared = crate::slots::try_vec(r.bytes(sl)?)?;
             try_push(&mut s.mounts, Mount { local, shared })?;
@@ -1036,6 +1050,41 @@ mod tests {
         };
         let b = encode(&h, HANDOFF_TAIL).unwrap();
         assert_eq!(decode(&b).unwrap(), h);
+    }
+
+    /// De lezer neemt precies wat de export doorlaat: een slot op elke
+    /// grens komt heel over, één erboven is een kapot blob.
+    #[test]
+    fn decode_takes_exactly_the_flip_limits() {
+        let path = "/".repeat(MAX_FLIP_PATH);
+        let mut full = st(1, 0xBC00_0000, 64, 1);
+        full.job = vec![b'j'; MAX_FLIP_JOB];
+        full.share_group = vec![b'g'; MAX_FLIP_JOB];
+        full.group_cores = vec![1];
+        full.ports = vec![80; MAX_FLIP_PORTS];
+        full.mounts = vec![m(&path, &path); MAX_FLIP_MOUNTS];
+        let h = Handoff {
+            slots: vec![full.clone()],
+            ..Handoff::default()
+        };
+        assert_eq!(decode(&encode(&h, HANDOFF_TAIL).unwrap()).unwrap(), h);
+        let over: [fn(&mut SlotState); 5] = [
+            |s| s.job.push(b'j'),
+            |s| s.share_group.push(b'g'),
+            |s| s.ports.push(80),
+            |s| s.mounts.push(m("/a", "/b")),
+            |s| s.mounts[0].shared.push(b'/'),
+        ];
+        for grow in over {
+            let mut s = full.clone();
+            grow(&mut s);
+            let h = Handoff {
+                slots: vec![s],
+                ..Handoff::default()
+            };
+            let b = encode(&h, HANDOFF_TAIL).unwrap();
+            assert!(matches!(decode(&b), Err(Error::Corrupt { .. })));
+        }
     }
 
     #[test]

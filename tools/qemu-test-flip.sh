@@ -118,7 +118,9 @@
 #                                           dan 0 door `_start` (cpu::boot
 #                                           FLIP_ENTRY; dezelfde ingang als de
 #                                           Pi's en de Radxa). Samen te nemen
-#                                           met COLD=1.
+#                                           met COLD=1, en met BOARD=uefi (daar
+#                                           in hopos.cfg op de ESP, de weg van
+#                                           de O6N).
 #   BOARD=rpi4 tools/qemu-test-flip.sh      de flip-INGANG van de Pi op QEMU
 #                                           raspi4b (daar is geen net, dus geen
 #                                           flip): kernel8.img van board-rpi4
@@ -302,6 +304,7 @@ if [ "$BOARD" = uefi ]; then
 	# De feature efi-rng (zoals de O6N): kern A zaait uit het EFI_RNG_PROTOCOL
 	# van EDK2 (de virtio-rng hieronder), kern B uit het zaad dat A meegaf.
 	printf 'hopos.insecure=1\n' >"$ART/hopos.cfg"
+	[ -n "${OSCORE:-}" ] && printf 'hopos.oscore=%s\n' "$OSCORE" >>"$ART/hopos.cfg"
 	HOPOS_STAMP=A BUILD_ONLY=1 ESP="$ESP" APP="$HOP_ELF" ROLE=hop CFG="$ART/hopos.cfg" \
 		FEATURES="${FEATURES:+$FEATURES,}board-uefi/efi-rng" \
 		sh "$DIR/image/uefi-run.sh" 2>&1 | sed 's/^/   /'

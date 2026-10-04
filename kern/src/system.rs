@@ -47,6 +47,7 @@
 //! buiten zag daarna nooit meer een antwoord).
 
 use crate::cage::{Console, CoreClass, PhysMem, Timer};
+use crate::kernflip;
 use crate::pool::{GroupName, Placement};
 use crate::rpc::{self, FsCall, FsInbox};
 use crate::slots::{
@@ -2230,10 +2231,9 @@ fn start_ports(req: &StartReq<'_>) -> Result<Vec<u16>> {
 /// toegangsgrens zijn (`/` als volume of als pad in de app, iets onder
 /// [`rpc::TASKS_DIR`], `..`, een dubbel lokaal pad), vóór er iets geclaimd
 /// is. Een pad dat na het normaliseren langer is dan de flip kan
-/// overdragen ([`slots::MAX_FLIP_PATH`]), wordt hier al geweigerd: anders
+/// overdragen ([`kernflip::MAX_FLIP_PATH`]), wordt hier al geweigerd: anders
 /// zou een latere flip weigeren om iets dat bij de start vaststond.
 fn start_mounts(req: &StartReq<'_>) -> Result<Vec<slots::Mount>> {
-    const _: () = assert!(abi::systemapi::MAX_START_MOUNTS <= slots::MAX_FLIP_MOUNTS);
     let mut mounts: Vec<slots::Mount> = Vec::new();
     for m in abi::systemapi::Mounts::new(req.mounts) {
         let m = m.map_err(|_| Error::BadPath)?;
@@ -2248,11 +2248,11 @@ fn start_mounts(req: &StartReq<'_>) -> Result<Vec<slots::Mount>> {
     let table = rpc::mount_table(&mounts)?;
     if let Some(m) = table
         .iter()
-        .find(|m| m.local.len().max(m.shared.len()) > slots::MAX_FLIP_PATH)
+        .find(|m| m.local.len().max(m.shared.len()) > kernflip::MAX_FLIP_PATH)
     {
         return Err(Error::TooLarge {
             len: m.local.len().max(m.shared.len()),
-            max: slots::MAX_FLIP_PATH,
+            max: kernflip::MAX_FLIP_PATH,
         });
     }
     Ok(table)

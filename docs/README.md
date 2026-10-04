@@ -37,7 +37,7 @@ virt zonder toets.
 | `sh tools/qemu-test-flip.sh` | de kern-flip: hopfs bevroren en gecommit, de NAT-flows gevangen, de sprong, Hop overleeft zonder herstart, en een uitgaande TCP-verbinding van een app (rol FLIPCONN) loopt door: drie antwoorden via kern A, drie via kern B, over één verbinding |
 | `MISMATCH=1 sh tools/qemu-test-flip.sh` | een bundel met een andere switch-code wordt vóór de sprong geweigerd (Hop geeft 502) |
 | `COLD=1 sh tools/qemu-test-flip.sh` | de koude flip (`"cold":true` op `POST /flip`): Hop stopt zijn taken, de kern zet de app-cores uit en springt zonder adoptie, Hop start koud en plaatst de job opnieuw |
-| `OSCORE=1 sh tools/qemu-test-flip.sh` | de flip vanaf een verhuisde kern (ook met `COLD=1`) |
+| `OSCORE=1 sh tools/qemu-test-flip.sh` | de flip vanaf een verhuisde kern (ook met `COLD=1`, en met `BOARD=uefi OSCORE=2`) |
 | `BOARD=rpi4 sh tools/qemu-test-flip.sh` | de flip-ingang van de Pi op raspi4b: een core met het merkteken komt tot de kern en leest de DTB opnieuw |
 | `sh tools/qemu-uefi-test.sh` | de EFI-stub op EDK2, ACPI, PCIe, virtio over PCI met MSI-X via de ITS (`nic=` loopt op in de tik), de hele appspike-keten |
 | `GUI=1 sh tools/qemu-uefi-test.sh` | hetzelfde met de GOP van EDK2 als console |
@@ -100,8 +100,9 @@ in een image, een bundel of op een kaart. De kaarten en sticks bouwt
 ([go-apps.md](go-apps.md)).
 
 Hop zelf komt uit de hop-repo (`agentd-hopos`); de image-scripts bouwen
-hem via `HOP_DIR` en bakken hem in als bewoner. Secure Boot moet uit op de
-UEFI-boards. De host-kant van Hop (de `hop`-CLI, `agentd`, de runners en de
+hem uit `HOP_DIR` met `tools/hop-build.sh` (tegen de applib van deze
+werkboom, zoals de release) en bakken hem in als bewoner. Secure Boot
+moet uit op de UEFI-boards. De host-kant van Hop (de `hop`-CLI, `agentd`, de runners en de
 stores) staat in dezelfde hop-repo en bouwt met `cargo build --release -p
 agentd -p cli`.
 

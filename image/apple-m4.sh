@@ -123,8 +123,8 @@ APP="${APP-}"
 case "$APP" in
 "") rm -f "$OUT/stage.elf" "$OUT/stage.role" ;;
 hop)
-	(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
-	"$OBJCOPY" --strip-debug "$HOP_DIR/target/$TARGET/release/agentd-hopos" "$OUT/stage.elf"
+	HOP_ELF="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
+	"$OBJCOPY" --strip-debug "$HOP_ELF" "$OUT/stage.elf"
 	echo hop >"$OUT/stage.role"
 	;;
 */*)

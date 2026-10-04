@@ -80,8 +80,8 @@ pub const TASKS_DIR: &[u8] = b"/.tasks";
 /// resolutie in twee vaste buffers op de stack van de actor.
 pub const MAX_PATH: usize = 1024;
 /// Hoeveel volumes één levensduur hoogstens draagt (de flip-grens van
-/// `slots::MAX_FLIP_MOUNTS`).
-pub const MAX_MOUNTS: usize = crate::slots::MAX_FLIP_MOUNTS;
+/// `kernflip::MAX_FLIP_MOUNTS`).
+pub const MAX_MOUNTS: usize = crate::kernflip::MAX_FLIP_MOUNTS;
 /// De diepte van de brievenbus van de actor: elke verbindingstaak heeft
 /// hoogstens één call tegelijk uitstaan, plus de committer.
 pub const FS_DEPTH: usize = 16;

@@ -451,31 +451,29 @@ waarschijnlijk, **V** = vermoeden. Regelaantallen zijn schattingen.
 
 ### 8.1 Mogelijke fouten (eerst kijken)
 
-- **O6N: `hopos.oscore=small` valt terug.** `BOARD.os_core()` komt via
-  `Deref` bij `Uefi::os_core` (`board/uefi/src/lib.rs:484`), en die gebruikt
-  de MADT-klassen, die op de Cix allemaal 0 zijn. `O6n::core_class` (de
-  MPIDR-tabel) kent wel small en big. Elke methode van `Uefi` die
-  `self.core_class` aanroept heeft dit risico. H op de code, niet op ijzer.
-- **De kern na `move_to_os_core` draait op 64 KB zonder wachtpagina.**
-  `cpu::smp::NODE_STACK` is 64 KiB (`cpu/src/smp.rs:39`); de boot-stack is
-  256 KiB en de diepste boot 156 KB (ALLES.md). Alleen als `hopos.oscore` een
-  andere core aanwijst. H voor de getallen, V dat het overloopt.
-- **Hop op twee manieren gebouwd.** `image/qemu-run.sh`,
-  `image/radxa-zero3.sh` en `image/apple-m4.sh` bouwen Hop ongepatcht in
-  `HOP_DIR`; de Pi-scripts, de flipbundels, de release en de tests gebruiken
-  `tools/hop-build.sh`. Een handmatige Radxa- of M4-image draagt dus een
-  andere Hop dan de release. H.
-- **`gem::transmit` spint tot 1 ms per frame** op de TSTART-quirk
-  (`driver/nic/gem/src/lib.rs:556`), op de executor van de OS-core. H voor de
-  lus, V of het zo lang duurt.
-- **stmmac heeft een eigen `poll_until`** (`driver/nic/stmmac/src/lib.rs:91`)
-  zonder de laatste blik na de deadline die `dev::poll_until` wel doet. H.
-- **`claim` toetst de dedicated cores met `filter_map(Core::new)`**
-  (`kern/src/slots.rs:901`), de vorm die de OS-core overslaat. V dat het
-  ooit iets raakt.
-- **De grenzen van de flip-handoff kloppen niet met elkaar**:
-  `kernflip::decode` neemt 64 mounts en 4096 bytes per pad, `slots` 32 en
-  256. H.
+Nagelopen op 04-10; wat een fout was, is gerepareerd.
+
+- **O6N: `hopos.oscore=small` viel terug.** `BOARD.os_core()` kwam via
+  `Deref` bij `Uefi::os_core` met de MADT-klassen (op de Cix allemaal 0,
+  dus alles big). Nu heeft de O6N (en de Altra) een eigen `os_core` over
+  `Uefi::os_core_by` met de klassen van het board; `small` is core 2 (MPIDR
+  0x000), `big` core 0. Hosttoets in `board/o6n/src/class.rs`; op ijzer nog
+  niet gezien.
+- **De kern na `move_to_os_core` draaide op 64 KiB zonder wachtpagina.**
+  Gemeten: 122 KB op virt, 139 KB onder EDK2. `cpu::smp::NODE_STACK` is nu
+  256 KiB zoals de boot-stack, en de stackmeter meet de stack waarop de kern
+  draait (hij wiste tot dan van de boot-stack tot aan de nieuwe sp). Een
+  wachtpagina heeft die stack nog niet.
+- **Hop op twee manieren gebouwd.** Opgelost: alle image-scripts gebruiken
+  `tools/hop-build.sh`.
+- **`gem::transmit` spint niet meer**: sinds bca6c70 zet hij de descriptor,
+  schrijft TSTART en keert terug (`tx_restart`).
+- **stmmac had een eigen `poll_until`**: nu `dev::poll_until`.
+- **`claim` en `filter_map(Core::new)`** (`kern/src/slots.rs`): kan niets
+  raken. Zonder groep ligt de run helemaal in de app-cores, de OS-core komt
+  alleen met een groep.
+- **De grenzen van de flip-handoff**: één set in `kern::kernflip`
+  (`MAX_FLIP_*`, de volumes uit `abi`), voor de export en voor `decode`.
 
 ### 8.2 Hetzelfde begrip, meer definities
 

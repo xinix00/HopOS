@@ -38,9 +38,9 @@ sudo dd if=target/radxa-zero3/hopos-radxa-zero3.img of=/dev/rdiskN bs=4m
 Op de FAT staan `hopos.img` (de kern, met de config in zijn venster),
 `hopos.ird` (de initrd: een lege `hopos.cfg` plus `hop.elf`) en
 `extlinux/extlinux.conf`, met in de APPEND-regel
-`hopos.node=radxa-1 hopos.stage=hop`. Het script bouwt `agentd-hopos` in
-`HOP_DIR`, stript hem (19 MB naar 1,5 MB, 30-09) en weigert een initrd
-boven 16 MB (`board_rk3566::INITRD_MAX`). Aan het eind leest het de kaart
+`hopos.node=radxa-1 hopos.stage=hop`. Het script bouwt `agentd-hopos` uit
+`HOP_DIR` met `tools/hop-build.sh`, stript hem (19 MB naar 1,5 MB,
+30-09) en weigert een initrd boven 16 MB (`board_rk3566::INITRD_MAX`). Aan het eind leest het de kaart
 terug en vergelijkt elk bestand met wat erin ging; `FOUT` daar is een kapot
 kaart-image, niet een kapot board.
 

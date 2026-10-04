@@ -79,9 +79,10 @@
 #                                    met de jobspec af; de server stopt met
 #                                    QEMU.
 #
-# APP=hop bouwt `agentd-hopos` in de hop-repo ($HOP_DIR, standaard
-# ../hop/hop naast deze repo) met cargo en neemt alleen het bestand: geen
-# pad-dependency over de repo-grens (PORT.md beslissing 6).
+# APP=hop bouwt `agentd-hopos` uit de hop-repo ($HOP_DIR, standaard
+# ../hop/hop naast deze repo) met tools/hop-build.sh, tegen de applib van
+# deze werkboom zoals de release en de toetsen, en neemt alleen het
+# bestand: geen pad-dependency over de repo-grens (PORT.md beslissing 6).
 #
 # Het image gaat rauw in RAM op de staging van het board
 # (board/qemuvirt/src/slots.rs: STAGE_PA), met zijn maat in het woord op
@@ -140,8 +141,7 @@ IMAGE=""
 case "$APP" in
 "") ;;
 hop)
-	(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
-	IMAGE="$HOP_DIR/target/$TARGET/release/agentd-hopos"
+	IMAGE="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 	ROLE="${ROLE:-1}"
 	;;
 */*)

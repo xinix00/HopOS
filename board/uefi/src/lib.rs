@@ -489,8 +489,15 @@ impl Uefi {
     /// klasse is de eerste core van die klasse (MADT-efficiëntieklasse).
     #[must_use]
     pub fn os_core(&self) -> (usize, Option<&'static str>) {
+        self.os_core_by(|c| self.core_class(c))
+    }
+
+    /// [`Self::os_core`] met de klassen van het board erboven: de O6N heeft
+    /// een eigen indeling (de MPIDR-tabel), want zijn MADT zegt overal 0.
+    #[must_use]
+    pub fn os_core_by(&self, class: impl Fn(usize) -> CoreClass) -> (usize, Option<&'static str>) {
         let v = fw::bootcfg::get(self.config(), "hopos.oscore");
-        board::os_core(v, self.cores(), |c| self.core_class(c), 0)
+        board::os_core(v, self.cores(), class, 0)
     }
 
     /// Een ACPI-tabel met signature `sig` (de eerste; `DSDT` via de FADT),

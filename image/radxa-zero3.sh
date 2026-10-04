@@ -133,9 +133,8 @@ IMAGE=""
 case "$APP" in
 "") ;;
 hop)
-	echo "== cargo build (agentd-hopos in $HOP_DIR)" >&2
-	(cd "$HOP_DIR" && cargo build --quiet --release --target "$TARGET" -p agentd-hopos)
-	IMAGE="$HOP_DIR/target/$TARGET/release/agentd-hopos"
+	echo "== tools/hop-build.sh (agentd-hopos uit $HOP_DIR)" >&2
+	IMAGE="$(HOP_DIR="$HOP_DIR" sh "$DIR/tools/hop-build.sh" "$TARGET")"
 	ROLE="${ROLE:-hop}"
 	;;
 */*)

@@ -30,13 +30,31 @@ use crate::psci;
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{
-    AtomicPtr,
+    AtomicPtr, AtomicU64,
     Ordering::{Acquire, Release},
 };
 use dev::Pa;
 
-/// De stack van een node-core: 64 KB, gelijk aan de boot-stack van core 0.
-pub const NODE_STACK: usize = 64 << 10;
+/// De stack van de kern na zijn verhuizing ([`start_one`]): 256 KiB, gelijk
+/// aan de boot-stack (`STACK_SIZE` in elk linkscript), want hij draagt
+/// dezelfde boot. Tot 04-10 was hij 64 KiB: op QEMU virt (`OSCORE=1`) haalde
+/// de verhuisde kern 122 KB, op de O6N haalt de boot 156 KB, en de rest liep
+/// zonder wachtpagina onder de stack door de heap in. Een wachtpagina heeft
+/// hij nog steeds niet (de heap is in blokken gemapt); de hartslag meet hem
+/// ([`moved_stack`]).
+pub const NODE_STACK: usize = 256 << 10;
+
+/// Onderkant en top van de stack van [`start_one`], 0 = de kern verhuisde
+/// niet.
+static MOVED_STACK: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// Onderkant en top van de stack waarop de verhuisde kern draait, of `None`
+/// als hij op de boot-stack bleef.
+#[must_use]
+pub fn moved_stack() -> Option<(u64, u64)> {
+    let (bottom, top) = (MOVED_STACK[0].load(Acquire), MOVED_STACK[1].load(Acquire));
+    (top != 0).then_some((bottom, top))
+}
 
 /// De Rust-main van een node-core: draait de executor van die core en keert
 /// nooit terug. Het board levert hem; hij krijgt de core-index (1 tot
@@ -201,25 +219,30 @@ pub fn mpidr() -> u64 {
 pub fn start_one(core: usize, target: u64, main: CoreMain) -> Result {
     let regime = arch::regime();
     let entry = arch::entry_pa();
-    let sp = new_stack().ok_or(Error::OutOfMemory { core })?;
+    let (bottom, sp) = new_stack().ok_or(Error::OutOfMemory { core })?;
     let h = new_handoff(Handoff::new(core, sp, main, regime)).ok_or(Error::OutOfMemory { core })?;
     let pa = Pa(core::ptr::from_ref(h) as usize as u64);
     dev::push(pa, core::mem::size_of::<Handoff>());
-    cpu_on(target, entry, pa.0).map_err(|err| Error::Psci { target, err })
+    MOVED_STACK[0].store(bottom, Release);
+    MOVED_STACK[1].store(sp, Release);
+    cpu_on(target, entry, pa.0).map_err(|err| {
+        MOVED_STACK[1].store(0, Release);
+        Error::Psci { target, err }
+    })
 }
 
-/// Een stack van [`NODE_STACK`] bytes van de heap, voor altijd; de top,
-/// 16-gealigneerd.
+/// Een stack van [`NODE_STACK`] bytes van de heap, voor altijd: de
+/// onderkant en de top, 16-gealigneerd.
 ///
 /// `try_reserve_exact` eerst: dan alloceert `resize` niet meer, en een
 /// volle heap is `None` in plaats van een abort (handboek §6).
-fn new_stack() -> Option<u64> {
+fn new_stack() -> Option<(u64, u64)> {
     let mut v: Vec<u8> = Vec::new();
     v.try_reserve_exact(NODE_STACK).ok()?;
     v.resize(NODE_STACK, 0);
     let s: &'static mut [u8] = v.leak();
-    let top = s.as_ptr() as usize as u64 + s.len() as u64;
-    Some(top & !15)
+    let bottom = s.as_ptr() as usize as u64;
+    Some((bottom, (bottom + s.len() as u64) & !15))
 }
 
 /// De handoff op de heap, voor altijd: de core leest hem na zijn entry
@@ -426,8 +449,9 @@ mod tests {
             [0x1000, 3, 1, 2, 3, 4, 5, 6]
         );
         assert_eq!(core::mem::size_of::<Handoff>(), 128);
-        let top = new_stack().unwrap();
+        let (bottom, top) = new_stack().unwrap();
         assert_eq!(top % 16, 0);
+        assert!(top - bottom <= NODE_STACK as u64 && top - bottom > NODE_STACK as u64 - 16);
     }
 
     /// Het doel dat de test-haak aanneemt; elk ander zegt NOT_SUPPORTED,

@@ -249,6 +249,27 @@ mod tests {
         assert_eq!(c.of(&cs[3]), CoreClass::Big);
     }
 
+    /// `hopos.oscore` op de Cix P1 zoals de firmware hem geeft (MADT overal
+    /// 0, geen `_CPC` hier) en in de MADT-volgorde van de O6N (de
+    /// CPU_ON-regels op de console: core 0 is 0xa00, core 1 0xb00, core 2 tot
+    /// 11 zijn 0x000 tot 0x900): de klasse komt uit de MPIDR-tabel, niet uit
+    /// de MADT (`O6n::os_core`).
+    #[test]
+    fn oscore_on_the_cix_uses_the_mpidr_table() {
+        let mut cs = cores(&[0; 12]);
+        for (i, c) in cs.iter_mut().enumerate() {
+            c.mpidr = ((i as u64 + 10) % 12) << 8;
+        }
+        let c = Classes::new(&cs, true);
+        let class = |i: usize| c.of(&cs[i]);
+        assert_eq!(board::os_core("small", 12, class, 0), (2, None));
+        assert_eq!(board::os_core("big", 12, class, 0), (0, None));
+        assert_eq!(
+            board::os_core("mid", 12, class, 0),
+            (0, Some("no core of that class"))
+        );
+    }
+
     #[test]
     fn too_many_clusters_merge_on_the_smallest_gap() {
         let tops = cpc_tops(&[1000, 2000, 4000, 8000, 8500]);

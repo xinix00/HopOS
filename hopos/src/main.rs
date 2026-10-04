@@ -655,8 +655,10 @@ impl Hooks for BootHooks {
 }
 
 /// De maat van de kern-stack: `STACK_SIZE` in elk linkscript (hopos/*.ld),
-/// boven de wachtpagina (`__stack_guard`) direct boven `.bss`.
+/// boven de wachtpagina (`__stack_guard`) direct boven `.bss`. De stack van
+/// een verhuisde kern is even groot.
 const STACK_BYTES: u64 = 0x40000;
+const _: () = assert!(cpu::smp::NODE_STACK as u64 == STACK_BYTES);
 
 /// Hoe ver onder de eigen stackpositie de meter niet wist: een IRQ-frame
 /// en de vector die tijdens de meting binnenkomen, landen daar.
@@ -678,18 +680,33 @@ const STACK_METER_SLACK: u64 = 16 * 1024;
 /// (dat is de meetmarge zelf), tegen 180 KB ervoor. Eén scan van 32K
 /// woorden per seconde; de schrijfslag alleen over wat de vorige tik vuil
 /// maakte.
+///
+/// Na een verhuizing (`hopos.oscore`) draait de kern op de stack van
+/// `cpu::smp::start_one` in de heap, en die meet hij dan. Staat de eigen
+/// stackpositie niet in de stack die hij meet, dan niets: tot 04-10 wiste
+/// de meter van de verhuisde kern van de boot-stack tot aan zijn eigen sp,
+/// over alles wat ertussen lag.
 fn stack_high_water() -> u64 {
     unsafe extern "C" {
         safe static __bss_end: u8;
         safe static __stack_top: u8;
     }
-    let top = (&raw const __stack_top).addr() as u64;
-    let bottom = top.saturating_sub(STACK_BYTES);
-    if bottom < (&raw const __bss_end).addr() as u64 {
-        return 0; // Een linkscript met een andere indeling: niet meten.
-    }
+    let (bottom, top) = match cpu::smp::moved_stack() {
+        Some(s) => s,
+        None => {
+            let top = (&raw const __stack_top).addr() as u64;
+            let bottom = top.saturating_sub(STACK_BYTES);
+            if bottom < (&raw const __bss_end).addr() as u64 {
+                return 0; // Een linkscript met een andere indeling: niet meten.
+            }
+            (bottom, top)
+        }
+    };
     let here = 0u64;
     let sp = (&raw const here).addr() as u64;
+    if !(bottom..top).contains(&sp) {
+        return 0;
+    }
     let mut p = bottom;
     while p < top && dev::read64(dev::Pa(p)) == 0 {
         p += 8;

@@ -50,6 +50,7 @@
 
 use crate::cage::{Cage, CageError, Console, Cores, PortError, Power, Status, Timer};
 use crate::grants::{Grants, NoGrants};
+use crate::kernflip::{MAX_FLIP_JOB, MAX_FLIP_MOUNTS, MAX_FLIP_PATH, MAX_FLIP_PORTS};
 use crate::partmem::{Owned, Partition, PartitionPool, Quarantined, Stopped};
 use crate::pool::{CorePool, GroupName, Placement};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
@@ -724,15 +725,6 @@ pub struct SlotState {
     pub mounts: Vec<Mount>,
 }
 
-/// De grenzen van wat het handoff-blob per slot draagt.
-pub const MAX_FLIP_PORTS: usize = 64;
-/// De langste job- en groepsnaam in het blob.
-pub const MAX_FLIP_JOB: usize = 256;
-/// Het maximale aantal volumes per slot in het blob.
-pub const MAX_FLIP_MOUNTS: usize = 32;
-/// Het langste volumepad in het blob.
-pub const MAX_FLIP_PATH: usize = 256;
-
 /// De lifecycle-actor. Eén taak; hij bezit de pool, de plaatsing, de
 /// bewoners, de kooi en de grant-aanbieder (`G`, kaal [`NoGrants`]).
 pub struct Lifecycle<'s, C, K, T, L, G = NoGrants> {
@@ -896,7 +888,10 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
         let span = spec.placement.cores.max(1);
         // Dedicated: de cores moeten geparkeerd of koud zijn. Een gedeelde
-        // core draait meestal juist (zijn buren).
+        // core draait meestal juist (zijn buren). Zonder groep komt de run
+        // uit `place_dedicated` en ligt hij helemaal in de app-cores
+        // (`run_free`), dus laat `Core::new` er niets uit vallen; de
+        // OS-core komt alleen met een groep.
         if self.places.group_of(slot).is_none()
             && let Some(busy) = (core.get()..core.get() + span)
                 .filter_map(Core::new)

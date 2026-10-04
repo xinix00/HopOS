@@ -88,22 +88,6 @@ const RESET_TIMEOUT_NS: u64 = 1_000_000_000;
 /// Monotone nanoseconden; de klok van het board.
 pub type Clock = fn() -> u64;
 
-/// Wacht tot `cond` waar is, hoogstens `ns` nanoseconden op `now`. De enige
-/// wachtlus van de driver (reset en MDIO), zodat hij in één keer naar een
-/// gedeelde hulp in `dev` kan.
-fn poll_until(now: Clock, ns: u64, mut cond: impl FnMut() -> bool) -> bool {
-    let deadline = now().saturating_add(ns);
-    loop {
-        if cond() {
-            return true;
-        }
-        if now() >= deadline {
-            return false;
-        }
-        core::hint::spin_loop();
-    }
-}
-
 /// De velden van het MDIO-adresregister (Linux `struct mii_regs` plus de
 /// opcodes): per generatie anders geplaatst, verder dezelfde machine.
 pub struct Mii {
@@ -384,7 +368,7 @@ impl<O: Ops> Probe<O> {
     pub fn reset(&mut self) -> Result {
         let bus = O::bus_mode(self.regs());
         bus.update(|v| v | BUS_SOFT_RESET);
-        if poll_until(self.now, RESET_TIMEOUT_NS, || {
+        if dev::poll_until(self.now, RESET_TIMEOUT_NS, || {
             bus.read() & BUS_SOFT_RESET == 0
         }) {
             Ok(())
@@ -400,7 +384,7 @@ impl<O: Ops> Probe<O> {
     /// scan als leeg adres leest (Go: 0xffff, "geen PHY").
     fn mdio_wait(&self) -> bool {
         let addr = O::mii(self.regs()).0;
-        poll_until(self.now, MDIO_TIMEOUT_NS, || addr.read() & MII_BUSY == 0)
+        dev::poll_until(self.now, MDIO_TIMEOUT_NS, || addr.read() & MII_BUSY == 0)
     }
 
     /// Legt de ringen in de DMA-regio en zet MAC en DMA aan: na de

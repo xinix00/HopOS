@@ -85,6 +85,14 @@ impl Altra {
         Self { uefi: Uefi::new() }
     }
 
+    /// De OS-core die `hopos.oscore` vraagt, met de klassen van dit board
+    /// (homogeen, [`crate::core_class`]) en niet die van de MADT, zoals de
+    /// O6N.
+    #[must_use]
+    pub fn os_core(&self) -> (usize, Option<&'static str>) {
+        self.uefi.os_core_by(crate::core_class)
+    }
+
     /// Vindt en initialiseert de eerste NVMe (het hele device) in de
     /// schijf-helft van de DMA-regio. `Ok(None)` = geen NVMe; één keer.
     pub fn probe_disk(&self) -> Result<Option<Nvme<Pci>>, Error> {

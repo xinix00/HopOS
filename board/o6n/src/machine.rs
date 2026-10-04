@@ -137,6 +137,15 @@ impl O6n {
             .map_or(0, |th| th.milli_c(now))
     }
 
+    /// De OS-core die `hopos.oscore` vraagt, met de klassen van dit board
+    /// ([`Board::core_class`]: de MPIDR-tabel). Via `Deref` kwam de vraag
+    /// tot 04-10 bij [`Uefi::os_core`] met de MADT-klassen, die de Cix
+    /// overal 0 geeft: alles big, dus `small` viel terug op de boot-core.
+    #[must_use]
+    pub fn os_core(&self) -> (usize, Option<&'static str>) {
+        self.uefi.os_core_by(|c| self.core_class(c))
+    }
+
     /// De klasse-indeling in één regel, voor de bootlog: de plaatsing moet
     /// kunnen zeggen waar ze op leunt.
     fn describe_classes(&self) {
