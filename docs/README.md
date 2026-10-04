@@ -60,7 +60,7 @@ met de toetsen onder `#[cfg(test)]` apart; `-v` noemt de files per emmer.
 | Kern-flip | [flip.md](flip.md) | de procedure per board, de markers van kern A en kern B, de faalmodi, de boot-guard, de koude weg |
 | Gui | [gui.md](gui.md) | de console op het glas, de framebuffer-grant aan een display-app, de USB-invoer, de beeldketen van de Radxa |
 | Media | [media.md](media.md) | de videocodec van de O6N (Linlon V8), de codec-dienst, de optische drive, de checklist en de meting (24 fps 4K P010) |
-| Apps | [apps.md](apps.md) | hoe een app slaapt op gebeurtenissen en niet op de klok, de bouwstenen (`readable()`, `select`, `after` als deadline), de meetlat `HOPOS_SLOT_LOAD`, het Go-equivalent, de lessen uit de Stulp-port (hartslag, budget, meten per taak, geen staatkopieën, allocator, gedeelde handshakes, faalpaden, wachtrijen, timers) en de reviewchecklist |
+| Apps | [apps.md](apps.md) | hoe een app slaapt op gebeurtenissen en niet op de klok, de bouwstenen (`readable()`, `select`, `after` als deadline), de meetlat `HOPOS_SLOT_LOAD`, het Go-equivalent, de lessen uit de Stulp-port (hartslag, budget, meten per taak en per schakel, geen staatkopieën, allocator, één eigenaar per peer, niet op ACKs wachten, faalpaden, wachtrijen, timers) en de reviewchecklist |
 | Meten | [measurements.md](measurements.md) | per board de laatste v3-meting naast de lat van v2, het gereedschap, en de handleiding voor het bijwerken; `tools/soak.sh` voor uren |
 
 ## Images per board

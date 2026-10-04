@@ -194,7 +194,7 @@ mogelijk, maar daar schrijft niemand hem omdat `Read` blokkeert. In Rust ligt
 `poll::once(read)` plus `after(1 ms)` voor de hand als je een niet-blokkerende
 lus vertaalt. Dat is de valkuil, en `readable()` is de uitweg.
 
-## Lessen uit de Stulp-port (03-10-2026)
+## Lessen uit de Stulp-port (3 en 4 oktober 2026)
 
 Stulp (de huisautomatisering, tien plugins in één bundel-slot plus de
 controller in een tweede) ging in één dag van "alles is traag, 502's,
@@ -238,14 +238,45 @@ Exacte klassen tot 1 KiB met een bitmap van niet-lege klassen maakte het
 **Handshakes zijn duur; deel ze.** Op de C906 kost een Matter-CASE 0,7 tot
 1,7 s (P-256) en een TLS-handshake ~100 ms (na de snellere AES en GHASH in
 leantls: seal van 10 naar 232 MB/s). Drie gevolgen:
-- Eén sessie per apparaat, gedeeld door alle werkers. Met een sessie per
-  werker betaalt het eerste commando naar een lamp op elke werker eerst
-  een volle handshake; de Go-versie deelde er één, en voelde daarom direct.
+- Eén sessie per apparaat. Met een sessie per werker betaalde het eerste
+  commando naar een lamp op elke werker eerst een volle handshake, en
+  verdrongen de sessies elkaar op het apparaat; de Go-versie deelde er één,
+  en voelde daarom direct. Zie "Eén eigenaar per peer" hieronder.
 - Hergebruik verbindingen. Een HTTPS-client die elke poll opnieuw
   handshaket (TaHoma: 134 keer in een kwartier) verbrandt rekentijd.
 - Een onbereikbaar apparaat krijgt een backoff (Stulp: 1 minuut,
   verdubbelend tot 30 minuten), geen poging per minuut met een time-out
   van 40 s.
+
+**Eén eigenaar per peer.** Werk parallel per peer (een apparaat, een
+server), niet per werker. Geef elke peer één vaste taak (bijvoorbeeld zijn
+id modulo het aantal werkers) die zijn verbinding of sessie bezit en al het
+verkeer ernaartoe doet: abonnement, herverbinden en verzoeken. Verzoeken
+naar verschillende peers lopen dan nog steeds tegelijk. Stulp deed eerst een
+sessie per werker en betaalde zo bij elk eerste Matter-commando een
+handshake; met een eigenaar per node had geen enkel commando er nog een.
+
+**Geef door vóór je op een bevestiging wacht.** Een betrouwbaar protocol
+(MRP, een eigen ACK-laag) bevestigt je antwoord pas na een rondreis. Wacht
+daar niet op voordat je de ontvangen gegevens verwerkt: verstuur het
+antwoord, geef de gegevens door, en laat de bevestiging op de achtergrond
+binnenkomen. Stulp wachtte na elk Matter-rapport op die ACK (op Thread 550
+tot 600 ms), en elke melding, ook een beweging, liep zoveel achter.
+
+**Meer parallel is niet gratis.** Werkers op één executor verdelen het
+wachten, niet de rekentijd: wat elke werker per gebeurtenis kost, betaal je
+zo vaak als er werkers zijn. In Stulp startten
+acht werkers per rapport een taak die met een kopie van de staat begon, en
+zakte het slot van boven de 90% naar 11 tot 40% idle. Meet `HOPOS_SLOT_LOAD`
+opnieuw na elke stap naar meer gelijktijdigheid; doe kort werk direct en geef
+alleen lang, afbreekbaar werk een eigen taak.
+
+**Meet een keten per schakel.** Een vertraging die de gebruiker voelt, zit
+zelden op één plek. Geef elke schakel een tijdregel (wachten in een rij,
+verwerken, verbinden, de rondreis, het doorgeven), dan krijgt elk vermoeden
+een getal. Bij Stulp ("beweging naar lamp duurt 5 s") viel de rij zo af
+met 0 ms, en bleken de handshake (0,7 tot 1,7 s) en het wachten op een
+ACK (~600 ms) de grote posten.
 
 **Laat levenscyclus geen lopend werk afbreken.** Het onderhoud van Matter
 werd door elke `device.init` geannuleerd, midden in een handshake (137 van
@@ -297,6 +328,12 @@ een verhuizing, niet naar wat de naam van een hart doet vermoeden.
 - Elke foutstatus die de app teruggeeft, heeft een consoleregel met de reden.
 - Sessies en verbindingen naar hetzelfde apparaat worden gedeeld en
   hergebruikt; een onbereikbaar apparaat krijgt een backoff.
+- Elk apparaat (peer) heeft één eigenaar-taak; parallel per apparaat, niet
+  per werker.
+- Gegevens gaan door zodra ze binnen zijn; een protocol-ACK wordt niet
+  synchroon afgewacht.
+- Na meer gelijktijdigheid: `HOPOS_SLOT_LOAD` opnieuw gemeten.
+- Een keten met merkbare vertraging heeft een tijdregel per schakel.
 
 Zie ook: het Rust-handboek (`rustdoc/README.md`, §2 Taken en §4 De executor),
 [stacktask.md](stacktask.md) voor synchrone code op een eigen stack,
