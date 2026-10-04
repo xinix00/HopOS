@@ -328,6 +328,10 @@ impl Bench {
         let chunk = buf.get_mut(..sz)?;
         let t0 = self.now();
         for k in 0..n {
+            // Op een flip-boot loopt de watchdog van de vorige kern door en
+            // blokkeert de bench de executor: zelf petten, anders reset de
+            // node midden in de bench (de Altra, SBSA 12 s, 04-10).
+            crate::watchdog::pet_now();
             if let Err(e) = block_on(disk.write(lba(k), chunk)) {
                 println!(
                     "nvme bench: write {sz} at {}: {e} HOPOS_NVMEBENCH_FAIL",
@@ -338,6 +342,7 @@ impl Bench {
         }
         let t1 = self.now();
         for k in 0..n {
+            crate::watchdog::pet_now();
             if let Err(e) = block_on(disk.read(lba(k), chunk)) {
                 println!(
                     "nvme bench: read {sz} at {}: {e} HOPOS_NVMEBENCH_FAIL",
@@ -426,6 +431,7 @@ impl Bench {
         let t0 = self.now();
         block_on(core::future::poll_fn(|cx| {
             loop {
+                crate::watchdog::pet_now();
                 while pool.len() < depth && k < n {
                     let lba = base + (xorshift(k) % slots) * step;
                     let read = q.io(
@@ -490,6 +496,7 @@ impl Bench {
             };
             let t0 = self.now();
             for k in 0..n {
+                crate::watchdog::pet_now();
                 if let Err(e) = block_on(fs.write_at(path, k * sz, chunk)) {
                     println!("hopfs bench: write: {e} HOPOS_NVMEBENCH_FAIL");
                     return;
@@ -497,6 +504,7 @@ impl Bench {
             }
             let t1 = self.now();
             for k in 0..n {
+                crate::watchdog::pet_now();
                 if let Err(e) = block_on(fs.read_at(path, k * sz, chunk)) {
                     println!("hopfs bench: read: {e} HOPOS_NVMEBENCH_FAIL");
                     return;

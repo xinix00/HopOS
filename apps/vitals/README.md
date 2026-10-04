@@ -7,7 +7,7 @@ gezond board.
 
 De tests meten hetzelfde als vitals van v2, met dezelfde werklast en
 dezelfde rekensom, zodat de v3-getallen naast die van v2 liggen
-(`docs/measurements.md`, tabel Vitals).
+(`docs/measurements.md`, per board de tabel Vitals).
 
 | test | meet | zegt iets over | marker |
 |---|---|---|---|
