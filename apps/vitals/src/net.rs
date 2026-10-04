@@ -16,7 +16,7 @@
 //! hooguit één test tegelijk, dus nooit twee runs op dezelfde tellers.
 
 use crate::Shared;
-use crate::report::{ERR_CAP, Report, Short, pct, secs};
+use crate::report::{ERR_CAP, Report, pct, secs};
 use crate::run::{self, BOARD, Params, Test, note};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -24,6 +24,7 @@ use applib::appnet::{self, TcpStream};
 use applib::rt::Exec;
 use applib::tcp::{Dialer, TcpConn};
 use applib::{EXEC, clock};
+use bounded::Text;
 use core::cell::{Cell, RefCell};
 use core::fmt::Write;
 use core::time::Duration;
@@ -70,7 +71,7 @@ struct RxState {
     /// De laatste finish.
     end_ns: Cell<u64>,
     /// De eerste fout.
-    err: RefCell<Short<ERR_CAP>>,
+    err: RefCell<Text<ERR_CAP>>,
 }
 
 /// De tellers van rx.
@@ -79,11 +80,11 @@ static RX: Local<RxState> = Local::new(RxState {
     header_ns: Cell::new(0),
     done: Cell::new(0),
     end_ns: Cell::new(0),
-    err: RefCell::new(Short::new()),
+    err: RefCell::new(Text::new()),
 });
 
 /// Zet de eerste fout.
-fn first_err(cell: &RefCell<Short<ERR_CAP>>, args: core::fmt::Arguments<'_>) {
+fn first_err(cell: &RefCell<Text<ERR_CAP>>, args: core::fmt::Arguments<'_>) {
     if let Ok(mut e) = cell.try_borrow_mut()
         && e.is_empty()
     {
@@ -107,7 +108,7 @@ pub(crate) async fn rx(sh: &'static Shared, r: &mut Report, p: &Params) {
     st.done.set(0);
     st.end_ns.set(0);
     if let Ok(mut e) = st.err.try_borrow_mut() {
-        *e = Short::new();
+        *e = Text::new();
     }
     let t0 = clock::now_ns();
     let mut started = 0;
@@ -362,7 +363,7 @@ async fn ping(exec: &'static Exec, ([a, b, c, d], port): ([u8; 4], u16)) -> Resu
     let s = TcpStream::connect_timeout([a, b, c, d], port, CONNECT)
         .await
         .map_err(|_| ())?;
-    let mut url = Short::<48>::new();
+    let mut url = Text::<48>::new();
     let _ = write!(url, "http://{a}.{b}.{c}.{d}:{port}/ping");
     let call = Call {
         url: url.as_str(),
@@ -458,7 +459,7 @@ pub(crate) async fn serve_blob(
         1024,
     );
     let total = mb << 20;
-    let mut len = Short::<24>::new();
+    let mut len = Text::<24>::new();
     let _ = write!(len, "{total}");
     // Content-Length vooraf: dan schrijft leanhttp direct door, zonder
     // chunking, en kan curl de voortgang tonen.
@@ -560,7 +561,7 @@ pub(crate) async fn serve_sink(
     if let Some(e) = failed {
         return Err(e);
     }
-    let mut out = Short::<96>::new();
+    let mut out = Text::<96>::new();
     let _ = writeln!(
         out,
         "{{\"received\":{got},\"burst_mb\":{},\"burst_seconds\":{:.3}}}",

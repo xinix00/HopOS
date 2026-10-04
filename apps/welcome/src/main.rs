@@ -34,6 +34,7 @@ extern crate alloc;
 mod page;
 
 use alloc::vec::Vec;
+use applib::app::port_of;
 use applib::appnet::{self, TcpListener, TcpStream};
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
@@ -117,7 +118,7 @@ struct Shared {
 )]
 async fn welcome(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
-    let port = port_of(app.env("ER_PORT_HTTP"));
+    let port = port_of(app.env("ER_PORT_HTTP"), DEFAULT_PORT);
     let net = appnet::up(app).expect("welcome: network stack");
     let listener = TcpListener::bind(port).expect("welcome: listen on ER_PORT_HTTP");
     let mut mux = Mux::default();
@@ -156,21 +157,6 @@ async fn welcome(app: &'static App) {
         shared.slot
     );
     accept(listener, &mut senders, exec).await;
-}
-
-/// De poort uit `ER_PORT_HTTP`, of [`DEFAULT_PORT`] zonder of bij onzin
-/// (luid: een jobspec die iets anders bedoelde, moet dat kunnen zien).
-fn port_of(env: Option<&str>) -> u16 {
-    match env.map(str::parse::<u16>) {
-        None => DEFAULT_PORT,
-        Some(Ok(p)) if p != 0 => p,
-        Some(_) => {
-            log!(
-                "welcome: ER_PORT_HTTP={env:?} is not a port, using {DEFAULT_PORT} HOPOS_WELCOME_PORT"
-            );
-            DEFAULT_PORT
-        }
-    }
 }
 
 /// De acceptor: elke verbinding naar de eerste vrije werker.
@@ -305,14 +291,6 @@ async fn serve_page(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_port_comes_from_the_env_or_is_80() {
-        assert_eq!(port_of(Some("8081")), 8081);
-        assert_eq!(port_of(None), 80);
-        assert_eq!(port_of(Some("0")), 80);
-        assert_eq!(port_of(Some("http")), 80);
-    }
 
     #[test]
     fn the_mux_routes_health_and_the_page() {

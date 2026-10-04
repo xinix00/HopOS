@@ -10,7 +10,8 @@
 //! Dit module bezit de rapporten niet; dat doet de tabel in `run`.
 
 use alloc::vec::Vec;
-use bounded::BoundedVec;
+use applib::text::{Room, json_str};
+use bounded::{BoundedVec, Text};
 use core::fmt::{self, Write};
 
 /// Zoveel meetwaarden per test; de breedste (memlat) heeft er zes.
@@ -32,54 +33,6 @@ pub(crate) struct Metric {
     pub(crate) value: f64,
     /// De eenheid, ASCII (`MB/s`, `us`, `C`).
     pub(crate) unit: &'static str,
-}
-
-/// Een tekst van vaste maat op de stack: wat niet past, valt weg.
-#[derive(Clone, Copy)]
-pub(crate) struct Short<const N: usize> {
-    buf: [u8; N],
-    len: usize,
-}
-
-impl<const N: usize> Short<N> {
-    /// Een lege tekst.
-    pub(crate) const fn new() -> Self {
-        Self {
-            buf: [0; N],
-            len: 0,
-        }
-    }
-
-    /// De tekst tot het laatste hele UTF-8-teken.
-    pub(crate) fn as_str(&self) -> &str {
-        valid_prefix(self.buf.get(..self.len).unwrap_or_default())
-    }
-
-    /// Leeg?
-    pub(crate) const fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-impl<const N: usize> Default for Short<N> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<const N: usize> Write for Short<N> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let room = N - self.len;
-        let take = s.len().min(room);
-        if let (Some(dst), Some(src)) = (
-            self.buf.get_mut(self.len..self.len + take),
-            s.as_bytes().get(..take),
-        ) {
-            dst.copy_from_slice(src);
-            self.len += take;
-        }
-        Ok(())
-    }
 }
 
 /// Het langste stuk van `b` dat geldige UTF-8 is.
@@ -114,21 +67,14 @@ impl Lines {
             return;
         }
         let mark = self.buf.len();
-        let mut w = Room {
-            out: &mut self.buf,
-            cap: LINES_CAP,
-        };
+        let mut w = Room(&mut self.buf);
         let fits = w.write_fmt(args).is_ok() && w.write_str("\n").is_ok();
         if !fits {
             // Deze regel niet half: terug naar de vorige, en één keer
             // zeggen dat er meer was.
             self.buf.truncate(mark);
             self.cut = true;
-            let _ = Room {
-                out: &mut self.buf,
-                cap: LINES_CAP,
-            }
-            .write_str("...\n");
+            let _ = Room(&mut self.buf).write_str("...\n");
         }
     }
 
@@ -137,25 +83,6 @@ impl Lines {
         valid_prefix(&self.buf)
             .split('\n')
             .filter(|l| !l.is_empty())
-    }
-}
-
-/// Een schrijver in een `Vec` die niet voorbij `cap` groeit: vol is een
-/// `fmt::Error`, geen realloc.
-pub(crate) struct Room<'a> {
-    /// De buffer.
-    pub(crate) out: &'a mut Vec<u8>,
-    /// De grens.
-    pub(crate) cap: usize,
-}
-
-impl Write for Room<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if self.out.len() + s.len() > self.cap.min(self.out.capacity()) {
-            return Err(fmt::Error);
-        }
-        self.out.extend_from_slice(s.as_bytes());
-        Ok(())
     }
 }
 
@@ -170,7 +97,7 @@ pub(crate) struct Report {
     pub(crate) duration_ns: u64,
     metrics: BoundedVec<Metric, METRICS>,
     lines: Lines,
-    err: Short<ERR_CAP>,
+    err: Text<ERR_CAP>,
     skipped: Option<&'static str>,
 }
 
@@ -183,7 +110,7 @@ impl Report {
             duration_ns: 0,
             metrics: BoundedVec::new(),
             lines: Lines::new(),
-            err: Short::new(),
+            err: Text::new(),
             skipped: None,
         }
     }
@@ -236,8 +163,8 @@ impl Report {
 
     /// De `key=value`-staart achter de marker: elke meetwaarde, kort
     /// afgerond.
-    pub(crate) fn kv(&self) -> Short<160> {
-        let mut s = Short::new();
+    pub(crate) fn kv(&self) -> Text<160> {
+        let mut s = Text::new();
         for m in self.metrics() {
             let _ = write!(s, " {}=", m.name);
             let _ = num(&mut s, m.value);
@@ -317,32 +244,6 @@ pub(crate) fn json_num(w: &mut impl Write, v: f64) -> fmt::Result {
     }
 }
 
-/// Een string als JSON, met de escapes die de spec eist.
-pub(crate) fn json_str(w: &mut impl Write, s: &str) -> fmt::Result {
-    w.write_str("\"")?;
-    let mut start = 0;
-    for (i, c) in s.char_indices() {
-        let esc = match c {
-            '"' => Some("\\\""),
-            '\\' => Some("\\\\"),
-            '\n' => Some("\\n"),
-            '\r' => Some("\\r"),
-            '\t' => Some("\\t"),
-            _ => None,
-        };
-        if esc.is_some() || c < ' ' {
-            w.write_str(s.get(start..i).unwrap_or_default())?;
-            match esc {
-                Some(e) => w.write_str(e)?,
-                None => write!(w, "\\u{:04x}", u32::from(c))?,
-            }
-            start = i + c.len_utf8();
-        }
-    }
-    w.write_str(s.get(start..).unwrap_or_default())?;
-    w.write_str("\"")
-}
-
 /// Het `p`-de percentiel van `v` (100 is het maximum), op de manier van de
 /// Go-vitals: sorteren en de index `len * p / 100`, geklemd. 0 zonder
 /// samples. Sorteert `v` ter plekke.
@@ -406,10 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn json_strings_escape_quotes_and_control_characters() {
-        let mut s = String::new();
-        json_str(&mut s, "a\"b\\c\nd\u{1}e").unwrap();
-        assert_eq!(s, "\"a\\\"b\\\\c\\nd\\u0001e\"");
+    fn a_number_that_is_not_one_is_null() {
         let mut s = String::new();
         json_num(&mut s, f64::NAN).unwrap();
         assert_eq!(s, "null");
@@ -436,13 +334,6 @@ mod tests {
             r.add("x", 1.0, "");
         }
         assert_eq!(r.metrics().len(), METRICS);
-    }
-
-    #[test]
-    fn a_short_text_truncates_on_a_character_boundary() {
-        let mut s: Short<4> = Short::new();
-        write!(s, "abé€").unwrap();
-        assert_eq!(s.as_str(), "ab\u{e9}");
     }
 
     #[test]

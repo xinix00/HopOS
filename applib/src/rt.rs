@@ -58,6 +58,13 @@ pub fn app() -> Option<&'static App> {
     APP.get().get()
 }
 
+/// Blijft staan zonder iets te doen. Een app die klaar is of niet kon,
+/// stopt niet: Hop herstart een service die stopt. Geen timer en geen wek;
+/// de heartbeat en de rest van de app lopen gewoon door.
+pub async fn park() -> ! {
+    match core::future::pending::<core::convert::Infallible>().await {}
+}
+
 /// De stack onder de top van de RAM-declaratie. Daaronder houdt de heap op.
 pub const STACK_SIZE: u64 = 256 << 10;
 

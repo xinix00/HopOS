@@ -40,6 +40,7 @@ name = "bench"
 version = "3.0.9"
 dependencies = [
  "applib",
+ "bounded",
  "sync",
 ]
 
@@ -335,6 +336,7 @@ name = "display"
 version = "3.0.9"
 dependencies = [
  "applib",
+ "bounded",
  "dev",
  "driver-fb",
  "sync",

@@ -13,10 +13,11 @@
 //!   tijd die de peer zelf mat.
 
 use crate::proto::{self, CMD_MAX, PATTERN_LEN, percentile};
-use crate::serve::format_into;
 use alloc::vec::Vec;
 use applib::appnet::{self, NetError, TcpStream};
 use applib::{App, EXEC, clock, log};
+use bounded::Text;
+use core::fmt::Write as _;
 use core::time::Duration;
 
 /// Round-trips van de warme meting (de Go-appspike: 200).
@@ -96,24 +97,10 @@ async fn dial(ip: [u8; 4], port: u16) -> Result<TcpStream, NetError> {
 
 /// Stuurt de commandoregel.
 async fn command(s: &mut TcpStream, args: core::fmt::Arguments<'_>) -> Result<(), NetError> {
-    let mut line = [0u8; CMD_MAX];
-    let n = format_into(&mut line, args);
+    let mut line = Text::<CMD_MAX>::new();
+    let _ = line.write_fmt(args);
     s.set_timeout(Some(OP_CAP));
-    s.write_all(line.get(..n).unwrap_or_default()).await
-}
-
-/// Leest precies `buf.len()` bytes.
-async fn read_exact(s: &mut TcpStream, buf: &mut [u8]) -> Result<(), NetError> {
-    let mut at = 0;
-    while at < buf.len() {
-        s.set_timeout(Some(OP_CAP));
-        let n = s.read(buf.get_mut(at..).unwrap_or_default()).await?;
-        if n == 0 {
-            return Err(NetError::Stack(appnet::StackError::Closed));
-        }
-        at += n;
-    }
-    Ok(())
+    s.write_all(line.as_bytes()).await
 }
 
 /// Eén round-trip van [`PING_LEN`] bytes, in microseconden.
@@ -121,7 +108,8 @@ async fn round_trip(s: &mut TcpStream, msg: &mut [u8; PING_LEN]) -> Result<u64, 
     let t0 = clock::now_ns();
     s.set_timeout(Some(OP_CAP));
     s.write_all(msg).await?;
-    read_exact(s, msg).await?;
+    s.set_timeout(Some(OP_CAP));
+    s.read_exact(msg).await?;
     Ok(clock::now_ns().saturating_sub(t0) / 1000)
 }
 

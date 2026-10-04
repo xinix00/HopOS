@@ -39,7 +39,7 @@ mod source;
 use applib::appnet::{self, SystemClient};
 use applib::codec::{Codec, Config, Direction, Event, Flags, Kind, MAX_EVENTS, Pixel, Session};
 use applib::rt::Exec;
-use applib::{App, EXEC, clock, log};
+use applib::{App, EXEC, clock, log, park};
 use bounded::BoundedVec;
 use core::fmt;
 use core::time::Duration;
@@ -99,16 +99,13 @@ const IDLE: Duration = Duration::from_millis(1);
 /// Zo lang zonder event is een stilgevallen decoder.
 const QUIET: Duration = Duration::from_secs(20);
 
-/// Het ritme van het wachten na de meting of na een weigering.
-const PARK: Duration = Duration::from_secs(3600);
-
 async fn decode(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
     let net = match appnet::up(app) {
         Ok(n) => n,
         Err(e) => {
             log!("decode: no network stack: {e} HOPOS_DECODE_FAIL");
-            return park(exec).await;
+            park().await;
         }
     };
     let mut sys = net.system_client();
@@ -124,7 +121,7 @@ async fn decode(app: &'static App) {
         log!(
             "decode: cannot tell the codec of {name}; set DECODE_CODEC (hevc, h264, av1, ...) HOPOS_DECODE_FAIL"
         );
-        return park(exec).await;
+        park().await;
     }
     let pixel = match app.env("DECODE_PIXEL").map(Pixel::parse) {
         None | Some(Pixel::None) => Pixel::P010,
@@ -144,7 +141,7 @@ async fn decode(app: &'static App) {
             log!(
                 "decode: the node has no {codec} decoder for this app: {e}; staying up without one HOPOS_DECODE_NOCODEC"
             );
-            return park(exec).await;
+            park().await;
         }
     };
     log!(
@@ -164,14 +161,7 @@ async fn decode(app: &'static App) {
     if let Err(e) = ses.close(&mut sys).await {
         log!("decode: close: {e}");
     }
-    park(exec).await;
-}
-
-/// Blijft leven zonder iets te doen.
-async fn park(exec: &'static Exec) {
-    loop {
-        exec.after(PARK).await;
-    }
+    park().await;
 }
 
 /// Waarom een meting stopte.

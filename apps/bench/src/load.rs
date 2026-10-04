@@ -6,9 +6,11 @@
 
 use alloc::vec::Vec;
 use applib::appnet::{self, Endpoint, UdpSocket};
+use applib::burn::{BURST, lcg};
 use applib::heap::HEAP;
-use applib::{App, EXEC, clock, log};
-use core::hint::black_box;
+use applib::{App, EXEC, clock, log, park};
+use bounded::Text;
+use core::fmt::Write as _;
 use core::time::Duration;
 use sync::yield_now;
 
@@ -19,9 +21,6 @@ const BURN_REST: u64 = 300;
 
 /// Om de zoveel seconden één BURN-regel.
 const BURN_EVERY: Duration = Duration::from_secs(10);
-
-/// Eén rekenburst: 2^19 stappen van een LCG (Go: ~0,3 ms op een A76).
-const BURST: u64 = 1 << 19;
 
 /// Een getal uit de env, of `default`.
 fn env_u64(app: &App, key: &str, default: u64) -> u64 {
@@ -66,10 +65,7 @@ pub(crate) async fn burn(app: &'static App) -> ! {
             log!("BURN: {what}");
         }
         if working {
-            for k in 0..BURST {
-                acc = acc.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(k);
-            }
-            black_box(acc);
+            acc = lcg(acc, BURST);
             bursts += 1;
             yield_now().await;
         } else {
@@ -81,7 +77,10 @@ pub(crate) async fn burn(app: &'static App) -> ! {
                 .max(1);
             let rate = (bursts - last_bursts) * 1_000_000_000 / dt;
             let idle_ticks = app.ctrl().idle_ticks();
-            let idle = idle_pct(idle_ticks.wrapping_sub(last_idle), hz, dt);
+            // Tijdens werk hoort dit bij 0 te liggen (de burst geeft de core
+            // alleen met een yield af, nooit aan de slaper), tijdens rust bij
+            // 100; ertussenin is de heartbeat, of een core die lekt.
+            let idle = clock::idle_pct(idle_ticks.wrapping_sub(last_idle), hz, dt) as u64;
             log!(
                 "BURN: {bursts} bursts, {rate} bursts/s, idle={idle}%, phase={}, heap={} KB HOPOS_BENCH_BURN",
                 if in_work { "work" } else { "rest" },
@@ -92,14 +91,6 @@ pub(crate) async fn burn(app: &'static App) -> ! {
             next = now.saturating_add(nanos(BURN_EVERY));
         }
     }
-}
-
-/// Het deel van `dt_ns` dat de core sliep, in procenten: `ticks` geslapen
-/// tellertikken op `hz`. Tijdens werk hoort dit bij 0 te liggen (de burst
-/// geeft de core alleen met een yield af, nooit aan de slaper), tijdens
-/// rust bij 100; ertussenin is de heartbeat, of een core die lekt.
-fn idle_pct(ticks: u64, hz: u64, dt_ns: u64) -> u64 {
-    (clock::ticks_to_ns(ticks, hz).saturating_mul(100) / dt_ns.max(1)).min(100)
 }
 
 /// De maat van één THRASH-knoop: 48 bytes, zoals de `ball` van Go (een
@@ -255,9 +246,9 @@ async fn mcast_send() -> ! {
     log!("MCAST send: probing 224.0.0.251:5353 every second HOPOS_BENCH_UP role=mcast-send");
     let mut i = 0u64;
     loop {
-        let mut msg = [0u8; 32];
-        let n = crate::serve::format_into(&mut msg, format_args!("mdns-probe {i}"));
-        match udp.send_to(MDNS, msg.get(..n).unwrap_or_default()).await {
+        let mut msg = Text::<32>::new();
+        let _ = write!(msg, "mdns-probe {i}");
+        match udp.send_to(MDNS, msg.as_bytes()).await {
             Err(e) => log!("MCAST send: {e} HOPOS_BENCH_MCAST_FAIL"),
             Ok(_) if i.is_multiple_of(5) => {
                 log!("MCAST send: probe {i} sent to 224.0.0.251:5353 HOPOS_BENCH_MCAST");
@@ -336,32 +327,7 @@ pub(crate) async fn netdemo_out(app: &'static App) -> u64 {
     }
 }
 
-/// Wacht voor altijd: een rol die niet kon, blijft stil staan in plaats van
-/// te herstarten (Hop herstart een service die stopt).
-async fn park() -> ! {
-    loop {
-        EXEC.after(Duration::from_secs(3600)).await;
-    }
-}
-
 /// Een duur in nanoseconden, geklemd.
 fn nanos(d: Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::idle_pct;
-
-    #[test]
-    fn idle_pct_is_the_slept_share_of_the_interval() {
-        // QEMU telt op 62,5 MHz: 5 s slaap in 10 s is de helft.
-        assert_eq!(idle_pct(312_500_000, 62_500_000, 10_000_000_000), 50);
-        // Op de M4 (1 GHz) is een tik een nanoseconde.
-        assert_eq!(idle_pct(9_900_000_000, 1_000_000_000, 10_000_000_000), 99);
-        // Een teller die verder liep dan de wandklok (afronding, een tik
-        // over de grens) blijft op 100; een leeg interval deelt niet door 0.
-        assert_eq!(idle_pct(u64::MAX, 1, 10), 100);
-        assert_eq!(idle_pct(0, 62_500_000, 0), 0);
-    }
 }

@@ -151,7 +151,7 @@ async fn spike(app: &'static App) {
 
     log!("HOPOS_APPSPIKE_DONE pass={} fail={}", s.pass, s.fail);
     if app.env("HOLD") == Some("1") {
-        core::future::pending::<()>().await;
+        applib::park().await;
     }
     // Netjes: eerst het net-afscheid (elke FIN bevestigd), dan de exit.
     app.shutdown(u64::from(s.fail)).await;

@@ -77,7 +77,8 @@ async fn bench(app: &'static applib::App) {
         (_, Some("pull")) => client::run(app, client::Role::Pull).await,
         (_, Some("push")) => client::run(app, client::Role::Push).await,
         (_, None | Some("serve" | "")) => {
-            let port = port_of(app.env("ER_PORT_HTTP").or_else(|| app.env("BENCH_PORT")));
+            let env = app.env("ER_PORT_HTTP").or_else(|| app.env("BENCH_PORT"));
+            let port = applib::app::port_of(env, DEFAULT_PORT);
             serve::run(app, port).await;
             0
         }
@@ -91,27 +92,7 @@ async fn bench(app: &'static applib::App) {
     // zichzelf (en vult de console). `BENCH_EXIT=1` stopt wel, met de code.
     if app.env("BENCH_EXIT") != Some("1") {
         log!("bench: done with code {code}, holding until the job is stopped HOPOS_BENCH_HOLD");
-        core::future::pending::<()>().await;
+        applib::park().await;
     }
     app.shutdown(code).await;
-}
-
-/// De poort uit de env, of [`DEFAULT_PORT`] zonder of bij onzin.
-fn port_of(env: Option<&str>) -> u16 {
-    env.and_then(|v| v.parse::<u16>().ok())
-        .filter(|p| *p != 0)
-        .unwrap_or(DEFAULT_PORT)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_port_comes_from_the_env_or_is_9000() {
-        assert_eq!(port_of(Some("80")), 80);
-        assert_eq!(port_of(None), 9000);
-        assert_eq!(port_of(Some("0")), 9000);
-        assert_eq!(port_of(Some("http")), 9000);
-    }
 }

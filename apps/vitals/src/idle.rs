@@ -158,12 +158,11 @@ pub(crate) fn window(ring: &Ring, span_ns: u64, hz: u64) -> Window {
         w.note = Some("counter frequency unavailable");
         return w;
     }
-    let slept = last.idle.saturating_sub(base.idle) as f64;
-    let frac = (slept / (span_s * hz as f64)).clamp(0.0, 1.0);
-    w.idle_pct = Some(frac * 100.0);
+    let pct = clock::idle_pct(last.idle.saturating_sub(base.idle), hz, span);
+    w.idle_pct = Some(pct);
     if wakes_per_s > 0.0 {
         // De rekensom uit abi/layout: tijd per wek = (1 - idle) / wekken.
-        w.wake_cost_us = Some((1.0 - frac) / wakes_per_s * 1e6);
+        w.wake_cost_us = Some((1.0 - pct / 100.0) / wakes_per_s * 1e6);
     }
     w
 }

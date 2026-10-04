@@ -1,12 +1,10 @@
 //! De rekentests: cpu (één core), smp (alle cores, met de gedeelde heap)
 //! en burn (volgehouden last met de temperatuur).
 //!
-//! De werklast is de LCG-stap uit de soak van appspike: puur registerwerk,
-//! geen geheugendruk, dus wat je meet is de klok van het hart. Elke burst
-//! is 2^19 stappen (Go: ~0,3 ms op een A76) en eindigt in een `yield_now`:
-//! een rekenlus in een app geeft coöperatief af, en zo blijven heartbeat,
-//! de pomp en de pagina lopen terwijl we branden. Dezelfde burst als
-//! `apps/bench` (BURN), zodat de getallen naast elkaar kunnen.
+//! De werklast is de burst van [`applib::burn`], dezelfde als die van
+//! `apps/bench` (BURN). Elke burst eindigt in een `yield_now`: een rekenlus
+//! in een app geeft coöperatief af, en zo blijven heartbeat, de pomp en de
+//! pagina lopen terwijl we branden.
 //!
 //! Over meer cores (handboek §1, "cores onderling"): het werk gaat met
 //! `smp::spawn_on` naar de executor van de andere core, de uitkomst komt
@@ -20,6 +18,7 @@ use crate::Shared;
 use crate::report::{Report, avg, secs};
 use crate::run::{Params, note};
 use alloc::vec::Vec;
+use applib::burn::{BURST, lcg};
 use applib::{EXEC, clock, smp};
 use core::hint::black_box;
 use core::sync::atomic::{
@@ -28,12 +27,6 @@ use core::sync::atomic::{
 };
 use core::time::Duration;
 use sync::yield_now;
-
-/// Eén burst: 2^19 LCG-stappen.
-pub(crate) const BURST: u64 = 1 << 19;
-
-/// De vermenigvuldiger van Knuth's MMIX-LCG, zoals in de Go-vitals.
-const LCG_MUL: u64 = 6_364_136_223_846_793_005;
 
 /// Hoe lang smp op de opgang van de andere cores wacht.
 const CORES_WAIT: Duration = Duration::from_secs(5);
@@ -46,16 +39,6 @@ const SMP_WORK: u64 = 64 << 20;
 
 /// De woorden per core in de heap-toets.
 const HEAP_WORDS: usize = 1 << 16;
-
-/// `n` LCG-stappen vanaf `acc`. Niet inline, zodat de compiler de lus niet
-/// in de meetlus vouwt; het resultaat gaat door `black_box`.
-#[inline(never)]
-pub(crate) fn lcg(mut acc: u64, n: u64) -> u64 {
-    for k in 0..n {
-        acc = acc.wrapping_mul(LCG_MUL).wrapping_add(k);
-    }
-    black_box(acc)
-}
 
 /// cpu: LCG-stappen per seconde op één core, met de yield die elke nette
 /// app per burst betaalt.
@@ -379,15 +362,6 @@ pub(crate) async fn burn(sh: &'static Shared, r: &mut Report, p: &Params) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_lcg_is_the_go_step() {
-        // Twee stappen met de hand: acc*a + 0, dan *a + 1.
-        let a = LCG_MUL;
-        let want = 7u64.wrapping_mul(a).wrapping_mul(a).wrapping_add(1);
-        assert_eq!(lcg(7, 2), want);
-        assert_eq!(lcg(7, 0), 7);
-    }
 
     #[test]
     fn the_tally_resets_to_zero() {

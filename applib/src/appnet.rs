@@ -893,18 +893,6 @@ impl Net {
             return Ok(ip);
         }
         let server = self.dns.ok_or(NetError::Dns(DnsError::NoServer))?;
-        self.resolve_via(server, host).await
-    }
-
-    /// Vraagt `server` om het A-record van `host`: één vraag, wachten tot
-    /// [`DNS_TIMEOUT`], en na stilte één herhaling met een nieuw id.
-    ///
-    /// Een datagram van een ander adres, of met een verkeerd id of een
-    /// andere vraag, telt niet en de wacht gaat door: een laat antwoord op
-    /// de vorige poging of een gok van buiten maakt de vraag niet stuk. Een
-    /// echt antwoord dat nee zegt (NXDOMAIN, geen A, kapot) is meteen de
-    /// uitkomst; nog eens vragen verandert daar niets aan.
-    pub async fn resolve_via(&'static self, server: [u8; 4], host: &str) -> Result<[u8; 4]> {
         self.resolve_record(server, host, 1).await
     }
     /// Het AAAA-adres van een host, of het letterlijke IPv6-adres zelf.
@@ -919,6 +907,15 @@ impl Net {
     pub async fn resolve6_via(&'static self, server: [u8; 4], host: &str) -> Result<[u8; 16]> {
         self.resolve_record(server, host, 28).await
     }
+    /// Vraagt `server` om het record van soort `kind` (1 is A, 28 is AAAA)
+    /// van `host`: één vraag, wachten tot [`DNS_TIMEOUT`], en na stilte één
+    /// herhaling met een nieuw id.
+    ///
+    /// Een datagram van een ander adres, of met een verkeerd id of een
+    /// andere vraag, telt niet en de wacht gaat door: een laat antwoord op
+    /// de vorige poging of een gok van buiten maakt de vraag niet stuk. Een
+    /// echt antwoord dat nee zegt (NXDOMAIN, geen A, kapot) is meteen de
+    /// uitkomst; nog eens vragen verandert daar niets aan.
     async fn resolve_record<const N: usize>(
         &'static self,
         server: [u8; 4],
@@ -1227,6 +1224,20 @@ impl TcpStream {
                 |st, w| st.tcp_register_read_waker(h, w),
             )
             .await
+    }
+
+    /// Leest precies `buf.len()` bytes. EOF ervoor is
+    /// [`StackError::Closed`]; de deadline van de stroom geldt voor het
+    /// geheel.
+    pub async fn read_exact(&mut self, mut buf: &mut [u8]) -> Result {
+        while !buf.is_empty() {
+            let n = self.read(buf).await?;
+            if n == 0 {
+                return Err(NetError::Stack(StackError::Closed));
+            }
+            buf = buf.get_mut(n..).unwrap_or_default();
+        }
+        Ok(())
     }
 
     /// Wacht tot een read niet zou blokkeren: er staan bytes klaar, of de

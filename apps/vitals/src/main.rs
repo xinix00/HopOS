@@ -54,6 +54,7 @@ mod report;
 mod run;
 
 use alloc::vec::Vec;
+use applib::app::port_of;
 use applib::appnet::{self, Net, TcpListener, TcpStream};
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
@@ -179,7 +180,7 @@ impl Shared {
 )]
 async fn vitals(app: &'static App) {
     let exec: &'static Exec = EXEC.get();
-    let port = port_of(app.env("ER_PORT_HTTP"));
+    let port = port_of(app.env("ER_PORT_HTTP"), DEFAULT_PORT);
     let net = appnet::up(app).expect("vitals: network stack");
     let listener = TcpListener::bind(port).expect("vitals: listen on ER_PORT_HTTP");
     let mut mux = Mux::default();
@@ -242,21 +243,6 @@ fn fill_pattern(buf: &mut [u8]) {
         r ^= r >> 7;
         r ^= r << 17;
         *b = r.to_le_bytes()[0];
-    }
-}
-
-/// De poort uit `ER_PORT_HTTP`, of [`DEFAULT_PORT`] zonder of bij onzin
-/// (luid: een jobspec die iets anders bedoelde, moet dat kunnen zien).
-fn port_of(env: Option<&str>) -> u16 {
-    match env.map(str::parse::<u16>) {
-        None => DEFAULT_PORT,
-        Some(Ok(p)) if p != 0 => p,
-        Some(_) => {
-            log!(
-                "vitals: ER_PORT_HTTP={env:?} is not a port, using {DEFAULT_PORT} HOPOS_VITALS_PORT"
-            );
-            DEFAULT_PORT
-        }
     }
 }
 
@@ -384,7 +370,7 @@ async fn start(ex: &mut Exchange<'_, TcpConn>, shared: &'static Shared) -> leanh
     match run::start(shared, &name, params) {
         Ok(started) => {
             ex.header_mut().set("Content-Type", "application/json")?;
-            let mut out = report::Short::<64>::new();
+            let mut out = bounded::Text::<64>::new();
             let _ = core::fmt::Write::write_fmt(
                 &mut out,
                 format_args!("{{\"started\":\"{started}\"}}\n"),
@@ -394,7 +380,7 @@ async fn start(ex: &mut Exchange<'_, TcpConn>, shared: &'static Shared) -> leanh
         }
         Err(run::StartError::Unknown) => ex.error(404, "unknown test").await,
         Err(run::StartError::Busy(running)) => {
-            let mut msg = report::Short::<64>::new();
+            let mut msg = bounded::Text::<64>::new();
             let _ = core::fmt::Write::write_fmt(
                 &mut msg,
                 format_args!("test {running:?} is still running"),
@@ -408,14 +394,6 @@ async fn start(ex: &mut Exchange<'_, TcpConn>, shared: &'static Shared) -> leanh
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_port_comes_from_the_env_or_is_8080() {
-        assert_eq!(port_of(Some("8090")), 8090);
-        assert_eq!(port_of(None), 8080);
-        assert_eq!(port_of(Some("0")), 8080);
-        assert_eq!(port_of(Some("http")), 8080);
-    }
 
     #[test]
     fn the_mux_routes_every_path() {

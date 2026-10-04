@@ -139,10 +139,10 @@ fn slot<T>() -> &'static RefCell<Option<T>> {
 async fn fake_kern(l: TcpListener, seen: &'static RefCell<Option<(u8, Vec<u8>, usize)>>) {
     let mut c = l.accept().await.unwrap();
     let mut fh = [0u8; SYS_HEADER_LEN];
-    read_exact(&mut c, &mut fh).await;
+    c.read_exact(&mut fh).await.unwrap();
     let n = decode_header(&fh).unwrap().len;
     let mut req = vec![0u8; n];
-    read_exact(&mut c, &mut req).await;
+    c.read_exact(&mut req).await.unwrap();
     let op = req[1];
     let seq = u32::from_le_bytes(req[4..8].try_into().unwrap());
     c.write_all(&crate::sys::tests::resp(seq, 0, 4096, &[]))
@@ -152,14 +152,6 @@ async fn fake_kern(l: TcpListener, seen: &'static RefCell<Option<(u8, Vec<u8>, u
     let mut rest = [0u8; 16];
     let eof = c.read(&mut rest).await.unwrap();
     *seen.borrow_mut() = Some((op, req[HOPABI_HDR_LEN..].to_vec(), eof));
-}
-
-async fn read_exact(c: &mut TcpStream, mut buf: &mut [u8]) {
-    while !buf.is_empty() {
-        let n = c.read(buf).await.unwrap();
-        assert!(n > 0, "EOF midden in een frame");
-        buf = &mut buf[n..];
-    }
 }
 
 #[test]
@@ -249,7 +241,7 @@ fn bulk_both_ways_then_close() {
             for r in 0..ROUNDS {
                 let out: Vec<u8> = (0..CHUNK).map(|i| (i * 7 + r) as u8).collect();
                 c.write_all(&out).await.unwrap();
-                read_exact(&mut c, &mut back).await;
+                c.read_exact(&mut back).await.unwrap();
                 ok &= back == out;
             }
             // Half dicht is hier heel dicht: close, en de echo sluit ook.
@@ -310,11 +302,11 @@ fn a_small_answer_carries_the_ack_in_the_same_frame() {
             let heads = || (up.head_pending().0, down.head_pending().0);
             // Eén rondreis warm: de handshake en zijn ACK's tellen niet.
             c.write_all(&msg).await.unwrap();
-            read_exact(&mut c, &mut msg).await;
+            c.read_exact(&mut msg).await.unwrap();
             let before = heads();
             for _ in 0..ROUNDS {
                 c.write_all(&msg).await.unwrap();
-                read_exact(&mut c, &mut msg).await;
+                c.read_exact(&mut msg).await.unwrap();
             }
             let after = heads();
             *result.borrow_mut() = Some((after.0 - before.0, after.1 - before.1));
@@ -614,10 +606,10 @@ fn log_lines_go_over_the_system_connection_once_it_is_up() {
             let mut got = Vec::new();
             for _ in 0..2 {
                 let mut fh = [0u8; SYS_HEADER_LEN];
-                read_exact(&mut c, &mut fh).await;
+                c.read_exact(&mut fh).await.unwrap();
                 let h = decode_header(&fh).unwrap();
                 let mut line = vec![0u8; h.len];
-                read_exact(&mut c, &mut line).await;
+                c.read_exact(&mut line).await.unwrap();
                 got.push((h.kind, line));
             }
             *seen.borrow_mut() = Some(got);
@@ -872,7 +864,7 @@ fn resolve_against(answer: Answerer, host: &'static str) -> (Result<[u8; 4]>, us
     let t0 = now();
     p.exec
         .spawn(async move {
-            let r = app.resolve_via(HOST, host).await;
+            let r = app.resolve_record(HOST, host, 1).await;
             *got.borrow_mut() = Some((r, now()));
         })
         .unwrap();

@@ -2,8 +2,7 @@
 #![cfg_attr(target_os = "none", no_std, no_main)]
 #![forbid(unsafe_code)]
 use applib::sys::{Error, Result};
-use applib::{App, EXEC, appnet, log};
-use core::time::Duration;
+use applib::{App, appnet, log};
 applib::main!(probe);
 #[cfg(not(target_os = "none"))]
 fn main() {}
@@ -13,9 +12,7 @@ async fn probe(app: &'static App) {
         Ok(restored) => log!("HOPOS_SYNC_{}", if restored { "READ" } else { "WRITE" }),
         Err(e) => log!("HOPOS_SYNC_FAIL {e}"),
     }
-    loop {
-        EXEC.get().after(Duration::from_secs(60)).await;
-    }
+    applib::park().await
 }
 async fn run(app: &'static App) -> Result<bool> {
     let net = appnet::up(app).map_err(|_| Error::Protocol("net startup"))?;

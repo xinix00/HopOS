@@ -11,12 +11,14 @@
 //! Dit module bezit [`BOARD`]: de lopende test, de voortgangsregel, de
 //! rapporten en de lopende uploadreeks van `/sink`.
 
-use crate::report::{Report, Room, Short, json_num, json_str};
+use crate::report::{Report, json_num};
 use crate::{ARCH, Shared, VERSION, cpu, disk, idle, mem, net};
 use alloc::string::String;
 use alloc::vec::Vec;
 use applib::heap::HEAP;
+use applib::text::{Room, json_str};
 use applib::{clock, log, smp};
+use bounded::Text;
 use core::cell::RefCell;
 use core::fmt::{self, Write};
 use sync::Local;
@@ -270,7 +272,7 @@ pub(crate) struct Board {
     /// De lopende test (`all` of een naam).
     running: Option<&'static str>,
     /// Eén regel voortgang.
-    note: Short<96>,
+    note: Text<96>,
     /// Per test het laatste rapport.
     results: [Option<Report>; COUNT],
     /// De lopende uploadreeks.
@@ -281,7 +283,7 @@ pub(crate) struct Board {
 /// `/sink`, gelezen door `/api/state`. Alles op core 0.
 pub(crate) static BOARD: Local<RefCell<Board>> = Local::new(RefCell::new(Board {
     running: None,
-    note: Short::new(),
+    note: Text::new(),
     results: [const { None }; COUNT],
     up: Burst {
         start_ns: 0,
@@ -294,7 +296,7 @@ pub(crate) static BOARD: Local<RefCell<Board>> = Local::new(RefCell::new(Board {
 /// Zet de voortgangsregel.
 pub(crate) fn note(args: fmt::Arguments<'_>) {
     if let Ok(mut b) = BOARD.get().try_borrow_mut() {
-        b.note = Short::new();
+        b.note = Text::new();
         let _ = b.note.write_fmt(args);
     }
 }
@@ -373,7 +375,7 @@ pub(crate) fn start(
             return Err(StartError::Busy(running));
         }
         b.running = Some(label);
-        b.note = Short::new();
+        b.note = Text::new();
         let _ = b.note.write_str("starting");
     }
     if sh.exec.spawn(runner(sh, plan, p)).is_err() {
@@ -388,7 +390,7 @@ pub(crate) fn start(
 fn release() {
     if let Ok(mut b) = BOARD.get().try_borrow_mut() {
         b.running = None;
-        b.note = Short::new();
+        b.note = Text::new();
     }
 }
 
@@ -473,10 +475,7 @@ const STATE_CAP: usize = 160 << 10;
 pub(crate) fn state_json(sh: &Shared) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     out.try_reserve_exact(STATE_CAP).ok()?;
-    let mut w = Room {
-        out: &mut out,
-        cap: STATE_CAP,
-    };
+    let mut w = Room(&mut out);
     let b = BOARD.get().try_borrow().ok()?;
     write_state(&mut w, sh, &b).ok()?;
     drop(b);

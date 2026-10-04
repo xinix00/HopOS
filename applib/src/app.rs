@@ -226,6 +226,21 @@ impl App {
     }
 }
 
+/// De poort uit een env-waarde (`ER_PORT_HTTP`), of `default` zonder of bij
+/// onzin. Onzin is luid: een jobspec die iets anders bedoelde, moet dat
+/// kunnen zien.
+#[must_use]
+pub fn port_of(env: Option<&str>, default: u16) -> u16 {
+    match env.map(str::parse::<u16>) {
+        None => default,
+        Some(Ok(p)) if p != 0 => p,
+        Some(_) => {
+            crate::log!("app: port {env:?} is not a port, using {default} HOPOS_APP_PORT");
+            default
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +319,13 @@ mod tests {
             App::new(0x5000_0000, 0, 1),
             Err(AppError::Tail(TailError::Empty))
         ));
+    }
+
+    #[test]
+    fn the_port_comes_from_the_env_or_is_the_default() {
+        assert_eq!(port_of(Some("8081"), 80), 8081);
+        assert_eq!(port_of(None, 80), 80);
+        assert_eq!(port_of(Some("0"), 9000), 9000);
+        assert_eq!(port_of(Some("http"), 8080), 8080);
     }
 }

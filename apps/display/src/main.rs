@@ -49,7 +49,7 @@ use applib::appnet::TcpStream;
 use applib::fb::{self, Glass, Input, LINE_CAP, LineReader};
 use applib::rt::Exec;
 use applib::{App, EXEC, clock, log};
-use core::fmt::{self, Write as _};
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use paint::{CURSOR, Cursor, Painter};
@@ -273,54 +273,8 @@ async fn input(exec: &'static Exec, ip: [u8; 4], port: u16, mut tx: Sender<'stat
     }
 }
 
-/// Eén regel tekst van vaste maat: `fmt::Write` zonder allocatie.
-#[derive(Clone, Copy)]
-struct Text {
-    buf: [u8; LINE_CHARS],
-    len: usize,
-}
-
-impl Text {
-    const fn new() -> Text {
-        Text {
-            buf: [b' '; LINE_CHARS],
-            len: 0,
-        }
-    }
-
-    fn of(s: &[u8]) -> Text {
-        let mut t = Text::new();
-        let n = s.len().min(LINE_CHARS);
-        if let (Some(dst), Some(src)) = (t.buf.get_mut(..n), s.get(..n)) {
-            dst.copy_from_slice(src);
-        }
-        t.len = n;
-        t
-    }
-
-    fn as_bytes(&self) -> &[u8] {
-        self.buf.get(..self.len).unwrap_or_default()
-    }
-
-    /// Opgevuld met spaties tot de volle breedte: zo wist de nieuwe tekst
-    /// de oude zonder eerst te vegen.
-    fn padded(&self) -> &[u8] {
-        &self.buf
-    }
-}
-
-impl fmt::Write for Text {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for &b in s.as_bytes() {
-            let Some(slot) = self.buf.get_mut(self.len) else {
-                return Err(fmt::Error);
-            };
-            *slot = b;
-            self.len += 1;
-        }
-        Ok(())
-    }
-}
+/// Eén regel tekst van vaste maat.
+type Text = bounded::Text<LINE_CHARS>;
 
 /// De tellers van de invoer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -347,7 +301,7 @@ struct Screen {
     lines: [Text; EVENT_LINES],
     /// De volgende regel die overschreven wordt (een ring).
     next_line: usize,
-    status: Text,
+    status: &'static [u8],
     started_ns: u64,
 }
 
@@ -371,13 +325,23 @@ impl Screen {
             logged: (Counts::default(), 0),
             lines: [Text::new(); EVENT_LINES],
             next_line: 0,
-            status: Text::of(b"input: -"),
+            status: b"input: -",
             started_ns: clock::now_ns(),
         }
     }
 
     fn cell(&self) -> u32 {
         8 * self.scale
+    }
+
+    /// Een regel op rij `row`, opgevuld met spaties tot [`LINE_CHARS`]: zo
+    /// wist de nieuwe tekst de oude zonder eerst te vegen.
+    fn put_line(&mut self, col: u32, row: u32, s: &[u8]) {
+        let mut padded = [b' '; LINE_CHARS];
+        for (d, b) in padded.iter_mut().zip(s) {
+            *d = *b;
+        }
+        self.put_text(col, row, &padded, FG);
     }
 
     /// Tekst op rij `row` (in cellen), kolom `col`.
@@ -408,9 +372,8 @@ impl Screen {
             g.height,
             g.bpp
         );
-        self.put_text(1, 3, facts.padded(), FG);
-        let status = self.status;
-        self.put_text(1, 4, status.padded(), FG);
+        self.put_line(1, 3, facts.as_bytes());
+        self.put_line(1, 4, self.status);
         self.draw_counts();
         self.put_text(1, 8, b"last input:", ACCENT);
         for i in 0..EVENT_LINES {
@@ -419,10 +382,9 @@ impl Screen {
         self.draw_clock();
     }
 
-    fn set_status(&mut self, s: &[u8]) {
-        self.status = Text::of(s);
-        let status = self.status;
-        self.put_text(1, 4, status.padded(), FG);
+    fn set_status(&mut self, s: &'static [u8]) {
+        self.status = s;
+        self.put_line(1, 4, s);
     }
 
     fn draw_counts(&mut self) {
@@ -433,14 +395,14 @@ impl Screen {
             "keys {}  moves {}  buttons {}  wheel {}",
             c.keys, c.moves, c.buttons, c.wheel
         );
-        self.put_text(1, 6, t.padded(), FG);
+        self.put_line(1, 6, t.as_bytes());
     }
 
     fn draw_line(&mut self, i: usize) {
         let Some(t) = self.lines.get(i).copied() else {
             return;
         };
-        self.put_text(3, 10 + i as u32, t.padded(), FG);
+        self.put_line(3, 10 + i as u32, t.as_bytes());
     }
 
     /// De klok rechtsboven: de wandklok als de kern hem synct, anders de
@@ -459,7 +421,7 @@ impl Screen {
         }
         let g = self.p.glass();
         let cols = g.width / self.cell();
-        let col = cols.saturating_sub(t.len as u32 + 1);
+        let col = cols.saturating_sub(t.len() as u32 + 1);
         let s = t.as_bytes();
         self.put_text(col, 1, s, ACCENT);
     }

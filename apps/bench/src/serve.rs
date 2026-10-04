@@ -13,7 +13,9 @@ use alloc::vec::Vec;
 use applib::appnet::{self, Endpoint, NetError, TcpListener, TcpStream, UdpSocket};
 use applib::rt::Exec;
 use applib::{App, EXEC, clock, log};
+use bounded::Text;
 use core::cell::Cell;
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use sync::Local;
@@ -269,10 +271,10 @@ async fn sink(s: &mut TcpStream, buf: &mut [u8], rest: usize, want: u64) -> Resu
     }
     let us = clock::now_ns().saturating_sub(t0) / 1000;
     BYTES_IN.fetch_add(got, Relaxed);
-    let mut line = [0u8; CMD_MAX];
-    let len = format_into(&mut line, format_args!("sunk {got} {us}\n"));
+    let mut line = Text::<CMD_MAX>::new();
+    let _ = writeln!(line, "sunk {got} {us}");
     s.set_timeout(Some(IDLE_CAP));
-    s.write_all(line.get(..len).unwrap_or_default()).await?;
+    s.write_all(line.as_bytes()).await?;
     Ok(())
 }
 
@@ -306,25 +308,4 @@ async fn udp_echo(udp: UdpSocket) {
         // verlies, en dat is precies wat hij meten wil.
         let _ = udp.send_to(from, buf.get(..n).unwrap_or_default()).await;
     }
-}
-
-/// Schrijft `args` in `out`; de lengte (afgekapt als het niet past).
-pub(crate) fn format_into(out: &mut [u8], args: core::fmt::Arguments<'_>) -> usize {
-    struct W<'a> {
-        out: &'a mut [u8],
-        at: usize,
-    }
-    impl core::fmt::Write for W<'_> {
-        fn write_str(&mut self, s: &str) -> core::fmt::Result {
-            for b in s.bytes() {
-                let slot = self.out.get_mut(self.at).ok_or(core::fmt::Error)?;
-                *slot = b;
-                self.at += 1;
-            }
-            Ok(())
-        }
-    }
-    let mut w = W { out, at: 0 };
-    let _ = core::fmt::write(&mut w, args);
-    w.at
 }

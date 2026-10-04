@@ -127,54 +127,8 @@ fn clamp(v: i32, max: i32) -> i32 {
     }
 }
 
-/// Eén regel in een vaste buffer: `core::fmt::Write` zonder allocatie.
-#[derive(Clone, Copy)]
-pub struct Line {
-    buf: [u8; LINE_MAX],
-    len: usize,
-}
-
-impl Line {
-    /// Een lege regel.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            buf: [0; LINE_MAX],
-            len: 0,
-        }
-    }
-
-    /// De bytes, met de afsluitende newline.
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        self.buf.get(..self.len).unwrap_or_default()
-    }
-}
-
-impl Default for Line {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Debug for Line {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match core::str::from_utf8(self.as_bytes()) {
-            Ok(s) => write!(f, "{s:?}"),
-            Err(_) => write!(f, "{:?}", self.as_bytes()),
-        }
-    }
-}
-
-impl fmt::Write for Line {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let end = self.len.checked_add(s.len()).ok_or(fmt::Error)?;
-        let dst = self.buf.get_mut(self.len..end).ok_or(fmt::Error)?;
-        dst.copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
+/// Eén regel in een vaste buffer, met de afsluitende newline.
+pub type Line = bounded::Text<LINE_MAX>;
 
 /// Wat één gebeurtenis uit de rij oplevert: hoogstens twee regels (de
 /// samengevoegde beweging plus de gebeurtenis die de samenvoeging afbrak).

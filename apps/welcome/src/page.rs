@@ -16,6 +16,7 @@
 //! die bij een volle heap het programma afbreekt (handboek §6).
 
 use alloc::vec::Vec;
+use applib::text::Room;
 use core::fmt::{self, Write};
 
 /// De ruimte die [`render`] hooguit gebruikt. De pagina is 7760 bytes
@@ -59,21 +60,6 @@ pub(crate) struct Live<'a> {
     pub(crate) heap_capacity: u64,
     /// Geslaagde allocaties sinds de start.
     pub(crate) allocs: u64,
-}
-
-/// Een schrijver in een vooraf gereserveerde buffer die nooit groeit: past
-/// een stuk niet meer, dan is het een `fmt::Error`.
-struct Bounded<'v>(&'v mut Vec<u8>);
-
-impl Write for Bounded<'_> {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        if self.0.len().saturating_add(s.len()) > self.0.capacity() {
-            return Err(fmt::Error);
-        }
-        // Binnen de capaciteit: geen hertoewijzing.
-        self.0.extend_from_slice(s.as_bytes());
-        Ok(())
-    }
 }
 
 /// Tekst van buiten, ontsnapt voor HTML.
@@ -153,7 +139,7 @@ impl fmt::Display for Count {
 /// [`PAGE_CAP`]). Een `fmt::Error` is een pagina die niet paste; `out` is
 /// dan half gevuld en hoort weggegooid.
 pub(crate) fn render(facts: &Facts<'_>, live: &Live<'_>, out: &mut Vec<u8>) -> fmt::Result {
-    let mut w = Bounded(out);
+    let mut w = Room(out);
     let node = Esc(facts.node);
     let slot = facts.slot;
     let [a, b, c, d] = facts.ip;
@@ -283,7 +269,7 @@ pub(crate) fn render(facts: &Facts<'_>, live: &Live<'_>, out: &mut Vec<u8>) -> f
 
 /// Eén rij van de tabel: feit, waarde, herkomst. `note` is vaste tekst van
 /// deze crate en mag markup dragen; `value` komt al ontsnapt of is een getal.
-fn row(w: &mut Bounded<'_>, fact: &str, value: &dyn fmt::Display, note: &str) -> fmt::Result {
+fn row(w: &mut Room<'_>, fact: &str, value: &dyn fmt::Display, note: &str) -> fmt::Result {
     writeln!(
         w,
         "<tr><td class=\"f\">{fact}</td><td class=\"v\">{value}</td><td class=\"n\">{note}</td></tr>"

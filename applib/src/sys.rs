@@ -620,33 +620,6 @@ impl<D: Dial, T: Timer> Client<D, T> {
         Ok(r.size)
     }
 
-    /// Eén SCSI-uitwisseling, zonder automatische herhaling. Een verloren
-    /// antwoord op een vendorcommando mag nooit dezelfde mutatie herhalen.
-    /// De aanroeper bezit beide scratchbuffers; het antwoord leent `rx`.
-    pub async fn device_command<'a>(
-        &mut self,
-        path: &str,
-        command: abi::hopabi::device::Command<'_>,
-        tx: &mut [u8],
-        rx: &'a mut [u8],
-    ) -> Result<abi::hopabi::device::Reply<'a>> {
-        use abi::hopabi::device::{RESULT_LEN, Reply};
-        if rx.len() < RESULT_LEN.saturating_add(command.in_len as usize) {
-            return Err(Error::Protocol("device response buffer"));
-        }
-        let n = command
-            .encode(tx, MAX_CHUNK)
-            .map_err(|_| Error::Protocol("device command bounds"))?;
-        let req = Req {
-            data: &tx[..n],
-            ..Req::path(abi::hopabi::OP_DEVICE_COMMAND, path)
-        };
-        let timeout = Duration::from_millis(u64::from(command.timeout_ms) + 2000);
-        let (_, n) = self.call_once(req, rx, timeout).await?;
-        Reply::decode(&rx[..n], command.in_len as usize, command.data_out.len())
-            .map_err(|_| Error::Protocol("device result bounds"))
-    }
-
     /// De grootte van een bestand (0 voor een map).
     pub async fn stat(&mut self, path: &str) -> Result<u64> {
         let (r, _) = self
