@@ -40,11 +40,11 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 ### Nu
 
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
-      van dit weekend), eerste golf, zeven agenten: 8.1 de mogelijke fouten,
-      8.2 en 8.3 abi als enige waarheid, 8.4 het Board-contract expliciet,
-      8.5 interrupts via één Controller, 8.6 het NIC-skelet en de drivers,
-      8.14 de scripts in lib.sh met één runner, 8.15 en 8.16 docs en dode
-      code. Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
+      van dit weekend), eerste golf: geland zijn 8.1 (de zeven fouten, 0f03544)
+      en 8.15 en 8.16 (docs en dode code, f1917f0); nog bezig 8.2 en 8.3
+      abi als enige waarheid, 8.4 het Board-contract expliciet, 8.5
+      interrupts via één Controller, 8.6 het NIC-skelet en de drivers, 8.14
+      de scripts in lib.sh met één runner. Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
       paden), 8.12 (pollen), 8.13 (apps).
 - [ ] Agent op de O6N en de M4: Hop in zijn eigen groep `hop` op een kleine
@@ -79,6 +79,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       paar vindt, dus pas met een 3.0.8-stick) en de nieuwe flip-ingang op
       de M4 en de Pi's (op de O6N gezien: O2 koud op met de doos van de
       toetskern, O2 warm naar main landt).
+- [ ] O6N met `hopos.oscore=small`: de verhuizing van de kern naar een
+      kleine core is nog nooit op ijzer gelopen (viel tot 0f03544 terug op
+      een big core); verwacht `HOPOS_OSCORE_MOVE` naar core 2 en in de tik
+      `stack_kb` rond 156. De M4 met `small` net zo.
 - [ ] Altra: de koude flip (met de boot-stack-fix moet hij nu lukken).
 - [ ] Core-reclaim in een sharegroup met een rekenaar
       (`HOPOS_CORE_RECLAIM` na 2 s).
