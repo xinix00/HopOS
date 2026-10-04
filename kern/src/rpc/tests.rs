@@ -151,6 +151,8 @@ pub(crate) struct RamCtl {
     pub(crate) log: Vec<(&'static str, Kind, u64)>,
     /// Het hoogste aantal opdrachten tegelijk op het device.
     pub(crate) peak: usize,
+    /// Een lees van deze LBA's faalt (een kapot blok).
+    pub(crate) bad: Vec<u64>,
 }
 
 /// Het handvat op de nep-controller: de wachtrij bezit hem, de test kijkt
@@ -228,7 +230,7 @@ impl blkdev::AsyncBlockDevice for Ram {
             .ok_or(blkdev::Error::Busy)?;
         let rec = match op {
             blkdev::Op::Read { lba, len } => {
-                if lba as usize * 512 + len > c.data.len() {
+                if lba as usize * 512 + len > c.data.len() || c.bad.contains(&lba) {
                     return Err(blkdev::Error::Io { lba });
                 }
                 (Kind::Read, lba, vec![0; len], false)
@@ -1070,4 +1072,236 @@ fn a_sync_waits_for_a_commit_in_flight() {
     let disk = f.into_fs().into_disk();
     let (mut g, _) = on(Fs::mount(disk, 0, (16 << 20) / 512, 512, 1 << 20, false)).unwrap();
     assert_eq!(g.stat(b"/.tasks/slot2/daarna").unwrap(), (2, false));
+}
+
+// ---------------------------------------------------------------------------
+// Gebundeld lezen (OP_READ_MANY).
+// ---------------------------------------------------------------------------
+
+/// Een lijst opdrachten op de draad.
+fn list(ops: &[(u64, u32)]) -> Vec<u8> {
+    let mut l = vec![0u8; ops.len() * many::OP_LEN];
+    for (i, &(off, len)) in ops.iter().enumerate() {
+        many::put_op(&mut l, i, off, len).unwrap();
+    }
+    l
+}
+
+/// Een bundel zoals applib hem stuurt: `n` is het aantal opdrachten.
+fn bundle(slot: usize, generation: u32, path: &str, ops: &[(u64, u32)]) -> FsCall {
+    fs_call(
+        slot,
+        generation,
+        OP_READ_MANY,
+        path,
+        0,
+        ops.len() as u64,
+        &list(ops),
+    )
+}
+
+/// De uitkomsten uit het antwoord: per opdracht (bytes, status) en de
+/// bytes zelf, opgeknipt.
+fn outcomes(c: &FsCall, count: usize) -> Vec<(u32, u16, Vec<u8>)> {
+    let body = &c.out[REQ_HEADER..];
+    let mut at = count * many::RESULT_LEN;
+    (0..count)
+        .map(|i| {
+            let (k, st) = many::result(body, i).unwrap();
+            let bytes = body[at..at + k as usize].to_vec();
+            at += k as usize;
+            (k, st, bytes)
+        })
+        .collect()
+}
+
+/// Een bestand van 64 KiB waarin elke byte zijn eigen plek verraadt.
+fn pattern() -> Vec<u8> {
+    (0..64 << 10)
+        .map(|i: usize| (i / 7) as u8 ^ (i >> 12) as u8)
+        .collect()
+}
+
+/// Eén call, vier lezingen: heel, half in een blok (de rand), over het
+/// einde heen, en voorbij het einde. Het antwoord is de tabel en daarna de
+/// bytes aaneen; voorbij het einde is geen fout maar nul bytes.
+#[test]
+fn a_bundle_reads_whole_blocks_edges_and_past_the_end_in_one_answer() {
+    let svc = Servicers::new();
+    let con = FakeConsole::default();
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    start(&mut a, 2, 8, 1).unwrap();
+    let g = svc.current(s(2)).unwrap();
+    let (fs, _) = disk(64);
+    let mut f = FsActor::new(fs, &svc, &con);
+    let file = pattern();
+    on(f.handle(&mut fs_call(2, g, OP_WRITE, "f", 0, 0, &file))).unwrap();
+    let ops = [
+        (4096, 4096),
+        (8192 + 10, 100),
+        (60000, 10000),
+        (1 << 40, 4096),
+    ];
+    let mut c = bundle(2, g, "f", &ops);
+    let want = 4096 + 100 + (65536 - 60000);
+    assert_eq!(
+        on(f.handle(&mut c)),
+        Ok((want as u64, 4 * many::RESULT_LEN + want))
+    );
+    let o = outcomes(&c, 4);
+    assert_eq!(o[0], (4096, STATUS_OK, file[4096..8192].to_vec()));
+    assert_eq!(o[1], (100, STATUS_OK, file[8202..8302].to_vec()));
+    assert_eq!(o[2], (5536, STATUS_OK, file[60000..].to_vec()));
+    assert_eq!(o[3], (0, STATUS_OK, Vec::new()));
+}
+
+/// De lijst als geheel: leeg, te lang, te groot, niet `n` lang, of een
+/// antwoord dat niet in de buffer past, is een fout van de call vóór er
+/// iets naar het device gaat. Een map of een pad dat er niet is, ook.
+#[test]
+fn a_bundle_that_is_empty_too_long_or_too_large_is_refused_before_the_device() {
+    let svc = Servicers::new();
+    let con = FakeConsole::default();
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    start(&mut a, 2, 8, 1).unwrap();
+    let g = svc.current(s(2)).unwrap();
+    let (fs, _) = disk(64);
+    let r = ram(&fs);
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(2, g, OP_WRITE, "d/f", 0, 0, &pattern()))).unwrap();
+    let reads = |r: &Ram| r.log().iter().filter(|e| e.1 == Kind::Read).count();
+    let before = reads(&r);
+    let mut c = bundle(2, g, "d/f", &[]);
+    assert_eq!(on(f.handle(&mut c)), Err(Error::Corrupt { at: 0 }), "leeg");
+    let mut c = bundle(2, g, "d/f", &[(0, 4096); many::MAX_OPS + 1]);
+    assert_eq!(
+        on(f.handle(&mut c)),
+        Err(Error::TooLarge {
+            len: many::MAX_OPS + 1,
+            max: many::MAX_OPS
+        }),
+        "te lang"
+    );
+    let mut c = bundle(2, g, "d/f", &[(0, 300 << 10), (0, 300 << 10)]);
+    assert_eq!(
+        on(f.handle(&mut c)),
+        Err(Error::TooLarge {
+            len: 600 << 10,
+            max: many::MAX_BYTES
+        }),
+        "te groot"
+    );
+    let mut c = bundle(2, g, "d/f", &[(0, 4096), (4096, 4096)]);
+    c.n = 1;
+    assert_eq!(on(f.handle(&mut c)), Err(Error::Corrupt { at: 0 }), "n");
+    // 16 keer 4 KiB plus een blok per opdracht past niet in 64 KiB.
+    let mut c = bundle(2, g, "d/f", &[(0, 4096); many::MAX_OPS]);
+    assert!(matches!(on(f.handle(&mut c)), Err(Error::TooLarge { .. })));
+    let mut c = bundle(2, g, "d", &[(0, 4096)]);
+    assert_eq!(on(f.handle(&mut c)), Err(Error::Kind), "een map");
+    let mut c = bundle(2, g, "weg", &[(0, 4096)]);
+    assert_eq!(on(f.handle(&mut c)), Err(Error::NoEnt));
+    let mut c = bundle(2, g, "../slot1/x", &[(0, 4096)]);
+    assert_eq!(on(f.handle(&mut c)), Err(Error::Denied));
+    assert_eq!(reads(&r), before, "niets naar het device");
+}
+
+/// Een kapot blok onder opdracht k: k krijgt een fout en nul bytes, de
+/// andere hun bytes, en de kern zegt het luid (de driver print niet).
+/// Alle opdrachten stonden tegelijk op het device.
+#[test]
+fn a_failing_read_in_a_bundle_leaves_the_others_and_is_loud() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g, _, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    let file = pattern();
+    on(f.handle(&mut fs_call(2, g, OP_WRITE, "f", 0, 0, &file))).unwrap();
+    // Het blok onder de derde opdracht (offset 32 KiB) gaat kapot.
+    let lba = {
+        let fs = f.fs();
+        let n = fs.find(b"/.tasks/slot2/f").unwrap();
+        match fs.read_step(n, 32 << 10, 4096).unwrap() {
+            crate::hopfs::ReadStep::Whole { lba, .. } => lba,
+            other => panic!("{other:?}"),
+        }
+    };
+    r.0.borrow_mut().bad.push(lba);
+    let ops = [
+        (0, 4096),
+        (16 << 10, 4096),
+        (32 << 10, 4096),
+        (48 << 10, 4096),
+    ];
+    let done = Reply::new();
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(&inbox, bundle(2, g, "f", &ops), &done);
+    r.hold(Kind::Read);
+    let mut run = core::pin::pin!(f.run(&inbox));
+    spin(&mut run);
+    assert_eq!(r.on_device(), 3, "de drie gezonde tegelijk op het device");
+    assert!(got(&done).is_none());
+    r.release(Kind::Read);
+    spin(&mut run);
+    let d = done.take_fs().unwrap();
+    assert_eq!(d.result, Ok((3 * 4096, 4 * many::RESULT_LEN + 3 * 4096)));
+    let c = FsCall {
+        out: d.out,
+        ..bundle(2, g, "f", &ops)
+    };
+    let o = outcomes(&c, 4);
+    assert_eq!(o[0], (4096, STATUS_OK, file[..4096].to_vec()));
+    assert_eq!(o[1], (4096, STATUS_OK, file[16 << 10..20 << 10].to_vec()));
+    assert_eq!((o[2].0, o[2].1), (0, STATUS_ERROR));
+    assert_eq!(o[3], (4096, STATUS_OK, file[48 << 10..52 << 10].to_vec()));
+    assert!(con.saw("hopfs: slot 2 op 21: 1 of 4 reads failed (1 so far) HOPOS_FS_IO"));
+}
+
+/// Twee bundels van één app (twee verbindingen) staan samen op het
+/// device: een lees verandert niets. Een schrijf van die app wacht op
+/// beide, en een lees erna op de schrijf, en ziet hem.
+#[test]
+fn two_bundles_of_one_app_share_the_device_and_a_write_waits_for_both() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let (g, _, fs, r) = Bench {
+        svc: &svc,
+        con: &con,
+    }
+    .up();
+    let mut f = FsActor::new(fs, &svc, &con);
+    on(f.handle(&mut fs_call(2, g, OP_WRITE, "f", 0, 0, &pattern()))).unwrap();
+    let (b1, b2, w, b3) = (Reply::new(), Reply::new(), Reply::new(), Reply::new());
+    let inbox: FsInbox<'_> = Mailbox::new();
+    send(&inbox, bundle(2, g, "f", &[(0, 4096), (4096, 4096)]), &b1);
+    send(
+        &inbox,
+        bundle(2, g, "f", &[(8192, 4096), (12288, 4096)]),
+        &b2,
+    );
+    send(&inbox, fs_call(2, g, OP_WRITE, "f", 0, 0, &[9u8; 4096]), &w);
+    send(&inbox, bundle(2, g, "f", &[(0, 4096)]), &b3);
+    r.hold(Kind::Read);
+    r.hold(Kind::Write);
+    let mut run = core::pin::pin!(f.run(&inbox));
+    spin(&mut run);
+    assert_eq!(r.on_device(), 4, "beide bundels tegelijk");
+    r.release(Kind::Read);
+    spin(&mut run);
+    assert!(matches!(got(&b1), Some(Ok((8192, _)))));
+    assert!(matches!(got(&b2), Some(Ok((8192, _)))));
+    assert!(got(&w).is_none(), "de schrijf staat op het device");
+    assert!(got(&b3).is_none(), "de lees wacht op de schrijf");
+    r.release(Kind::Write);
+    spin(&mut run);
+    assert_eq!(got(&w), Some(Ok((4096, 0))));
+    let d = b3.take_fs().unwrap();
+    assert_eq!(d.result, Ok((4096, many::RESULT_LEN + 4096)));
+    let at = REQ_HEADER + many::RESULT_LEN;
+    assert!(
+        d.out[at..at + 4096].iter().all(|&x| x == 9),
+        "zag de schrijf"
+    );
 }

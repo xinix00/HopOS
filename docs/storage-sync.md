@@ -7,8 +7,9 @@ nul/leeg; een antwoord bevat uitsluitend de bevestigde HopFS-boomgeneratie.
 Na verwijderen van een rollback-journal gebruikt de aanroeper de oudermap.
 
 De HopFS-eigenaar heeft calls van meerdere apps tegelijk op de schijf,
-maar per slot één tegelijk en in de volgorde van binnenkomst: de barrière
-begint dus pas als elke eerdere call van die app van het device terug is.
+maar per slot één tegelijk en in de volgorde van binnenkomst (alleen
+lezingen mogen naast elkaar, een lees verandert niets): de barrière begint
+dus pas als elke eerdere call van die app van het device terug is.
 Er loopt hoogstens één vastlegging tegelijk; schrijfs van andere apps
 lopen ernaast en gaan met de volgende mee. Bij wijzigingen voert hij de
 bestaande commit uit: dataflush, metadata in de andere plek (body vóór

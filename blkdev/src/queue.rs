@@ -5,8 +5,19 @@
 //! tegelijk, de pacer: hij haalt met één [`reap`](AsyncBlockDevice::reap)
 //! alle completions op, wekt de wachters van wat terug is, en wacht zelf op
 //! het ritme van de driver (eerst per ronde, dan op een timer, of op de bel
-//! van de lijn), precies zoals [`crate::Done`]. Is zijn eigen opdracht
-//! klaar, dan geeft hij de rol aan een andere wachter. Linux doet dit met
+//! van de lijn), zoals [`crate::Done`]. Per ronde pollt hij zolang er op
+//! het device iets gebeurt: tot [`poll_pace`](AsyncBlockDevice::poll_pace)
+//! na de laatste submit of completion, niet na zijn eigen submit. Een
+//! wachter op zestien lezingen tegelijk (een batch) zag anders de traagste
+//! pas na de timer van 200 us: GEMETEN 04-10 op de Altra, een bundel van
+//! zestien kostte zo 340 us per call, met de beweging als maat 150 us.
+//! Wie geen ticket krijgt (alles bezet), wacht op het eerste dat vrijkomt
+//! (Linux: de wachtrij van sbitmap voor de tags), met de timer als vangnet;
+//! anders sliep een bundel van een app die geen plaats kreeg de hele timer,
+//! terwijl er na een paar microseconden al een ticket vrij was.
+//!
+//! Is zijn eigen opdracht klaar, dan geeft de pacer de rol aan een andere
+//! wachter. Linux doet dit met
 //! een interrupt per completion (blk-mq, `nvme_irq`); de ANS heeft hier
 //! geen lijn, en zestien wachters die elk zelf pollen kosten zestien keer
 //! het device lezen per ronde.
@@ -19,7 +30,7 @@
 //! wachter die weggaat vóór zijn completion, laat zijn ticket achter als
 //! wees, en de pacer ruimt het op als het device klaar is.
 
-use crate::{AsyncBlockDevice, BlockIo, Error, IRQ_GUARD, LBA_SIZE, Op, Pace, Result};
+use crate::{AsyncBlockDevice, BatchRead, BlockIo, Error, IRQ_GUARD, LBA_SIZE, Op, Pace, Result};
 use core::future::Future;
 use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
@@ -48,7 +59,17 @@ struct State<D> {
     pacer: Option<usize>,
     /// Meetlat: het hoogste aantal tickets tegelijk.
     peak: usize,
+    /// De laatste beweging op het device (een submit of een completion),
+    /// op de klok van de [`Pace`]: tot het spinvenster erna pollt de pacer
+    /// per ronde.
+    last: u64,
+    /// Wie op een vrij ticket wacht; gewekt zodra er een vrijkomt.
+    room: [Option<Waker>; ROOM],
 }
+
+/// Zoveel wachters op een vrij ticket houdt de [`Queue`] bij (de plaatsen
+/// in de pool van de hopfs-actor); wie er niet bij past, heeft de timer.
+const ROOM: usize = 16;
 
 const fn bit(t: usize) -> u64 {
     1u64 << (t % MAX_DEPTH)
@@ -56,9 +77,13 @@ const fn bit(t: usize) -> u64 {
 
 impl<D: AsyncBlockDevice> State<D> {
     /// Haalt de completions op en wekt hun wachters; een dood device wekt
-    /// iedereen (elke `poll_tag` geeft dan de fout). Daarna de wezen.
-    fn collect(&mut self) {
+    /// iedereen (elke `poll_tag` geeft dan de fout). Daarna de wezen. `now`
+    /// wordt de laatste beweging als er iets terugkwam.
+    fn collect(&mut self, now: u64) {
         let done = self.dev.reap().unwrap_or(u64::MAX);
+        if done & self.out != 0 {
+            self.last = now;
+        }
         let mut m = done & self.out;
         while m != 0 {
             let t = m.trailing_zeros() as usize;
@@ -74,6 +99,7 @@ impl<D: AsyncBlockDevice> State<D> {
             if self.dev.poll_tag(t, &mut []).is_ready() {
                 self.out &= !bit(t);
                 self.orphan &= !bit(t);
+                self.wake_room();
             }
         }
     }
@@ -82,6 +108,24 @@ impl<D: AsyncBlockDevice> State<D> {
     fn release(&mut self, t: usize) {
         self.out &= !bit(t);
         self.leave(t);
+        self.wake_room();
+    }
+
+    /// Er is een ticket vrij: wie erop wacht, probeert het.
+    fn wake_room(&mut self) {
+        for w in self.room.iter_mut().filter_map(Option::take) {
+            w.wake();
+        }
+    }
+
+    /// Wacht op een vrij ticket ([`State::wake_room`]); vol is de timer.
+    fn wait_room(&mut self, w: &Waker) {
+        if self.room.iter().flatten().any(|o| o.will_wake(w)) {
+            return;
+        }
+        if let Some(s) = self.room.iter_mut().find(|s| s.is_none()) {
+            *s = Some(w.clone());
+        }
     }
 
     /// De wachter van `t` gaat weg: geen waker meer, en was hij de pacer,
@@ -98,6 +142,38 @@ impl<D: AsyncBlockDevice> State<D> {
                 w.wake();
             }
         }
+    }
+
+    /// Een ticket voor `op`, of [`Error::Busy`] als er nu geen plaats is.
+    fn start(&mut self, op: Op<'_>, now: u64) -> Result<usize> {
+        if self.out.count_ones() as usize >= self.depth {
+            self.collect(now);
+        }
+        if self.out.count_ones() as usize >= self.depth {
+            return Err(Error::Busy);
+        }
+        let t = match self.dev.start_tag(op) {
+            Err(Error::Busy) => {
+                // De ruimte zit misschien bij een wees die al terug is.
+                self.collect(now);
+                self.dev.start_tag(op)?
+            }
+            r => r?,
+        };
+        // Een ticket buiten de diepte of dat al uitstaat, is een driverfout;
+        // dan is er geen weg terug (de DMA-buffer kan van twee zijn).
+        if t >= self.depth || self.out & bit(t) != 0 {
+            return Err(Error::Dead);
+        }
+        self.out |= bit(t);
+        self.peak = self.peak.max(self.out.count_ones() as usize);
+        self.last = now;
+        Ok(t)
+    }
+
+    /// Pollt de pacer nog per ronde: binnen `spin` na de laatste beweging?
+    fn busy(&self, now: u64, spin: u64) -> bool {
+        now.saturating_sub(self.last) < spin
     }
 
     fn park(&mut self, t: usize, w: &Waker) {
@@ -122,6 +198,8 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
                 wake: [const { None }; MAX_DEPTH],
                 pacer: None,
                 peak: 0,
+                last: 0,
+                room: [const { None }; ROOM],
             }),
             pace,
         }
@@ -149,29 +227,7 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
 
     /// Een ticket voor `op`, of [`Error::Busy`] als er nu geen plaats is.
     fn try_start(&self, op: Op<'_>) -> Result<usize> {
-        let mut st = self.st.borrow_mut();
-        if st.out.count_ones() as usize >= st.depth {
-            st.collect();
-        }
-        if st.out.count_ones() as usize >= st.depth {
-            return Err(Error::Busy);
-        }
-        let t = match st.dev.start_tag(op) {
-            Err(Error::Busy) => {
-                // De ruimte zit misschien bij een wees die al terug is.
-                st.collect();
-                st.dev.start_tag(op)?
-            }
-            r => r?,
-        };
-        // Een ticket buiten de diepte of dat al uitstaat, is een driverfout;
-        // dan is er geen weg terug (de DMA-buffer kan van twee zijn).
-        if t >= st.depth || st.out & bit(t) != 0 {
-            return Err(Error::Dead);
-        }
-        st.out |= bit(t);
-        st.peak = st.peak.max(st.out.count_ones() as usize);
-        Ok(t)
+        self.st.borrow_mut().start(op, self.pace.now())
     }
 
     /// Eén opdracht: een ticket (wachtend op plaats als alles bezet is),
@@ -181,7 +237,12 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
             match self.try_start(op) {
                 Err(Error::Busy) => {
                     let period = self.st.borrow().dev.poll_pace().1;
-                    self.pace.sleep(period).await;
+                    Room {
+                        q: self,
+                        sleep: self.pace.sleep(period),
+                        armed: false,
+                    }
+                    .await;
                 }
                 r => break r?,
             }
@@ -190,7 +251,6 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
             q: self,
             t,
             into,
-            t0: self.pace.now(),
             sleep: None,
             done: false,
         }
@@ -205,13 +265,40 @@ impl<D: AsyncBlockDevice, P: Pace> Queue<D, P> {
     }
 }
 
+/// Het wachten op een vrij ticket: tot er een vrijkomt of de timer
+/// afloopt (het vangnet: een device met alleen wezen heeft geen pacer die
+/// iets vrijgeeft).
+#[must_use = "een future doet niets tot hij gepolld wordt"]
+struct Room<'q, D: AsyncBlockDevice, P: Pace> {
+    q: &'q Queue<D, P>,
+    sleep: P::Sleep,
+    armed: bool,
+}
+
+impl<D: AsyncBlockDevice, P: Pace> Future for Room<'_, D, P> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // `Room` is `Unpin`: een verwijzing, een `Unpin`-slaap en een vlag.
+        let this = self.get_mut();
+        if this.armed {
+            return Poll::Ready(());
+        }
+        this.armed = true;
+        this.q.st.borrow_mut().wait_room(cx.waker());
+        if Pin::new(&mut this.sleep).poll(cx).is_ready() {
+            return Poll::Ready(());
+        }
+        Poll::Pending
+    }
+}
+
 /// Het wachten op één ticket (zie de module).
 #[must_use = "een future doet niets tot hij gepolld wordt"]
 struct Wait<'q, 'b, D: AsyncBlockDevice, P: Pace> {
     q: &'q Queue<D, P>,
     t: usize,
     into: &'b mut [u8],
-    t0: u64,
     sleep: Option<P::Sleep>,
     done: bool,
 }
@@ -223,12 +310,13 @@ impl<D: AsyncBlockDevice, P: Pace> Future for Wait<'_, '_, D, P> {
         // `Wait` is `Unpin`: verwijzingen, getallen en een `Unpin`-slaap.
         let this = self.get_mut();
         loop {
-            let (irq, (spin, period)) = {
+            let now = this.q.pace.now();
+            let (irq, busy, period) = {
                 let mut st = this.q.st.borrow_mut();
                 let t = this.t;
                 let pacer = *st.pacer.get_or_insert(t) == t;
                 if pacer {
-                    st.collect();
+                    st.collect(now);
                 }
                 if let Poll::Ready(r) = st.dev.poll_tag(t, this.into) {
                     st.release(t);
@@ -239,7 +327,8 @@ impl<D: AsyncBlockDevice, P: Pace> Future for Wait<'_, '_, D, P> {
                     st.park(t, cx.waker());
                     return Poll::Pending;
                 }
-                (st.dev.irq(), st.dev.poll_pace())
+                let (spin, period) = st.dev.poll_pace();
+                (st.dev.irq(), st.busy(now, spin), period)
             };
             let wait = match irq {
                 Some(bell) => {
@@ -250,7 +339,7 @@ impl<D: AsyncBlockDevice, P: Pace> Future for Wait<'_, '_, D, P> {
                     IRQ_GUARD
                 }
                 None => {
-                    if this.q.pace.now().saturating_sub(this.t0) < spin {
+                    if busy {
                         cx.waker().wake_by_ref();
                         return Poll::Pending;
                     }
@@ -277,6 +366,140 @@ impl<D: AsyncBlockDevice, P: Pace> Drop for Wait<'_, '_, D, P> {
         if let Ok(mut st) = self.q.st.try_borrow_mut() {
             st.orphan |= bit(self.t);
             st.leave(self.t);
+        }
+    }
+}
+
+/// Een batch lezingen ([`BlockIo::read_batch`]): alles wat past gaat in
+/// één poll op het device, en één wachter wacht op allemaal. Hij is de
+/// pacer als dat nog niemand is (of als het een van zijn eigen tickets
+/// is), anders parkeert hij zijn waker bij elk van zijn tickets: wie de
+/// completions ophaalt, wekt hem. Lezingen die niet meer pasten, gaan erop
+/// zodra er een terug is. Een lees groter dan één opdracht van het device
+/// is [`Error::OutOfRange`] (de aanroeper knipt: hopfs doet het per stap).
+#[must_use = "een future doet niets tot hij gepolld wordt"]
+struct Batch<'q, 's, 'b, D: AsyncBlockDevice, P: Pace> {
+    q: &'q Queue<D, P>,
+    ops: &'s mut [BatchRead<'b>],
+    sleep: Option<P::Sleep>,
+}
+
+impl<D: AsyncBlockDevice, P: Pace> Future for Batch<'_, '_, '_, D, P> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // `Batch` is `Unpin`: verwijzingen, een getal en een `Unpin`-slaap.
+        let this = self.get_mut();
+        let step = this.q.step();
+        loop {
+            let now = this.q.pace.now();
+            let wait = {
+                let mut st = this.q.st.borrow_mut();
+                // Wat nog niet op het device staat, zolang er plaats is.
+                for op in this
+                    .ops
+                    .iter_mut()
+                    .filter(|o| !o.done && o.ticket.is_none())
+                {
+                    let len = op.into.len();
+                    if len > step {
+                        (op.result, op.done) = (Err(Error::OutOfRange { lba: op.lba, len }), true);
+                        continue;
+                    }
+                    match st.start(Op::Read { lba: op.lba, len }, now) {
+                        Ok(t) => op.ticket = Some(t),
+                        Err(Error::Busy) => break,
+                        Err(e) => (op.result, op.done) = (Err(e), true),
+                    }
+                }
+                let ours = |p: usize| this.ops.iter().any(|o| o.ticket == Some(p));
+                let pacer = match st.pacer {
+                    Some(p) => ours(p),
+                    None => match this.ops.iter().find_map(|o| o.ticket) {
+                        Some(t) => {
+                            st.pacer = Some(t);
+                            true
+                        }
+                        None => false,
+                    },
+                };
+                if pacer {
+                    st.collect(now);
+                }
+                let mut freed = false;
+                for op in this.ops.iter_mut() {
+                    let Some(t) = op.ticket else { continue };
+                    if let Poll::Ready(r) = st.dev.poll_tag(t, op.into) {
+                        (op.result, op.done, op.ticket) = (r, true, None);
+                        st.release(t);
+                        freed = true;
+                    }
+                }
+                if this.ops.iter().all(|o| o.done) {
+                    return Poll::Ready(());
+                }
+                if freed && this.ops.iter().any(|o| !o.done && o.ticket.is_none()) {
+                    // Er kwam plaats vrij: meteen de volgende erop.
+                    continue;
+                }
+                let outstanding = this.ops.iter().any(|o| o.ticket.is_some());
+                if this.ops.iter().any(|o| !o.done && o.ticket.is_none()) {
+                    // Wat niet meer paste, gaat erop zodra er plaats is.
+                    st.wait_room(cx.waker());
+                }
+                if pacer && outstanding {
+                    let (spin, period) = st.dev.poll_pace();
+                    Some((st.dev.irq(), st.busy(now, spin), period))
+                } else if outstanding {
+                    // Gewekt door wie de completions ophaalt.
+                    for op in this.ops.iter() {
+                        if let Some(t) = op.ticket {
+                            st.park(t, cx.waker());
+                        }
+                    }
+                    return Poll::Pending;
+                } else {
+                    // Niets van ons op het device en geen plaats: gewekt
+                    // door het eerste vrije ticket, met de timer als vangnet.
+                    None
+                }
+            };
+            let pace = &this.q.pace;
+            let period = match wait {
+                Some((Some(bell), _, _)) => {
+                    if Pin::new(&mut bell.wait()).poll(cx).is_ready() {
+                        this.sleep = None;
+                        continue;
+                    }
+                    IRQ_GUARD
+                }
+                Some((None, true, _)) => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Some((None, false, period)) => period,
+                None => this.q.st.borrow().dev.poll_pace().1,
+            };
+            let s = this.sleep.get_or_insert_with(|| pace.sleep(period));
+            if Pin::new(s).poll(cx).is_pending() {
+                return Poll::Pending;
+            }
+            this.sleep = None;
+        }
+    }
+}
+
+impl<D: AsyncBlockDevice, P: Pace> Drop for Batch<'_, '_, '_, D, P> {
+    fn drop(&mut self) {
+        // Weg vóór de completions: elk ticket blijft van het device tot het
+        // terug is (de wezen), en de pacer-rol gaat door.
+        if let Ok(mut st) = self.q.st.try_borrow_mut() {
+            for op in self.ops.iter_mut() {
+                if let Some(t) = op.ticket.take() {
+                    st.orphan |= bit(t);
+                    st.leave(t);
+                }
+            }
         }
     }
 }
@@ -316,6 +539,15 @@ impl<D: AsyncBlockDevice, P: Pace> BlockIo for &Queue<D, P> {
         let q = *self;
         q.io(Op::Flush, &mut []).await
     }
+
+    fn read_batch(&mut self, ops: &mut [BatchRead<'_>]) -> impl Future<Output = ()> {
+        let q = *self;
+        Batch {
+            q,
+            ops,
+            sleep: None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -341,6 +573,8 @@ mod tests {
         /// Opgehaald, nog niet afgerond.
         done: u64,
         reaps: usize,
+        /// Een lees van deze LBA's weigert het device bij de start.
+        bad: Vec<u64>,
     }
 
     #[derive(Clone)]
@@ -353,6 +587,7 @@ mod tests {
             ready: 0,
             done: 0,
             reaps: 0,
+            bad: Vec::new(),
         })))
     }
 
@@ -382,6 +617,7 @@ mod tests {
             let mut c = self.0.borrow_mut();
             let t = c.tags.iter().position(Option::is_none).ok_or(Error::Busy)?;
             let rec = match op {
+                Op::Read { lba, .. } if c.bad.contains(&lba) => return Err(Error::Io { lba }),
                 Op::Read { lba, len } => (true, lba, len),
                 Op::Write { lba, data } => {
                     let o = lba as usize * 512;
@@ -532,5 +768,173 @@ mod tests {
         dev.release(0);
         assert_eq!(poll(next.as_mut(), &w), Poll::Ready(Ok(())));
         assert_eq!(q.in_flight(), 0);
+    }
+
+    fn batch<'b>(bufs: &'b mut [Vec<u8>], lbas: &[u64]) -> Vec<BatchRead<'b>> {
+        bufs.iter_mut()
+            .zip(lbas)
+            .map(|(b, &l)| BatchRead::new(l, b))
+            .collect()
+    }
+
+    /// Een batch: alle drie in één poll op het device, één reap per ronde,
+    /// klaar als de laatste terug is, elk met zijn eigen bytes.
+    #[test]
+    fn a_batch_puts_every_read_on_the_device_in_one_poll_and_waits_once() {
+        let dev = fake(4);
+        let q = Queue::new(dev.clone(), Tick);
+        let mut bufs = vec![vec![0u8; 512]; 3];
+        let mut ops = batch(&mut bufs, &[4, 5, 6]);
+        {
+            let (_, w) = waker();
+            let mut io = &q;
+            let mut f = core::pin::pin!(io.read_batch(&mut ops));
+            assert!(poll(f.as_mut(), &w).is_pending());
+            assert_eq!(q.in_flight(), 3, "alle drie tegelijk");
+            assert_eq!(dev.reaps(), 1);
+            dev.release(2);
+            dev.release(0);
+            assert!(poll(f.as_mut(), &w).is_pending());
+            assert_eq!(q.in_flight(), 1);
+            dev.release(1);
+            assert_eq!(poll(f.as_mut(), &w), Poll::Ready(()));
+        }
+        assert!(ops.iter().all(|o| o.result == Ok(())));
+        for (b, l) in bufs.iter().zip([4u8, 5, 6]) {
+            assert!(b.iter().all(|&x| x == l));
+        }
+        assert_eq!((q.in_flight(), q.peak()), (0, 3));
+    }
+
+    /// Meer dan de diepte: de rest gaat erop zodra er een terug is. Een
+    /// lees die het device weigert, krijgt zijn fout; de andere niet.
+    #[test]
+    fn a_batch_deeper_than_the_device_waits_for_room_and_a_failure_stays_alone() {
+        let dev = fake(2);
+        dev.0.borrow_mut().bad.push(9);
+        let q = Queue::new(dev.clone(), Tick);
+        let mut bufs = vec![vec![0u8; 512]; 4];
+        let mut ops = batch(&mut bufs, &[1, 9, 2, 3]);
+        {
+            let (_, w) = waker();
+            let mut io = &q;
+            let mut f = core::pin::pin!(io.read_batch(&mut ops));
+            assert!(poll(f.as_mut(), &w).is_pending());
+            assert_eq!(q.in_flight(), 2, "1 en 2 erop, 9 geweigerd, 3 wacht");
+            dev.release(0);
+            assert!(poll(f.as_mut(), &w).is_pending());
+            assert_eq!(
+                dev.0.borrow().tags[0].map(|t| t.1),
+                Some(3),
+                "3 op de vrije tag"
+            );
+            dev.release(0);
+            dev.release(1);
+            assert_eq!(poll(f.as_mut(), &w), Poll::Ready(()));
+        }
+        let r: Vec<Result> = ops.iter().map(|o| o.result).collect();
+        assert_eq!(r, [Ok(()), Err(Error::Io { lba: 9 }), Ok(()), Ok(())]);
+        assert!(bufs[3].iter().all(|&x| x == 3) && bufs[1].iter().all(|&x| x == 0));
+    }
+
+    /// Naast een gewone wachter: wie pollt, wekt de ander; en wie weggaat
+    /// vóór zijn completions, laat zijn tickets als wezen achter.
+    #[test]
+    fn a_batch_shares_the_pacer_and_leaves_orphans_when_dropped() {
+        let dev = fake(4);
+        let q = Queue::new(dev.clone(), Tick);
+        let (_, wa) = waker();
+        let (nb, wb) = waker();
+        let mut a = vec![0u8; 512];
+        let mut single = core::pin::pin!(q.io(rd(7), &mut a));
+        assert!(poll(single.as_mut(), &wa).is_pending(), "de pacer");
+        let mut bufs = vec![vec![0u8; 512]; 2];
+        {
+            let mut ops = batch(&mut bufs, &[1, 2]);
+            let mut io = &q;
+            let mut f = core::pin::pin!(io.read_batch(&mut ops));
+            assert!(poll(f.as_mut(), &wb).is_pending());
+            assert_eq!(q.in_flight(), 3);
+            dev.release(1);
+            assert!(poll(single.as_mut(), &wa).is_pending());
+            assert_eq!(nb.0.load(SeqCst), 1, "de pacer wekt de batch");
+        }
+        assert_eq!(q.in_flight(), 3, "beide lezingen van de batch zijn wezen");
+        dev.release(2);
+        dev.release(0);
+        assert_eq!(poll(single.as_mut(), &wa), Poll::Ready(Ok(())));
+        assert_eq!(q.in_flight(), 0, "de wees is opgeruimd");
+    }
+
+    /// Een klok die de test zet, en een slaap die nooit afloopt (zo ziet
+    /// de test of de pacer gaat slapen of per ronde pollt).
+    struct Clock(core::cell::Cell<u64>);
+
+    impl Pace for &Clock {
+        type Sleep = core::future::Pending<()>;
+        fn now(&self) -> u64 {
+            self.0.get()
+        }
+        fn sleep(&self, _d: core::time::Duration) -> Self::Sleep {
+            core::future::pending()
+        }
+    }
+
+    /// De pacer pollt per ronde zolang het device beweegt: een completion
+    /// ná zijn eigen spinvenster houdt hem wakker; pas een venster zonder
+    /// beweging laat hem slapen op de timer.
+    #[test]
+    fn the_pacer_spins_while_completions_come_and_sleeps_after_a_quiet_window() {
+        let dev = fake(4);
+        let clock = Clock(core::cell::Cell::new(1_000_000));
+        let q = Queue::new(dev.clone(), &clock);
+        let mut bufs = vec![vec![0u8; 512]; 2];
+        let mut ops = batch(&mut bufs, &[1, 2]);
+        let (n, w) = waker();
+        let mut io = &q;
+        let mut f = core::pin::pin!(io.read_batch(&mut ops));
+        assert!(poll(f.as_mut(), &w).is_pending());
+        assert_eq!(n.0.load(SeqCst), 1, "net gesubmit: per ronde");
+        // Ruim na het eigen venster, maar er komt er een terug.
+        clock.0.set(1_000_000 + 2 * crate::POLL_SPIN_NS);
+        dev.release(0);
+        assert!(poll(f.as_mut(), &w).is_pending());
+        assert_eq!(n.0.load(SeqCst), 2, "een completion: nog per ronde");
+        // Een venster zonder beweging: de timer.
+        clock.0.set(1_000_000 + 4 * crate::POLL_SPIN_NS);
+        assert!(poll(f.as_mut(), &w).is_pending());
+        assert_eq!(n.0.load(SeqCst), 2, "stil: slapen, geen wek");
+    }
+
+    /// Wie geen ticket krijgt, wordt gewekt door het eerste dat vrijkomt,
+    /// niet pas door de timer (die loopt hier nooit af): een lees en een
+    /// batch die allebei op plaats wachten.
+    #[test]
+    fn a_full_device_wakes_the_waiters_for_room_when_a_ticket_frees() {
+        let dev = fake(1);
+        let clock = Clock(core::cell::Cell::new(0));
+        let q = Queue::new(dev.clone(), &clock);
+        let (_, wa) = waker();
+        let (nb, wb) = waker();
+        let (nc, wc) = waker();
+        let mut a = core::pin::pin!(q.io(rd(1), &mut []));
+        assert!(poll(a.as_mut(), &wa).is_pending());
+        let mut b = core::pin::pin!(q.io(rd(2), &mut []));
+        assert!(poll(b.as_mut(), &wb).is_pending(), "geen plaats");
+        let mut bufs = vec![vec![0u8; 512]; 1];
+        let mut ops = batch(&mut bufs, &[3]);
+        let mut io = &q;
+        let mut c = core::pin::pin!(io.read_batch(&mut ops));
+        assert!(poll(c.as_mut(), &wc).is_pending(), "geen plaats");
+        assert_eq!((nb.0.load(SeqCst), nc.0.load(SeqCst)), (0, 0));
+        dev.release(0);
+        assert_eq!(poll(a.as_mut(), &wa), Poll::Ready(Ok(())));
+        assert_eq!(
+            (nb.0.load(SeqCst), nc.0.load(SeqCst)),
+            (1, 1),
+            "beide gewekt"
+        );
+        assert!(poll(b.as_mut(), &wb).is_pending());
+        assert_eq!(dev.0.borrow().tags[0].map(|t| t.1), Some(2), "b kreeg hem");
     }
 }

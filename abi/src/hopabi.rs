@@ -23,10 +23,12 @@
 //! bytes die al in de partitie van de app liggen, geen bytes. De
 //! device-payloads (`device.go`) horen bij de optische drive en komen met
 //! haar driver; hun opcode staat er wel, zodat het nummer bezet blijft.
+//! De lijst van het gebundelde lezen ([`OP_READ_MANY`]) staat in [`many`].
 
 use crate::{Error, Result};
 
 pub mod device;
+pub mod many;
 
 // ---------------------------------------------------------------------------
 // De control-page.
@@ -459,9 +461,14 @@ pub const OP_DEVICE_COMMAND: u8 = 19;
 /// `off`, `n` en data zijn nul/leeg. Geeft de vastgelegde boomgeneratie in size.
 /// Na verwijderen gebruikt de app het ouderpad; een vluchtige FS weigert.
 pub const OP_SYNC: u8 = 20;
+/// Gebundeld lezen: tot [`many::MAX_OPS`] lezingen uit één bestand in één
+/// call, samen op het device, één antwoord met per opdracht de uitkomst
+/// (de draadvorm in [`many`]). Idempotent, zoals [`OP_READ`]. Additief: een
+/// oude kern geeft een nette "onbekende op".
+pub const OP_READ_MANY: u8 = 21;
 /// Het hoogste opnummer van deze module; de bevoegde operaties van
 /// [`crate::systemapi`] liggen erboven.
-pub const OP_MAX: u8 = OP_SYNC;
+pub const OP_MAX: u8 = OP_READ_MANY;
 
 /// Een call-status: gelukt.
 pub const STATUS_OK: u16 = 0;

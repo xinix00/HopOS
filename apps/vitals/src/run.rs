@@ -191,6 +191,12 @@ pub(crate) struct Params {
     /// `rand`: disk doet zoveel willekeurige 4 KiB-lezingen (en houdt het
     /// bestand voor de volgende run).
     pub(crate) rand: Option<i64>,
+    /// `depth`: zoveel lezingen van rand per call (een bundel,
+    /// `OP_READ_MANY`); 1 is de gewone lees.
+    pub(crate) depth: Option<i64>,
+    /// `bundles`: zoveel bundels van rand tegelijk in de lucht, elk over
+    /// een eigen verbinding.
+    pub(crate) bundles: Option<i64>,
 }
 
 impl Params {
@@ -209,6 +215,8 @@ impl Params {
             addr: text("addr"),
             hole: get("hole").as_deref() == Some("1"),
             rand: int("rand"),
+            depth: int("depth"),
+            bundles: int("bundles"),
         }
     }
 

@@ -16,7 +16,10 @@
 //! van N lezingen (N is dan het plafond), zodat apps die samen starten ook
 //! samen stoppen. Met `hole=1` erbij komt het bestand er als gat (één byte
 //! op het eind): elke lezing komt dan uit het RAM van de kern, zonder
-//! schijfblok, en meet alleen het pad app naar OS-core en terug.
+//! schijfblok, en meet alleen het pad app naar OS-core en terug. Met
+//! `depth=D` gaan er D lezingen per call (een bundel, `read_many`, de kern
+//! zet ze samen op het device), met `bundles=2` twee bundels tegelijk over
+//! twee verbindingen; p50 en p99 zijn dan die van een call.
 //!
 //! Een node zonder opslag zegt dat expliciet ("no storage layer on board");
 //! dan slaat de test zichzelf over. Elke andere fout is een fout.
@@ -115,6 +118,10 @@ struct Plan<'a> {
     total: u64,
     chunk: usize,
     hole: bool,
+    /// Lezingen per call van rand (1: de gewone lees).
+    depth: usize,
+    /// Bundels van rand tegelijk in de lucht.
+    bundles: usize,
 }
 
 /// disk: schrijven, lezen, 4 KiB-writes en de stat-vloer op één bestand,
@@ -139,6 +146,8 @@ pub(crate) async fn disk(sh: &'static Shared, r: &mut Report, p: &Params) {
         total: mb << 20,
         chunk: usize::try_from(kb << 10).unwrap_or(sys::MAX_CHUNK),
         hole: p.hole,
+        depth: Params::int(p.depth, 1, 1, sys::MAX_READS as u64) as usize,
+        bundles: Params::int(p.bundles, 1, 1, 2) as usize,
     };
     let rand = Params::int(p.rand, 0, 0, 1 << 20);
     if rand > 0 {
@@ -181,7 +190,10 @@ async fn rand4k(
         part.copy_from_slice(sh.blob.get(..k).unwrap_or_default());
     }
     if plan.hole && sys.stat(plan.path).await.ok() != Some(plan.total) {
-        note(format_args!("disk rand4k: a hole of {} MB", plan.total >> 20));
+        note(format_args!(
+            "disk rand4k: a hole of {} MB",
+            plan.total >> 20
+        ));
         if let Err(e) = sys
             .write_at(plan.path, plan.total - 1, wbuf.get(..1).unwrap_or_default())
             .await
@@ -209,6 +221,10 @@ async fn rand4k(
             }
             off += k as u64;
         }
+    }
+    if plan.depth > 1 || plan.bundles > 1 {
+        many(sh, sys, r, plan, &wbuf, n, dur).await;
+        return;
     }
     let mut lat = samples(usize::try_from(n).unwrap_or(0));
     let mut b = [0u8; SMALL];
@@ -252,11 +268,159 @@ async fn rand4k(
             return;
         }
     }
-    let el = clock::now_ns().saturating_sub(t0);
-    let n = done;
-    let (p50, p99) = (pct(&mut lat, 50), pct(&mut lat, 99));
+    rand_report(r, plan, &mut lat, done, clock::now_ns().saturating_sub(t0));
+}
+
+/// Wat een gat of het bestand op `off` hoort te dragen (`None`: het laatste
+/// blok van een gat, met de ene byte).
+fn expected<'w>(plan: &Plan<'_>, wbuf: &'w [u8], off: u64) -> Option<&'w [u8]> {
+    if plan.hole {
+        return (off + (SMALL as u64) < plan.total).then_some(ZEROS.as_slice());
+    }
+    let at = (off % plan.chunk as u64) as usize;
+    Some(wbuf.get(at..at + SMALL).unwrap_or_default())
+}
+
+/// Waarom een bundel van rand niet goed terugkwam.
+enum Miss {
+    /// De call zelf.
+    Call(sys::Error),
+    /// Eén lees: de offset en wat ze kreeg.
+    Read(u64, core::result::Result<usize, u16>),
+}
+
+/// Eén bundel: `buf.len() / SMALL` lezingen vanaf lezing `first`, elk in
+/// haar eigen stuk van `buf`.
+async fn bundle(
+    sys: &mut SystemClient,
+    path: &str,
+    first: u64,
+    blocks: u64,
+    buf: &mut [u8],
+) -> Result<(), Miss> {
+    let mut ops: bounded::BoundedVec<sys::ReadOp<'_>, { sys::MAX_READS }> =
+        bounded::BoundedVec::new();
+    for (j, dst) in buf.chunks_exact_mut(SMALL).enumerate() {
+        let off = spot(first + j as u64, blocks) * SMALL as u64;
+        if ops.push(sys::ReadOp::new(off, dst)).is_err() {
+            break;
+        }
+    }
+    sys.read_many(path, ops.as_mut_slice())
+        .await
+        .map_err(Miss::Call)?;
+    match ops.as_slice().iter().find(|o| o.got != Ok(SMALL)) {
+        Some(o) => Err(Miss::Read(o.off, o.got)),
+        None => Ok(()),
+    }
+}
+
+/// Twee futures samen afwachten.
+async fn both<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output) {
+    let (mut a, mut b) = (core::pin::pin!(a), core::pin::pin!(b));
+    let (mut x, mut y) = (None, None);
+    core::future::poll_fn(|cx| {
+        if x.is_none()
+            && let core::task::Poll::Ready(v) = a.as_mut().poll(cx)
+        {
+            x = Some(v);
+        }
+        if y.is_none()
+            && let core::task::Poll::Ready(v) = b.as_mut().poll(cx)
+        {
+            y = Some(v);
+        }
+        match (x.take(), y.take()) {
+            (Some(p), Some(q)) => core::task::Poll::Ready((p, q)),
+            (p, q) => {
+                (x, y) = (p, q);
+                core::task::Poll::Pending
+            }
+        }
+    })
+    .await
+}
+
+/// rand met bundels: `depth` lezingen per call, `bundles` calls tegelijk
+/// (de tweede over een eigen verbinding), elke lees met haar
+/// inhoudscontrole; p50 en p99 zijn die van een call.
+async fn many(
+    sh: &Shared,
+    sys: &mut SystemClient,
+    r: &mut Report,
+    plan: &Plan<'_>,
+    wbuf: &[u8],
+    n: u64,
+    dur: Option<u64>,
+) {
+    let per = plan.depth * SMALL;
+    let Some(mut rbuf) = buffer(per * plan.bundles) else {
+        r.fail(format_args!(
+            "no heap for {} bundles of {per} bytes",
+            plan.bundles
+        ));
+        return;
+    };
+    let mut second = (plan.bundles > 1).then(|| sh.net.system_client());
+    let step = (plan.depth * plan.bundles) as u64;
+    let mut lat = samples(usize::try_from(n / step + 1).unwrap_or(0));
+    let blocks = plan.total / SMALL as u64;
+    let t0 = clock::now_ns();
+    let until = dur.map(|v| t0.saturating_add(v.saturating_mul(1_000_000_000)));
+    let mut k = 0u64;
+    while k + step <= n && until.is_none_or(|u| clock::now_ns() < u) {
+        let t = clock::now_ns();
+        let (a, b) = rbuf.split_at_mut(per);
+        let got = match second.as_mut() {
+            Some(s2) => {
+                let (x, y) = both(
+                    bundle(sys, plan.path, k, blocks, a),
+                    bundle(s2, plan.path, k + plan.depth as u64, blocks, b),
+                )
+                .await;
+                x.and(y)
+            }
+            None => bundle(sys, plan.path, k, blocks, a).await,
+        };
+        match got {
+            Ok(()) => {}
+            Err(Miss::Call(e)) => {
+                r.fail(format_args!("rand4k bundle at read {k}: {e}"));
+                return;
+            }
+            Err(Miss::Read(off, g)) => {
+                r.fail(format_args!("rand4k at {off}: {g:?}, want Ok({SMALL})"));
+                return;
+            }
+        }
+        record(&mut lat, us_since(t));
+        for (j, got) in rbuf.chunks_exact(SMALL).enumerate() {
+            let off = spot(k + j as u64, blocks) * SMALL as u64;
+            let Some(want) = expected(plan, wbuf, off) else {
+                continue;
+            };
+            if let Some(i) = first_diff(got, want) {
+                r.fail(format_args!(
+                    "rand4k at {off}: content mismatch (first bad byte at {i})"
+                ));
+                return;
+            }
+        }
+        k += step;
+    }
+    rand_report(r, plan, &mut lat, k, clock::now_ns().saturating_sub(t0));
+}
+
+/// De marker en de regel van rand: `n` lezingen in `el` ns.
+fn rand_report(r: &mut Report, plan: &Plan<'_>, lat: &mut [u32], n: u64, el: u64) {
+    let (p50, p99) = (pct(lat, 50), pct(lat, 99));
     r.add("rand4k", n as f64 / secs(el), "IOPS");
     r.add("rand4k_n", n as f64, "reads");
+    r.add(
+        "rand4k_depth",
+        (plan.depth * plan.bundles) as f64,
+        "in flight",
+    );
     r.add("rand4k_p50", f64::from(p50), "us");
     r.add("rand4k_p99", f64::from(p99), "us");
     r.line(format_args!(

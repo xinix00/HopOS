@@ -114,6 +114,8 @@ ze kent):
 | `addr` | storm, rtt | eigen poort, 10.100.0.1:10100 | `ip:poort` |
 | `path` | disk | `/vitals-disk.bin` | een pad in het eigen zicht, of een mount |
 | `hole=1` | disk | uit | leest gaten: het transport kern naar app zonder schijf |
+| `depth` | disk met `rand` | 1 | 1..16: zoveel lezingen per call (een bundel, `read_many`); 1 is de gewone lees |
+| `bundles` | disk met `rand` | 1 | 1..2: zoveel bundels tegelijk, elk over een eigen verbinding |
 
 De drie doorvoermetingen in één keer, vanaf een client met curl en python3:
 

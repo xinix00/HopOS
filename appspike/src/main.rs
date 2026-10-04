@@ -666,7 +666,8 @@ const FS_FILE: &str = "hallo.txt";
 const FS_DATA: &[u8] = b"hallo van appspike, via de system-API naar hopfs op de schijf\n";
 
 /// De bestandscalls over dezelfde verbinding: schrijven (truncate plus
-/// write), `stat`, teruglezen, de lijst van de eigen root en weer weg. De
+/// write), `stat`, teruglezen (ook als bundel: drie lezingen in één call,
+/// de laatste voorbij het einde), de lijst van de eigen root en weer weg. De
 /// root is bij elke start leeg (de kern veegt hem), dus de lijst is precies
 /// dit ene bestand.
 async fn files(client: Option<&mut appnet::SystemClient>, s: &mut Score) {
@@ -729,6 +730,20 @@ async fn fs_round(c: &mut appnet::SystemClient) -> Result<(u64, usize), Why> {
         .map_err(|e| Why::sys("read_into", e))?;
     if buf.get(..n) != Some(FS_DATA) {
         return Err(Why::num("read back bytes", n as u64));
+    }
+    let (mut a, mut b, mut z) = ([0u8; 5], [0u8; 4], [0u8; 8]);
+    let mut ops = [
+        sys::ReadOp::new(0, &mut a),
+        sys::ReadOp::new(6, &mut b),
+        sys::ReadOp::new(FS_DATA.len() as u64 + 100, &mut z),
+    ];
+    let n = c
+        .read_many(FS_FILE, &mut ops)
+        .await
+        .map_err(|e| Why::sys("read_many", e))?;
+    let got = [ops[0].got, ops[1].got, ops[2].got];
+    if got != [Ok(5), Ok(4), Ok(0)] || n != 9 || (&a, &b) != (b"hallo", b"van ") {
+        return Err(Why::num("read_many bytes", n as u64));
     }
     let mut list = [0u8; 256];
     let n = c

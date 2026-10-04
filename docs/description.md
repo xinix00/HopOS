@@ -236,8 +236,12 @@ schijf, twee metaplekken met SHA-256. Een commit schrijft de boom naar de
 andere plek en dan de kop; vrijgaven wachten tot de commit erna, zodat de
 oude boom nooit naar hergebruikte blokken wijst. De actor
 (`kern/src/rpc.rs`) plant synchroon en doet de I/O als futures in een pool
-van 16, met de regels: per slot één call tegelijk, één schrijver per
-bestand, en destructieve ops alleen als niets anders loopt.
+van 16, met de regels: per slot één call tegelijk (lezingen mogen naast
+elkaar), één schrijver per bestand, en destructieve ops alleen als niets
+anders loopt. `OP_READ_MANY` (21) is een bundel van tot 16 lezingen uit één
+bestand in één call: alles in één batch op de wachtrij van het device, één
+antwoord met per lees de uitkomst ([apps.md](apps.md), "Veel kleine
+lezingen").
 
 Paden: een volume uit de jobspec (`/data` → `/volumes/demo`) wint op
 langste prefix, anders `/.tasks/slot<N>`, dat per levensduur gewist wordt.

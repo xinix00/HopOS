@@ -398,6 +398,36 @@ impl<D: AsyncBlockDevice, P: Pace> Future for Done<'_, '_, D, P> {
     }
 }
 
+/// Eén lees van een batch ([`BlockIo::read_batch`]): `into.len()` bytes
+/// vanaf `lba`, hoogstens één opdracht van het device groot
+/// ([`max_transfer`](AsyncBlockDevice::max_transfer)).
+#[derive(Debug)]
+pub struct BatchRead<'b> {
+    /// De eerste LBA.
+    pub lba: u64,
+    /// De bestemming.
+    pub into: &'b mut [u8],
+    /// De uitkomst, gezet door [`BlockIo::read_batch`].
+    pub result: Result,
+    /// Het ticket op het device, zolang de lees daar staat.
+    ticket: Option<usize>,
+    /// De uitkomst staat er.
+    done: bool,
+}
+
+impl<'b> BatchRead<'b> {
+    /// Een lees van `into.len()` bytes vanaf `lba`, nog niet gedaan.
+    pub fn new(lba: u64, into: &'b mut [u8]) -> Self {
+        Self {
+            lba,
+            into,
+            result: Err(Error::Busy),
+            ticket: None,
+            done: false,
+        }
+    }
+}
+
 /// Het blokapparaat zoals hopfs het ziet: lezen, schrijven en flushen als
 /// futures, van elke lengte (de brokken zijn van de implementatie).
 pub trait BlockIo {
@@ -407,11 +437,26 @@ pub trait BlockIo {
     fn write(&mut self, lba: u64, buf: &[u8]) -> impl Future<Output = Result>;
     /// Maakt alles wat geschreven is duurzaam.
     fn flush(&mut self) -> impl Future<Output = Result>;
+    /// Leest alle `ops` en zet bij elk de uitkomst. Een device met tickets
+    /// ([`Queue`]) zet ze allemaal tegelijk op het device en wacht er één
+    /// keer op (Linux: de plug van blk-mq, io_uring in het klein); zonder
+    /// tickets gaan ze na elkaar. Een fout in de ene laat de andere staan.
+    fn read_batch(&mut self, ops: &mut [BatchRead<'_>]) -> impl Future<Output = ()> {
+        async move {
+            for op in ops.iter_mut() {
+                op.result = self.read(op.lba, op.into).await;
+                op.done = true;
+            }
+        }
+    }
 }
 
 impl<D: BlockIo + ?Sized> BlockIo for &mut D {
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> impl Future<Output = Result> {
         (**self).read(lba, buf)
+    }
+    fn read_batch(&mut self, ops: &mut [BatchRead<'_>]) -> impl Future<Output = ()> {
+        (**self).read_batch(ops)
     }
     fn write(&mut self, lba: u64, buf: &[u8]) -> impl Future<Output = Result> {
         (**self).write(lba, buf)

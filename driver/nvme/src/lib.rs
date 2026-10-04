@@ -174,9 +174,15 @@ pub const COMMAND_TIMEOUT_NS: u64 = 5_000_000_000;
 pub const SECTOR: u64 = 512;
 
 /// Zoveel tickets staan hoogstens tegelijk op de controller, plus de
-/// read-ahead ertussen. Zestien is de diepte van de hopfs-actor
-/// (`FS_DEPTH`); Linux geeft de I/O-queue van de ANS 62 tags.
-pub const DEPTH: usize = 16;
+/// read-ahead ertussen. Tweeëndertig: twee bundels van zestien
+/// (`OP_READ_MANY`, een bundel per verbinding van een app) staan zo
+/// allebei heel op het device, in plaats van dat de tweede op tickets van
+/// de eerste wacht. GEMETEN 04-10 op de Altra (SN770, vitals `rand`, elke
+/// run vlak na een flip): vier apps met bundels van zestien 216k lezingen
+/// per seconde met 16, 249k met 32; acht apps 225k en 305k; één app met
+/// twee bundels 135k en 159k. Op de M4 (ANS) liep 32 diep zonder fout.
+/// Linux geeft de I/O-queue van de ANS 62 tags.
+pub const DEPTH: usize = 32;
 /// CID's van de I/O-queue: één bit per opdracht in de lucht. Hoogstens
 /// `Q_ENTRIES - 1`, dan loopt een SQ-ring nooit over (en de lineaire SQ van
 /// de ANS heeft per CID één plek).
@@ -201,7 +207,7 @@ const PAGES: usize = (DATA_SIZE / PAGE) as usize;
 /// Het hoogste aantal pagina's van één ticket.
 const TAG_PAGES: usize = (MAX_TRANSFER / PAGE) as usize;
 /// Zoveel pagina's blijven na een read-ahead vrij voor andere opdrachten
-/// (256 KiB: zestien keer 4 KiB met ruimte).
+/// (256 KiB: tweeëndertig keer 4 KiB met ruimte).
 const AHEAD_RESERVE: usize = 64;
 
 const _: () = {

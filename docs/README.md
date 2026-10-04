@@ -37,6 +37,7 @@ de SDK-API, de bronkopie en de resterende hardwareproef.
 | `BOARD=rpi4 sh tools/qemu-test-flip.sh` | de flip-ingang van de Pi op raspi4b: een core met het merkteken komt tot de kern en leest de DTB opnieuw |
 | `sh tools/qemu-uefi-test.sh` | de EFI-stub op EDK2, ACPI, PCIe, virtio over PCI met MSI-X via de ITS (`nic=` loopt op in de tik), de hele appspike-keten |
 | `GUI=1 sh tools/qemu-uefi-test.sh` | hetzelfde met de GOP van EDK2 als console |
+| `sh tools/qemu-test-nvme.sh` | de NVMe-kern van de O6N en de Altra: het Altra-image op EDK2 met `-device nvme` en igb, appspike in slot 1 en 2 schrijft, leest terug en leest een bundel (`OP_READ_MANY`) door driver/nvme (`HOPOS_NVME_UP`, `HOPOS_APPSPIKE_FS ok`) |
 | `FEATURES=vhe CPU=neoverse-n1 sh tools/qemu-uefi-test.sh` | de VHE-switcher (E2H=1), de smaak die de O6N eist, op een VHE-model |
 | `BOARD=uefi sh tools/qemu-test-flip.sh` | de kern-flip op EDK2: kern B landt op de PIE-basis van kern A (ook `COLD=1`, en onder VHE met `FEATURES=vhe CPU=neoverse-n1`) |
 | `sh tools/qemu-rpi4-test.sh` | het Pi 4-board op QEMU's raspi4b tot de executor-tik |

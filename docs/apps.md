@@ -134,6 +134,24 @@ wacht op zijn mailbox; een acceptor deelt uit. Een pool die vol is, laat de
 verbinding wachten in de accept-wachtrij; hij gaat niet rondkijken of er al
 een werker vrij is.
 
+### Veel kleine lezingen: bundelen
+
+Elke call naar de kern is een rondreis door de OS-core en houdt één
+opdracht in de lucht; een SSD haalt zijn snelheid pas met veel tegelijk.
+Wie veel kleine lezingen doet (een database, een index), bundelt ze, zoals
+io_uring: `Client::read_many(path, &mut ops)` zet tot `sys::MAX_READS` (16)
+lezingen uit één bestand in één call (`OP_READ_MANY`), de kern zet ze in één
+batch op het device en antwoordt één keer, elke lees in haar eigen buffer
+met haar eigen uitkomst (`ReadOp::got`; een blokfout in de ene laat de
+andere staan). Een bundel wacht op zijn traagste lees: wie de schijf vol wil
+houden, houdt twee bundels in de lucht met een tweede `Client` (een eigen
+verbinding; een app heeft er twee) en wacht ze samen af. GEMETEN 04-10 op
+de Altra (SN770, vitals `rand` met `depth` en `bundles`): één app 18.800
+lezingen per seconde één voor één, 100.000 met bundels van 16, 159.000 met
+twee bundels; vier apps met bundels van 16 samen 249.000, acht 305.000
+(één voor één: 54.000 en 85.000). Op de M4 (ANS): één app 8.400, 56.000 en
+80.500; zes apps met bundels van 16 samen 171.000.
+
 ## De meetlat
 
 Zonder cijfers is "de app slaapt" niet te onderscheiden van "de app dut".

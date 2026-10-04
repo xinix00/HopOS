@@ -54,7 +54,7 @@ const MAX_DEPTH: usize = 4096;
 /// driver (`blkdev::AsyncBlockDevice`) in een `blkdev::Paced`; wie vóór de
 /// executor mount of meet, draait dezelfde futures af met
 /// `blkdev::block_on`.
-pub use blkdev::BlockIo;
+pub use blkdev::{BatchRead, BlockIo};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 struct Extent {

@@ -53,13 +53,18 @@
 
 use crate::cage::{Console, Timer};
 use crate::hopfs::{
-    BlockIo, Fs, Tree, commit_shared, read_shared, sync_shared, truncate_shared, write_shared,
+    BLOCK_SIZE, BatchRead, BlockIo, Fs, ReadStep, Tree, commit_shared, read_shared, sync_shared,
+    truncate_shared, write_shared,
 };
 use crate::slots::{Mount, Reply, Servicers, try_push};
 use crate::system::{MAX_IO_CHUNK, REQ_HEADER};
 use crate::{Error, Result, SLOT_CAP, Slot};
-use abi::hopabi::{OP_LIST, OP_READ, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE};
+use abi::hopabi::{
+    OP_LIST, OP_READ, OP_READ_MANY, OP_REMOVE, OP_STAT, OP_SYNC, OP_TRUNCATE, OP_WRITE,
+    STATUS_ERROR, STATUS_OK, many,
+};
 use alloc::vec::Vec;
+use bounded::BoundedVec;
 use core::future::Future;
 use core::ops::Range;
 use core::pin::Pin;
@@ -92,7 +97,7 @@ pub const COMMIT_POLL: Duration = Duration::from_secs(1);
 pub const fn is_fs_op(op: u8) -> bool {
     matches!(
         op,
-        OP_STAT | OP_READ | OP_WRITE | OP_LIST | OP_REMOVE | OP_TRUNCATE | OP_SYNC
+        OP_STAT | OP_READ | OP_WRITE | OP_LIST | OP_REMOVE | OP_TRUNCATE | OP_SYNC | OP_READ_MANY
     )
 }
 
@@ -493,7 +498,11 @@ pub fn thaw(inbox: &FsInbox<'_>) -> bool {
 ///
 /// - **Volgorde per app**: één call per slot tegelijk, in de volgorde van
 ///   de brievenbus. Een app wacht toch al op zijn antwoord; zo ziet een
-///   tweede verbinding van dezelfde app ook nooit iets anders.
+///   tweede verbinding van dezelfde app ook nooit iets anders. Alleen
+///   lezingen (`OP_READ`, `OP_READ_MANY`) mogen naast elkaar: een lees
+///   verandert niets, dus twee bundels van één app over twee verbindingen
+///   staan samen op het device. Een lees na een schrijf wacht nog steeds op
+///   die schrijf, en een schrijf op de lezingen ervoor.
 /// - **Synchroon blijft synchroon**: het antwoord komt pas als de I/O van
 ///   het device terug is (de future is dan klaar).
 /// - **OP_SYNC is een barrière plus een echte Flush**: de eerdere calls van
@@ -533,8 +542,8 @@ struct Desk<'s, L> {
     /// Geweigerde calls tijdens de bevriezing.
     frozen_calls: u64,
     path: PathBuf,
-    /// Per slot: heeft hij een call in de lucht?
-    busy: [bool; SLOT_CAP + 1],
+    /// Per slot: wat hij in de lucht heeft.
+    busy: [Busy; SLOT_CAP + 1],
     /// De nodes met een schrijf in de lucht.
     writing: [Option<usize>; FS_DEPTH],
     /// Een vastlegging (commit, sync, freeze) is in de lucht.
@@ -548,6 +557,17 @@ struct Desk<'s, L> {
 /// Hoeveel mislukte commits (en blokfouten) een eigen regel krijgen.
 const LOUD_COMMIT_FAILS: u64 = 3;
 
+/// Wat een slot in de lucht heeft: de volgorde per app ([`FsActor`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Busy {
+    /// Niets.
+    Idle,
+    /// Alleen lezingen, zoveel.
+    Reads(usize),
+    /// Eén call die geen lees is.
+    Other,
+}
+
 /// Wat een call na het plannen nog moet doen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Work {
@@ -555,6 +575,8 @@ enum Work {
     Done(u64, usize),
     /// Lezen uit node `n`.
     Read(usize),
+    /// Een bundel lezingen uit node `n` ([`OP_READ_MANY`]).
+    ReadMany(usize),
     /// Schrijven naar node `n`.
     Write(usize),
     /// Node `n` op maat `c.n`.
@@ -611,6 +633,7 @@ async fn run_call<D: BlockIo + Copy>(
             let got = read_shared(t, n, c.off, dst).await?;
             Ok((got as u64, got))
         }
+        Work::ReadMany(n) => read_many(t, n, c).await,
         Work::Write(n) => {
             let data = c.buf.get(c.data.clone()).ok_or(Error::Corrupt { at: 0 })?;
             write_shared(t, n, c.off, data).await?;
@@ -622,6 +645,134 @@ async fn run_call<D: BlockIo + Copy>(
         }
         Work::Sync => Ok((sync_shared(t).await?, 0)),
     }
+}
+
+/// Een gebundelde lees ([`OP_READ_MANY`], de draadvorm in [`many`]): alle
+/// opdrachten samen op de wachtrij van het device, één antwoord.
+///
+/// Per ronde krijgt elke opdracht die nog bytes wacht haar volgende stap
+/// (een gat is meteen nul), en gaan alle stappen in één batch naar het
+/// device (`BlockIo::read_batch`: alles erop, één wachter): een lees van
+/// 4 KiB is één ronde. Een stap leest rechtstreeks in het stuk van de
+/// opdracht in `c.out`, een rand (een deel van een blok) in een blok
+/// achteraan in `c.out`, één per opdracht. Zo draagt de future geen blok en
+/// geen future per opdracht, en blijft de plaats in de pool van de actor zo
+/// groot als die van een gewone lees. Daarna schuiven de bytes aaneen achter
+/// de tabel met de uitkomsten. Een opdracht die faalt, krijgt een fout en
+/// nul bytes, de andere blijven staan. [`Desk::plan`] toetste de lijst en
+/// de ruimte.
+async fn read_many<D: BlockIo + Copy>(
+    t: &Tree<D>,
+    n: usize,
+    c: &mut FsCall,
+) -> Result<(u64, usize)> {
+    const M: usize = many::MAX_OPS;
+    let FsCall { buf, out, data, .. } = c;
+    let list = buf.get(data.clone()).ok_or(Error::Corrupt { at: 0 })?;
+    let count = (list.len() / many::OP_LEN).min(M);
+    let short = Error::TooLarge { len: count, max: M };
+    let body = out.get_mut(REQ_HEADER..).ok_or(short)?;
+    let (table, rest) = body
+        .split_at_mut_checked(count * many::RESULT_LEN)
+        .ok_or(short)?;
+    let edge = rest.len().checked_sub(count * BLOCK_SIZE).ok_or(short)?;
+    let (room, edges) = rest.split_at_mut(edge);
+    // Per opdracht: haar offset, waar haar stuk begint en hoe lang het is,
+    // hoeveel bytes er komen en al zijn, en of ze faalde.
+    let (mut off, mut at, mut len) = ([0u64; M], [0usize; M], [0usize; M]);
+    let (mut want, mut done, mut failed) = ([0usize; M], [0usize; M], [false; M]);
+    let mut pos = 0usize;
+    for i in 0..count {
+        let (o, l) = many::op(list, i).ok_or(short)?;
+        (off[i], at[i], len[i]) = (o, pos, l as usize);
+        pos += l as usize;
+        match t.borrow().read_len(n, o, l as usize) {
+            Ok(w) => want[i] = w,
+            Err(_) => failed[i] = true,
+        }
+    }
+    let mut disk = t.borrow().disk();
+    loop {
+        // De volgende stap per opdracht: (lba, lengte, de rand als die er is).
+        let mut step = [None::<(u64, usize, Option<usize>)>; M];
+        for i in 0..count {
+            while !failed[i] && done[i] < want[i] && step[i].is_none() {
+                let s = t
+                    .borrow()
+                    .read_step(n, off[i] + done[i] as u64, want[i] - done[i]);
+                match s {
+                    Ok(ReadStep::Hole { len: k }) => {
+                        let from = at[i] + done[i];
+                        if let Some(z) = room.get_mut(from..from + k) {
+                            z.fill(0);
+                        }
+                        done[i] += k;
+                    }
+                    Ok(ReadStep::Whole { lba, len: k }) => step[i] = Some((lba, k, None)),
+                    Ok(ReadStep::Part { lba, at: a, len: k }) => step[i] = Some((lba, k, Some(a))),
+                    Err(_) => failed[i] = true,
+                }
+            }
+        }
+        if step.iter().all(Option::is_none) {
+            break;
+        }
+        let mut ok = [false; M];
+        {
+            // De stukken van deze ronde, op volgorde uit `room` en `edges`
+            // geknipt: elke lees haar eigen bytes.
+            let mut batch: BoundedVec<BatchRead<'_>, M> = BoundedVec::new();
+            let mut who = [0usize; M];
+            let (mut r, mut e, mut base) = (&mut *room, &mut *edges, 0usize);
+            for (i, s) in step.iter().enumerate().take(count) {
+                let (block, rest_e) = core::mem::take(&mut e)
+                    .split_at_mut_checked(BLOCK_SIZE)
+                    .ok_or(short)?;
+                e = rest_e;
+                let Some((lba, k, part)) = *s else { continue };
+                let from = at[i] + done[i];
+                let (_, tail) = core::mem::take(&mut r)
+                    .split_at_mut_checked(from - base)
+                    .ok_or(short)?;
+                let (dst, tail) = tail.split_at_mut_checked(k).ok_or(short)?;
+                (r, base) = (tail, from + k);
+                let into = if part.is_some() { block } else { dst };
+                who[batch.len()] = i;
+                batch.push(BatchRead::new(lba, into)).map_err(|_| short)?;
+            }
+            disk.read_batch(batch.as_mut_slice()).await;
+            for (k, op) in batch.as_slice().iter().enumerate() {
+                ok[who[k]] = op.result.is_ok();
+            }
+        }
+        for (i, s) in step.iter().enumerate().take(count) {
+            let Some((_, k, part)) = *s else { continue };
+            if !ok[i] {
+                failed[i] = true;
+                continue;
+            }
+            if let Some(a) = part {
+                let from = at[i] + done[i];
+                let src = edges.get(i * BLOCK_SIZE + a..i * BLOCK_SIZE + a + k);
+                if let (Some(d), Some(src)) = (room.get_mut(from..from + k), src) {
+                    d.copy_from_slice(src);
+                }
+            }
+            done[i] += k;
+        }
+    }
+    let mut to = 0usize;
+    for i in 0..count {
+        let (k, status) = if failed[i] {
+            (0, STATUS_ERROR)
+        } else {
+            (done[i].min(len[i]), STATUS_OK)
+        };
+        room.copy_within(at[i]..at[i] + k, to);
+        many::put_result(table, i, k as u32, status);
+        to += k;
+    }
+    Ok((to as u64, count * many::RESULT_LEN + to))
 }
 
 /// Een bericht in de lucht, tot het klaar is.
@@ -655,7 +806,7 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
                 frozen: false,
                 frozen_calls: 0,
                 path: PathBuf::new(),
-                busy: [false; SLOT_CAP + 1],
+                busy: [Busy::Idle; SLOT_CAP + 1],
                 writing: [None; FS_DEPTH],
                 committing: false,
                 alone: false,
@@ -833,7 +984,12 @@ impl<L: Console> Desk<'_, L> {
         }
         let i = c.slot.get();
         let live = self.svc.current(c.slot) == Some(c.generation);
-        let busy = self.busy.get(i).copied().unwrap_or(false);
+        let reads = matches!(c.op, OP_READ | OP_READ_MANY);
+        let busy = match self.busy.get(i).copied().unwrap_or(Busy::Idle) {
+            Busy::Idle => false,
+            Busy::Reads(_) => !reads,
+            Busy::Other => true,
+        };
         let fresh = live && self.prepared.get(i).copied().flatten() != Some(c.generation);
         let wait = busy
             || ((fresh || matches!(c.op, OP_REMOVE | OP_TRUNCATE)) && !idle)
@@ -872,10 +1028,14 @@ impl<L: Console> Desk<'_, L> {
             }
             Work::Truncate(_) => self.alone = true,
             Work::Sync => self.committing = true,
-            Work::Read(_) => {}
+            Work::Read(_) | Work::ReadMany(_) => {}
         }
         if let Some(b) = self.busy.get_mut(i) {
-            *b = true;
+            *b = match (*b, work) {
+                (Busy::Reads(k), Work::Read(_) | Work::ReadMany(_)) => Busy::Reads(k + 1),
+                (_, Work::Read(_) | Work::ReadMany(_)) => Busy::Reads(1),
+                _ => Busy::Other,
+            };
         }
         Admit::Go(Job::Call {
             c,
@@ -931,7 +1091,10 @@ impl<L: Console> Desk<'_, L> {
                 reply,
             } => {
                 if let Some(b) = self.busy.get_mut(c.slot.get()) {
-                    *b = false;
+                    *b = match *b {
+                        Busy::Reads(k) if k > 1 => Busy::Reads(k - 1),
+                        _ => Busy::Idle,
+                    };
                 }
                 match work {
                     Work::Write(n) => {
@@ -944,6 +1107,7 @@ impl<L: Console> Desk<'_, L> {
                     }
                     Work::Truncate(_) => self.alone = false,
                     Work::Sync => self.committing = false,
+                    Work::ReadMany(_) => self.many_failed(&c, &r),
                     Work::Read(_) | Work::Done(..) => {}
                 }
                 self.io_failed(&c, &r);
@@ -990,6 +1154,29 @@ impl<L: Console> Desk<'_, L> {
                     c.slot, c.op, self.io_fails
                 ));
             }
+        }
+    }
+
+    /// Een opdracht van een bundel die faalde, staat alleen in de tabel van
+    /// het antwoord; dezelfde regel als [`Desk::io_failed`], met het aantal.
+    fn many_failed(&mut self, c: &FsCall, r: &Result<(u64, usize)>) {
+        if r.is_err() {
+            return;
+        }
+        let count = c.data.len() / many::OP_LEN;
+        let table = c.out.get(REQ_HEADER..).unwrap_or(&[]);
+        let bad = (0..count)
+            .filter(|&i| many::result(table, i).is_some_and(|(_, s)| s != STATUS_OK))
+            .count();
+        if bad == 0 {
+            return;
+        }
+        self.io_fails += 1;
+        if self.io_fails <= LOUD_COMMIT_FAILS {
+            self.log.log(format_args!(
+                "hopfs: slot {} op {}: {bad} of {count} reads failed ({} so far) HOPOS_FS_IO",
+                c.slot, c.op, self.io_fails
+            ));
         }
     }
 
@@ -1112,6 +1299,34 @@ impl<L: Console> Desk<'_, L> {
                 let n = fs.find(p)?;
                 fs.read_len(n, 0, 0)?; // Een map is geen bestand.
                 Work::Read(n)
+            }
+            OP_READ_MANY => {
+                // De hele lijst vóór er één opdracht naar het device gaat:
+                // de vorm, de grenzen, en of het antwoord met een blok per
+                // opdracht voor de randen in de buffer past.
+                let list = c.buf.get(c.data.clone()).ok_or(Error::Corrupt { at: 0 })?;
+                let sum = many::check(list, c.n).map_err(|e| match e {
+                    many::Invalid::Shape => Error::Corrupt { at: 0 },
+                    many::Invalid::TooMany(k) => Error::TooLarge {
+                        len: k,
+                        max: many::MAX_OPS,
+                    },
+                    many::Invalid::TooLarge(b) => Error::TooLarge {
+                        len: b,
+                        max: many::MAX_BYTES,
+                    },
+                })?;
+                let count = list.len() / many::OP_LEN;
+                let need = REQ_HEADER + count * (many::RESULT_LEN + BLOCK_SIZE) + sum;
+                if need > c.out.len() {
+                    return Err(Error::TooLarge {
+                        len: need,
+                        max: c.out.len(),
+                    });
+                }
+                let n = fs.find(p)?;
+                fs.read_len(n, 0, 0)?;
+                Work::ReadMany(n)
             }
             OP_WRITE => {
                 let data = c.buf.get(c.data.clone()).ok_or(Error::Corrupt { at: 0 })?;
