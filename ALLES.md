@@ -45,17 +45,17 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       de cellen vooraan); doel ongeveer tien minuten voor alle borden in
       plaats van 80 minuten met zeven agenten.
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
-      van dit weekend), geland zijn 8.1 (0f03544), 8.2 en 8.3 (c6e0bf8), 8.4 (a0eaeb0), 8.5
-      (8e8cea4), 8.6 (67e5a3a), 8.15 en 8.16 (f1917f0); nog bezig 8.14 (de
-      scripts) en de tweede golf: 8.7 en 8.8 (arm64 en riscv, de assembly),
-      8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
-      paden), 8.12 (pollen), 8.13 (apps), plus de restjes (clock naar now,
-      HOPOS_IRQ_STUCK, de Hop-bootregel na een warme flip). Alles na 3.0.9
+      van dit weekend), geland zijn 8.1, 8.2 en 8.3, 8.4, 8.5, 8.6, 8.9 (ebea7eb), 8.13
+      (249963d), 8.15 en 8.16, en de restjes (92071eb: clock naar now,
+      HOPOS_IRQ_STUCK en HOPOS_IRQ_STORM, de Hop-bootregel na een warme flip
+      met HOPOS_HOP_GROUP_COLD); nog bezig 8.7 en 8.8 (arm64 en riscv, de
+      assembly), 8.10 en 8.11 (oneshot, de dubbele paden), 8.12 (pollen),
+      8.14 (de scripts). Alles na 3.0.9
       komt in een volgende release na een eigen ijzerronde (de bootregels
       per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
       paden), 8.12 (pollen), 8.13 (apps).
-- [ ] Agent op de Altra en de O6N. NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
+- [ ] Agent (herbasseert op main). NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
       eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
       zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
       de igb en de RTL8125 al hebben.
