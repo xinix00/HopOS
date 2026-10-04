@@ -45,7 +45,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       draadmetingen opnieuw met een stille O6N, met de M4 als tegenpartij
       voor de O6N; de watchdogtoets op de M4 na een nieuwe Hop via
       Recovery.
-- [ ] Na HopOS v3.0.7 (uit, 36 assets, apps vernieuwd): Hop 3.0.8 met de pin
+- [ ] HopOS 3.0.8 zodra handoff geland is: het Altra-image van v3.0.7 boot
+      niet (de boot-stack), dus de stick moet 3.0.8 worden; met het
+      config-venster en hop image. Na HopOS v3.0.7 (uit, 36 assets, apps vernieuwd): Hop 3.0.8 met de pin
       op v3.0.7 en de lean-tags naar v3.1.9 (hop-gui ook opnieuw tegen
       v3.0.7); dan de media: nieuwe Radxa-kaart (v3.0.5 stormt na 2 GiB
       verkeer door de MMC-maskers), het M4-image via Recovery (Hop is daar
@@ -67,18 +69,17 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       watchdogtoets van O41w). Hop stopt meteen, pas de boot-guard geeft
       een koude boot (2,5 min), en de post-mortem is die van de tussenboot.
       Agent `handoff` is bezig.
-- [ ] Een koude flip met dezelfde bundel stopt eerst de taken
-      (`HOP_FLIP_COLD_STOP`), dan weigert de kern (`HOPOS_FLIP_REFUSED same
-      bundle`) en komt welcome niet terug, terwijl `/v1/jobs` hem noemt
-      (Pi 4, P10g).
 - [ ] LicheeRV: elke boot `HOPOS_OS_SELFTEST_FAIL` (alle vier de proeven
-      melden `Irq`, R40); een job met `cpu_shares` krijgt `HOP_NO_CAPACITY`
-      (cpu 0/0 shares, Hop ziet `HOPOS_CORES=0`).
+      melden `Irq`, R40).
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
 - [ ] M4: het transport van een bulk-app in kleinere brokken met een yield
       (4 KiB-calls van de buurman blijven rond 19 tot 20).
-- [ ] De boot-stack van 256 KB heeft 43 KB marge: gui::usb::run en het
-      FsActor-blok naar de heap, een wachtpost in qemu-test.sh.
+- [ ] De boot-stack: na de #[inline(never)] op de boot-helpers (a6ceae5)
+      is de diepste boot op de Altra 156 KB van 256; de futures zelf
+      blijven groot en UEFI heeft nog geen wachtpagina (de overloop van
+      302d257 schreef stil over .bss en liet de Altra op de stick
+      terugvallen). Wachtpagina op UEFI en RISC-V, en een wachtpost in
+      qemu-test.sh.
 - [ ] Pi 5: het glas (de firmware weigert elke framebuffer sinds de
       herflash).
 

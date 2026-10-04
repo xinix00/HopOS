@@ -160,7 +160,6 @@ kern weigert terwijl Hop nog wacht op zijn FLIP-antwoord, krijgt Hop terug
 | `HOPOS_FLIP_REFUSED flip ABI mismatch` | haak | een bundel met een andere flip-ABI (v2 was ABI 2) |
 | `HOPOS_FLIP_REFUSED switch code mismatch` | haak | de EL2-switch-code van de nieuwe kern is een andere dan die waarin de bewoners draaien; zie "De koude flip" |
 | `HOPOS_FLIP_REFUSED image too large` | haak | het beeld past niet in de staging of niet op het koude adres (UEFI: niet in het oude image) |
-| `HOPOS_FLIP_REFUSED same bundle` | haak | deze kern kwam al uit die bundel; een flip naar zichzelf wordt geen lus |
 | `HOPOS_FLIP_REFUSED firmware DTB gone` | haak | op een DTB-board (virt, Pi, Radxa) staat op x0 van de firmware geen FDT-kop meer; de nieuwe kern zou zonder geheugenkaart landen |
 | `HOPOS_FLIP_REFUSED cold flip without a staged image` | haak | koud, maar er ligt geen ELF in de staging om Hop uit te starten (de Radxa, of een eerdere warme flip die er overheen moest: `HOPOS_FLIP_STAGE_SHARED`) |
 | `HOPOS_FS_FREEZE_FAIL` en `HOPOS_FLIP_FAIL` | flip-taak | de commit faalde of de actor antwoordde niet binnen 2 s; er is niets bevroren |

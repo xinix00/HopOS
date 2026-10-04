@@ -736,18 +736,6 @@ fn prepare_inner(b: &FlipBundle, sha256: &[u8; 32]) -> Result<(), Refused> {
         ));
     }
     let sum64 = kernflip::sum64(&sum);
-    if SUM.load(Relaxed) == sum64 {
-        // Dezelfde som als `want`: Hop drukt de kernfout af, en "version
-        // X, want X" zegt wat er is; `Busy` las als "actor mailbox full"
-        // (de Pi 4, 01-10) en stuurde een nacht de verkeerde kant op.
-        return Err(refuse(
-            "same bundle",
-            kern::Error::Version {
-                have: sum64,
-                want: sum64,
-            },
-        ));
-    }
     let bundle = Bundle::parse(bytes)?;
     if bundle.flip_abi != FLIP_ABI {
         return Err(refuse(
