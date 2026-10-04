@@ -44,6 +44,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       en Radxa 681 niet. Ook de timer-overslaap p99 2,7 tot 10 ms (M4,
       LicheeRV). Een hapering van ~10 ms in de kern-weg (TURN_CAP, de
       dvfs-sample van 10 ms, de switch-ronde?): zoeken.
+- [ ] Agent op de Altra: gebundeld lezen door apps, zoals io_uring. Nu is
+      elke lees van een app één RPC door de OS-core met één opdracht in de
+      lucht (M4 01-10: 7.600 per app, 36.000 met acht apps, Linux op
+      dezelfde M4 100.000 tot 200.000; rauw in de kern 175k en op de Altra
+      289k met 16 tegelijk). Eén op die tot 16 leesopdrachten per aanroep
+      bij de drive zet en met één kick terugkomt, `read_many` in applib,
+      bench met een diepte per app; doel richting het rauwe plafond.
+- [ ] Agent op de O6N en de M4: de huidige stand van willekeurig lezen door
+      apps opnieuw meten (1 tot 16 apps) als nulmeting voor het bundelen.
 - [ ] Daarna HopOS 3.0.8 (het Altra-image van v3.0.7 boot niet, het
       config-venster en `hop image` zijn nieuw, de GEM van de Pi 5, handoff),
       Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw), en de media met
