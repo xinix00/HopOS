@@ -39,12 +39,17 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] HopOS 3.0.8: het Altra-image van v3.0.7 boot
-      niet (de boot-stack), het config-venster en `hop image` zijn nieuw.
-      Daarop Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw). Dan de
-      media met `hop image --config`: Radxa-kaart (v3.0.5 stormt na 2 GiB
-      door de MMC-maskers), Altra-stick, M4 via Recovery (Hop is daar nog
-      3.0.0 en de leader kent geen jobs: spin opnieuw POSTen, daarna pas de
+- [ ] Agent op de Altra: NVMe lezen (waarom 16 tegelijk maar 4,5 tot 7,6
+      keer de enkele oplevert, en de 19 us per 4 KiB); het punt staat bij
+      Fixen.
+- [ ] Agent op de Pi 4: de rtt naar de kern met p99 5 tot 9 ms; het punt
+      staat bij Fixen.
+- [ ] Daarna HopOS 3.0.8 (het Altra-image van v3.0.7 boot niet, het
+      config-venster en `hop image` zijn nieuw, de GEM van de Pi 5, handoff),
+      Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw), en de media met
+      `hop image --config`: Radxa-kaart (v3.0.5 stormt na 2 GiB door de
+      MMC-maskers), Altra-stick, M4 via Recovery (Hop is daar nog 3.0.0 en
+      de leader kent geen jobs: spin opnieuw POSTen, daarna pas de
       watchdogtoets daar).
 
 ### Fixen
