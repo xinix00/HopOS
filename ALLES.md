@@ -39,13 +39,17 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Op ijzer nog te zien van wat landde, met de meetkernen (features
-      `nvmebench` en `wdtest`, flippen in plaats van flashen): de NVMe-bench
-      op O6N en Altra (RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s
-      op de O6N), de echte watchdogtoets (Hop stopt na 60 s, de reset
-      brengt de kaart- of stickkern terug) op O6N en Altra, daarna de
-      andere borden; de M4 (tg3 en apple pcie via poll_until, de ANS als
-      transport van de NVMe-kern, de twee wissels per rondreis). Bezig.
+- [ ] Op ijzer met de meetkernen (features `nvmebench` en `wdtest`, flippen
+      in plaats van flashen). Gezien: O6N NVMe-bench met de nieuwe kern
+      (SEQ lezen 3263 MB/s tegen 2705 ervoor, RANDQ 16 tegelijk 71k IOPS
+      tegen 15,6k één tegelijk, hopfs 1 MiB 3584 schrijven en 2992 lezen);
+      O6N watchdogtoets (Hop gestopt, canary mis, SBSA-reset, 51 s later
+      op de stickkern O2 met de post-mortem van de vorige kern erbij); de
+      M4 warm naar main (tg3, 3 bewoners en 12 NAT-flows over de flip,
+      canary); een warme flip van een stickkern (v3.0.5) naar main werkt op
+      de O6N. Bezig: Altra (de bench-kern zette de Altra twee keer terug
+      op de stick, zonder zwarte doos: eerst main koud, dan opnieuw), de
+      watchdogtoets op Pi 4, Pi 5, Radxa en LicheeRV.
 - [ ] Na HopOS v3.0.7 (uit, 36 assets, apps vernieuwd): Hop 3.0.8 met de pin
       op v3.0.7 en de lean-tags naar v3.1.9 (hop-gui ook opnieuw tegen
       v3.0.7); dan de media: nieuwe Radxa-kaart (v3.0.5 stormt na 2 GiB
@@ -70,8 +74,8 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Op ijzer te zien
 
-- [ ] Overal: de echte watchdogtoets (kabel eruit of Hop stoppen, reset
-      binnen de termijn); Altra ook de SBSA-watchdog en de koude flip.
+- [ ] Altra: de koude flip (de SBSA-watchdog en de watchdogtoets zitten in
+      het meetkern-punt bij Nu).
 - [ ] Core-reclaim in een sharegroup met een rekenaar
       (`HOPOS_CORE_RECLAIM` na 2 s).
 - [ ] Radxa: de scrub van een Device-gemapte pool (twee keer dezelfde
