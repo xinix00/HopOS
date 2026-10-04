@@ -51,8 +51,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       289k met 16 tegelijk). Eén op die tot 16 leesopdrachten per aanroep
       bij de drive zet en met één kick terugkomt, `read_many` in applib,
       bench met een diepte per app; doel richting het rauwe plafond.
-- [ ] Agent op de O6N en de M4: de huidige stand van willekeurig lezen door
-      apps opnieuw meten (1 tot 16 apps) als nulmeting voor het bundelen.
 - [ ] Daarna HopOS 3.0.8 (het Altra-image van v3.0.7 boot niet, het
       config-venster en `hop image` zijn nieuw, de GEM van de Pi 5, handoff),
       Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw), en de media met
@@ -63,6 +61,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
+- [ ] Hop op de OS-core verhongert als de OS-core vol zit: bij 4 of meer
+      apps die de kern bestoken krijgt Hop op de O6N nog 1 % en antwoorden
+      `/v1/agents` en de apps 10 s niet (04-10, nulmeting). Hop hoort een
+      gegarandeerd deel van de OS-core te hebben, of op borden met cores
+      genoeg niet op de OS-core te wonen.
+- [ ] NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
+      eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
+      zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
+      de igb en de RTL8125 al hebben.
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).

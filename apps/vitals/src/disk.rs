@@ -12,7 +12,11 @@
 //! lezingen op pseudo-willekeurige plekken in een bestand van `mb` MiB,
 //! elk met een inhoudscontrole, als opdrachten per seconde met p50 en p99.
 //! Het bestand blijft staan, zodat apps die tegelijk meten alleen lezen
-//! (de eerste run schrijft het).
+//! (de eerste run schrijft het). Met `secs` loopt de lus zo lang in plaats
+//! van N lezingen (N is dan het plafond), zodat apps die samen starten ook
+//! samen stoppen. Met `hole=1` erbij komt het bestand er als gat (één byte
+//! op het eind): elke lezing komt dan uit het RAM van de kern, zonder
+//! schijfblok, en meet alleen het pad app naar OS-core en terug.
 //!
 //! Een node zonder opslag zegt dat expliciet ("no storage layer on board");
 //! dan slaat de test zichzelf over. Elke andere fout is een fout.
@@ -35,6 +39,9 @@ const DEFAULT_PATH: &str = "/vitals-disk.bin";
 
 /// De 4 KiB-writes: 256 stuks, 1 MiB.
 const SMALL: usize = 4 << 10;
+
+/// Wat een gat van 4 KiB teruggeeft.
+static ZEROS: [u8; SMALL] = [0; SMALL];
 const SMALL_N: usize = 256;
 
 /// De stat-calls van de vloer.
@@ -135,7 +142,8 @@ pub(crate) async fn disk(sh: &'static Shared, r: &mut Report, p: &Params) {
     };
     let rand = Params::int(p.rand, 0, 0, 1 << 20);
     if rand > 0 {
-        rand4k(sh, &mut sys, r, &plan, rand).await;
+        let dur = p.secs.map(|v| Params::int(Some(v), 5, 1, 600));
+        rand4k(sh, &mut sys, r, &plan, rand, dur).await;
         return;
     }
     run(sh, &mut sys, r, &plan).await;
@@ -156,7 +164,14 @@ fn spot(k: u64, blocks: u64) -> u64 {
 
 /// Willekeurige 4 KiB-lezingen: `n` stuks over het bestand van `plan`, dat
 /// er eerst komt als het er niet (heel) is.
-async fn rand4k(sh: &Shared, sys: &mut SystemClient, r: &mut Report, plan: &Plan<'_>, n: u64) {
+async fn rand4k(
+    sh: &Shared,
+    sys: &mut SystemClient,
+    r: &mut Report,
+    plan: &Plan<'_>,
+    n: u64,
+    dur: Option<u64>,
+) {
     let Some(mut wbuf) = buffer(plan.chunk) else {
         r.fail(format_args!("no heap for a {}-byte buffer", plan.chunk));
         return;
@@ -165,7 +180,17 @@ async fn rand4k(sh: &Shared, sys: &mut SystemClient, r: &mut Report, plan: &Plan
         let k = part.len();
         part.copy_from_slice(sh.blob.get(..k).unwrap_or_default());
     }
-    if sys.stat(plan.path).await.ok() != Some(plan.total) {
+    if plan.hole && sys.stat(plan.path).await.ok() != Some(plan.total) {
+        note(format_args!("disk rand4k: a hole of {} MB", plan.total >> 20));
+        if let Err(e) = sys
+            .write_at(plan.path, plan.total - 1, wbuf.get(..1).unwrap_or_default())
+            .await
+        {
+            r.fail(format_args!("hole: {e}"));
+            return;
+        }
+    }
+    if !plan.hole && sys.stat(plan.path).await.ok() != Some(plan.total) {
         note(format_args!(
             "disk rand4k: writing {} MB first",
             plan.total >> 20
@@ -189,7 +214,12 @@ async fn rand4k(sh: &Shared, sys: &mut SystemClient, r: &mut Report, plan: &Plan
     let mut b = [0u8; SMALL];
     let blocks = plan.total / SMALL as u64;
     let t0 = clock::now_ns();
+    let until = dur.map(|v| t0.saturating_add(v.saturating_mul(1_000_000_000)));
+    let mut done = 0u64;
     for k in 0..n {
+        if until.is_some_and(|u| clock::now_ns() >= u) {
+            break;
+        }
         let off = spot(k, blocks) * SMALL as u64;
         let t = clock::now_ns();
         match sys.read_into(plan.path, off, &mut b).await {
@@ -204,8 +234,18 @@ async fn rand4k(sh: &Shared, sys: &mut SystemClient, r: &mut Report, plan: &Plan
             }
         }
         record(&mut lat, us_since(t));
-        let at = (off % plan.chunk as u64) as usize;
-        if let Some(i) = first_diff(&b, wbuf.get(at..at + SMALL).unwrap_or_default()) {
+        done += 1;
+        // Een gat leest nullen; het laatste blok draagt de ene byte.
+        let want = if plan.hole {
+            if off + SMALL as u64 >= plan.total {
+                continue;
+            }
+            ZEROS.as_slice()
+        } else {
+            let at = (off % plan.chunk as u64) as usize;
+            wbuf.get(at..at + SMALL).unwrap_or_default()
+        };
+        if let Some(i) = first_diff(&b, want) {
             r.fail(format_args!(
                 "rand4k at {off}: content mismatch (first bad byte at {i})"
             ));
@@ -213,8 +253,10 @@ async fn rand4k(sh: &Shared, sys: &mut SystemClient, r: &mut Report, plan: &Plan
         }
     }
     let el = clock::now_ns().saturating_sub(t0);
+    let n = done;
     let (p50, p99) = (pct(&mut lat, 50), pct(&mut lat, 99));
     r.add("rand4k", n as f64 / secs(el), "IOPS");
+    r.add("rand4k_n", n as f64, "reads");
     r.add("rand4k_p50", f64::from(p50), "us");
     r.add("rand4k_p99", f64::from(p99), "us");
     r.line(format_args!(

@@ -144,6 +144,7 @@ main 8a91d57, Hop d785ef5. Vitals met 1 core, 128 MiB, slot 3. Zonder
 | hopfs 1 MiB, schrijven / lezen, MB/s | **3584 / 2992 (nvmebench, 04-10)** | 2970,1 / 2716,7 | nvmebench 04-10 |
 | App-opslag via vitals disk, schrijven / lezen, MB/s | **921 / 1799 (256 MiB); 64 MB 914 / 1868 (O40, 04-10)**; 714 / 748 (64 MB) (O2, 03-10) | 556,8–625,4 / 727,5–796,8 (256 MiB) | O40 04-10 |
 | 4 KiB schrijven via de app, MB/s | **84,2 (256 calls, p50 46 µs); in de 64 MB-run 109 (O40, 04-10)**; 42,3 (O2, 03-10) | 15,15–17,08 | O40 04-10 |
+| Willekeurig 4 KiB lezen door apps, opdrachten/s | **echt: 1 app 7.983 (p50 125 µs), 2 apps 16.561, 4 apps 29.052, 8 apps 46.868, 9 apps 50.150 (p50 179; de drive met één lees per app in de lucht, rauw 15,6k met één en 71k met zestien); zonder schijf (`hole=1`): 22.694, 46.643, 56.672, 78.017, 78.226 (de OS-core vol: ~12,8 µs per call, Hop op de OS-core krijgt dan 1 %) (O43, 04-10)** | | O43 04-10 |
 
 **Media**
 
@@ -579,7 +580,7 @@ spin en spin-tunnel). M20 tot M33, 01-10, voor in de node en opslag.
 | Kern naar app zonder schijf (`hole=1`), MB/s | **1511 (256 MiB) (M40, 04-10)**; 1879–1917 (M24, 01-10) | | M40 04-10 |
 | App-opslag 256 MiB, schrijven / lezen, MB/s | **1288 / 1675 (4 KiB 111) (M40, 04-10)**; 1269–1270 / 1683–1696 (M24, 01-10) | 1598–1657 / 1064–1072 | M40 04-10 |
 | 4 KiB schrijven als RPC-lus, MB/s | 82 (naast een bulk-app 15–19) | | 01-10 |
-| Willekeurig 4 KiB lezen door apps, opdrachten/s | 1 app 7600, 2 apps 14.500, 4 apps 25.500 | | M33 01-10 |
+| Willekeurig 4 KiB lezen door apps, opdrachten/s | **zonder schijf (`hole=1`, alleen het pad app naar OS-core naar app): 1 app 30.986 (p50 28 µs), 2 apps 41.701, 4 apps 66.089, 6 apps 76.577; naast spin; echt lezen niet gemeten (schrijft eerst 256 MiB per app) (M40, 04-10)**; 1 app 7600, 2 apps 14.500, 4 apps 25.500 | | M40 04-10 |
 | Replica (SQLite op HopFS), persist-proef, ms | 193, over een flip heen | | M33 01-10 |
 
 Lezing: op M40 haalt app naar app op een P-core 4350 MB/s waar M33 6379
