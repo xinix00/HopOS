@@ -39,10 +39,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Op ijzer nog te zien van wat landde: de NVMe-bench (`hopos.nvmebench=1`:
-      RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s op de O6N) op
-      O6N en Altra; de M4 (tg3 en apple pcie via poll_until, de ANS als
-      transport van de NVMe-kern, de twee wissels per rondreis).
+- [ ] Op ijzer nog te zien van wat landde, met de meetkernen (features
+      `nvmebench` en `wdtest`, flippen in plaats van flashen): de NVMe-bench
+      op O6N en Altra (RANDQ met 16 tegelijk, SEQ niet lager dan 2705 MB/s
+      op de O6N), de echte watchdogtoets (Hop stopt na 60 s, de reset
+      brengt de kaart- of stickkern terug) op O6N en Altra, daarna de
+      andere borden; de M4 (tg3 en apple pcie via poll_until, de ANS als
+      transport van de NVMe-kern, de twee wissels per rondreis). Bezig.
 - [ ] Na HopOS v3.0.7 (uit, 36 assets, apps vernieuwd): Hop 3.0.8 met de pin
       op v3.0.7 en de lean-tags naar v3.1.9 (hop-gui ook opnieuw tegen
       v3.0.7); dan de media: nieuwe Radxa-kaart (v3.0.5 stormt na 2 GiB
@@ -51,6 +54,10 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
+- [ ] MAGIC + CONFIG in het image, zoals v2: een vast venster met een magic
+      en padding voor de configfile, zodat de Hop-imager de image van elk
+      bord kan schrijven en de config erin zet (en de kern hem vindt);
+      dan stelt Derek alles weer in zonder losse cfg's en sticks.
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na een flip één `NEXT_STORE failed`.
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
