@@ -241,6 +241,7 @@ Vitals met 1 core, 128 MiB, slot 3; `vitals4` op :8091 met 4 cores en
 | Sequentieel 1 GiB, schrijven / lezen, MB/s | **2549 / 2459 (A57b, 04-10)** | | A57b 04-10 |
 | Willekeurig 4 KiB, schrijven / lezen, IOPS | **141.000 / 24.500 (A57b, 04-10)** | | A57b 04-10 |
 | Willekeurig 4 KiB lezen, 16 tegelijk, IOPS | **186.000 (762 MB/s) (A57b, 04-10)** | | A57b 04-10 |
+| Willekeurig 4 KiB lezen door apps, opdrachten/s | **met de bundel (`read_many`, fd11581; A74f, 04-10): 1 app één per call 18.827, bundel 4 38.787, bundel 16 100.418, twee bundels 159.369; 4 apps 54.293 / 99.353 / 249.103; 8 apps 84.995 / 123.567 / 305.060; vóór de bundel (A56g) 18.918 / 55.645 / 78.944** | | A74f 04-10 |
 
 Nog te meten: de verbindingscyclus en de storm over de draad.
 
@@ -580,7 +581,7 @@ spin en spin-tunnel). M20 tot M33, 01-10, voor in de node en opslag.
 | Kern naar app zonder schijf (`hole=1`), MB/s | **1511 (256 MiB) (M40, 04-10)**; 1879–1917 (M24, 01-10) | | M40 04-10 |
 | App-opslag 256 MiB, schrijven / lezen, MB/s | **1288 / 1675 (4 KiB 111) (M40, 04-10)**; 1269–1270 / 1683–1696 (M24, 01-10) | 1598–1657 / 1064–1072 | M40 04-10 |
 | 4 KiB schrijven als RPC-lus, MB/s | 82 (naast een bulk-app 15–19) | | 01-10 |
-| Willekeurig 4 KiB lezen door apps, opdrachten/s | **zonder schijf (`hole=1`, alleen het pad app naar OS-core naar app): 1 app 30.986 (p50 28 µs), 2 apps 41.701, 4 apps 66.089, 6 apps 76.577; naast spin; echt lezen niet gemeten (schrijft eerst 256 MiB per app) (M40, 04-10)**; 1 app 7600, 2 apps 14.500, 4 apps 25.500 | | M40 04-10 |
+| Willekeurig 4 KiB lezen door apps, opdrachten/s | **met de bundel (`read_many`, fd11581; M70b, 04-10): 1 app één per call 8.399, bundel 4 21.758, bundel 16 55.834, twee bundels 80.521; 4 apps 28.843 / 77.829 / 161.485; 6 apps 39.744 / 104.493 / 171.345 (rauw 175k met zestien); naast spin**; zonder schijf (`hole=1`, alleen het pad app naar OS-core naar app): 1 app 30.986 (p50 28 µs), 2 apps 41.701, 4 apps 66.089, 6 apps 76.577; naast spin; echt lezen niet gemeten (schrijft eerst 256 MiB per app) (M40, 04-10)**; 1 app 7600, 2 apps 14.500, 4 apps 25.500 | | M40 04-10 |
 | Replica (SQLite op HopFS), persist-proef, ms | 193, over een flip heen | | M33 01-10 |
 
 Lezing: op M40 haalt app naar app op een P-core 4350 MB/s waar M33 6379

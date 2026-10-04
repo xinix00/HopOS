@@ -39,15 +39,9 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Agent op de Altra: gebundeld lezen door apps, zoals io_uring. Nu is
-      elke lees van een app één RPC door de OS-core met één opdracht in de
-      lucht (M4 01-10: 7.600 per app, 36.000 met acht apps, Linux op
-      dezelfde M4 100.000 tot 200.000; rauw in de kern 175k en op de Altra
-      289k met 16 tegelijk). Eén op die tot 16 leesopdrachten per aanroep
-      bij de drive zet en met één kick terugkomt, `read_many` in applib,
-      bench met een diepte per app; doel richting het rauwe plafond.
-- [ ] Daarna HopOS 3.0.8 (het Altra-image van v3.0.7 boot niet, het
-      config-venster en `hop image` zijn nieuw, de GEM van de Pi 5, handoff),
+- [ ] HopOS 3.0.8 (het Altra-image van v3.0.7 boot niet; nieuw: het
+      config-venster en `hop image`, de GEM van de Pi 5, handoff, de
+      console-pomp, gebundeld lezen),
       Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw), en de media met
       `hop image --config`: Radxa-kaart (v3.0.5 stormt na 2 GiB door de
       MMC-maskers), Altra-stick, M4 via Recovery (Hop is daar nog 3.0.0 en
@@ -109,6 +103,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Later
 
+- [ ] Lezen door apps verder dan de bundel: een bundel antwoordt pas als
+      zijn traagste lees terug is (5,3 keer de enkele per app met één
+      bundel, 8,5 met twee); tien keer vraagt voltooiingen los van de call,
+      zoals io_uring, met een ring. Pas als een werklast het vraagt.
+- [ ] De SN770 van de Altra wordt na minuten willekeurig lezen over 1 tot 2 GB
+      op het device trager (38 naar 70 us per lees), blijft zo na 150 s rust
+      en herstelt bij een controller-reset (flip); de kern bleef 14 us.
 - [ ] LicheeRV: de 16550-console wacht nog per teken (de PL011-borden
       hebben sinds de conport-pomp een niet-wachtende UART); een
       `write_nowait` dat tot de FIFO-diepte schrijft op THRE (Linux
