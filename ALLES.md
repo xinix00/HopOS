@@ -39,11 +39,20 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Agent op de Altra: NVMe lezen (waarom 16 tegelijk maar 4,5 tot 7,6
-      keer de enkele oplevert, en de 19 us per 4 KiB); het punt staat bij
-      Fixen.
-- [ ] Agent op de Pi 4: de rtt naar de kern met p99 5 tot 9 ms; het punt
-      staat bij Fixen.
+- [ ] Agent op de Altra. NVMe lezen is traag, schrijven niet: O6N 4 KiB lezen 212 MB/s (19 us
+      per opdracht) tegen 537 schrijven, willekeurig lezen 15,6k IOPS met
+      één opdracht en 71k met 16 tegelijk (4,5 keer, niet 16), sequentieel
+      3038 tegen 3586; Altra 4 KiB lezen 24,5k tegen 141k schrijven (186k
+      met 16); M4 11,9k tegen 140k. Schrijven wordt uit de DRAM van de SSD
+      bevestigd, lezen moet naar het flash, dus één opdracht tegelijk is
+      latentie: de leesweg moet meer opdrachten in de lucht houden (de
+      read-ahead van hopfs voor sequentieel, de wachtrij van 16 voor
+      willekeurig, en kijken waar de 19 us per 4 KiB zit).
+- [ ] Agent op de Pi 4. rtt naar de kern p99 5 tot 9 ms terwijl p50 100 tot 300 us is: O6N
+      7761, Pi 5 9141, Pi 4 5312, Altra 9218 in `all` (alleen 158); M4 146
+      en Radxa 681 niet. Ook de timer-overslaap p99 2,7 tot 10 ms (M4,
+      LicheeRV). Een hapering van ~10 ms in de kern-weg (TURN_CAP, de
+      dvfs-sample van 10 ms, de switch-ronde?): zoeken.
 - [ ] Daarna HopOS 3.0.8 (het Altra-image van v3.0.7 boot niet, het
       config-venster en `hop image` zijn nieuw, de GEM van de Pi 5, handoff),
       Hop 3.0.8 (pin v3.0.8, lean v3.1.9, hop-gui opnieuw), en de media met
@@ -54,20 +63,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Fixen
 
-- [ ] NVMe lezen is traag, schrijven niet: O6N 4 KiB lezen 212 MB/s (19 us
-      per opdracht) tegen 537 schrijven, willekeurig lezen 15,6k IOPS met
-      één opdracht en 71k met 16 tegelijk (4,5 keer, niet 16), sequentieel
-      3038 tegen 3586; Altra 4 KiB lezen 24,5k tegen 141k schrijven (186k
-      met 16); M4 11,9k tegen 140k. Schrijven wordt uit de DRAM van de SSD
-      bevestigd, lezen moet naar het flash, dus één opdracht tegelijk is
-      latentie: de leesweg moet meer opdrachten in de lucht houden (de
-      read-ahead van hopfs voor sequentieel, de wachtrij van 16 voor
-      willekeurig, en kijken waar de 19 us per 4 KiB zit).
-- [ ] rtt naar de kern p99 5 tot 9 ms terwijl p50 100 tot 300 us is: O6N
-      7761, Pi 5 9141, Pi 4 5312, Altra 9218 in `all` (alleen 158); M4 146
-      en Radxa 681 niet. Ook de timer-overslaap p99 2,7 tot 10 ms (M4,
-      LicheeRV). Een hapering van ~10 ms in de kern-weg (TURN_CAP, de
-      dvfs-sample van 10 ms, de switch-ronde?): zoeken.
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
