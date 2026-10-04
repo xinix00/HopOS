@@ -57,7 +57,7 @@ const SCOPE: usize = 1024;
 /// vóór het volgende device, de Memory32Fixed-descriptors (0x86), de
 /// Extended Interrupt (0x89) en `_CCA`. Geen AML-interpreter: de Cix-tabel
 /// is statisch en dit patroon deterministisch te lezen (zoals de `_CPC` in
-/// `cpc.rs`). Het lagere venster is het RCSU, het hogere het blok.
+/// `fw::aml::cpc`). Het lagere venster is het RCSU, het hogere het blok.
 #[must_use]
 pub fn scan_dsdt(aml: &[u8]) -> Option<VpuWindows> {
     let at = aml.windows(HID.len()).position(|w| w == HID)?;

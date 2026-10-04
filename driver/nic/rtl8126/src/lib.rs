@@ -21,8 +21,9 @@
 //! registernamen en bits komen uit de gedeelde laag (`driver-mdio`).
 //!
 //! De interrupt heeft een eigen les, en die staat bij [`IrqAck::ack`] en
-//! [`flush`](netdev::Device::flush): masker dicht bij de ack, en pas na het
-//! pompen weer open, met een eigen blik op de ring.
+//! `rearm`: masker dicht bij de ack, en pas weer open als de pomp de ring
+//! leeg las ([`receive`](netdev::Device::receive)), met een eigen blik op
+//! de ring.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -180,10 +181,11 @@ impl IrqAck {
         // eiste; masker en status delen niets met de ringen.
         unsafe { dev::regs(self.base) }
     }
+}
 
+impl netdev::IrqAck for IrqAck {
     /// Laat de lijn los: eerst het masker dicht, dan IntrStatus in één keer
-    /// schoon (W1C van álle bits, `rtl8169_irq_mask_and_ack`). Geeft de
-    /// bits die stonden.
+    /// schoon (W1C van álle bits, `rtl8169_irq_mask_and_ack`).
     ///
     /// Alleen acken is niet genoeg; r8169 doet in zijn harde IRQ hetzelfde
     /// (`rtl_irq_disable`, dan NAPI, dan `rtl_irq_enable`). Zolang de ring
@@ -197,13 +199,11 @@ impl IrqAck {
     /// 0xffffffff maakte hem weg (18-09, bundel 44: 1.813 claims in 40 s met
     /// een rtt-run, p50 164 µs). Events die zo verdwijnen, zijn geen verlies:
     /// de pomp leest de ring, niet de bits.
-    pub fn ack(&self) -> u32 {
+    fn ack(&self) {
         let r = self.regs();
-        let st = r.intr_status.read();
         r.intr_mask.write(0);
         r.intr_status.write(u32::MAX);
         let _ = r.chip_cmd.read(); // commit: de PCI-writes posten
-        st
     }
 }
 
@@ -222,10 +222,8 @@ pub struct Rtl8126 {
     tx_head: u16,
     tx_pending: u16,
     irq: Option<&'static Signal>,
-    /// Meetlat: TX-doorbells.
-    pub doorbells: u64,
-    /// Meetlat: RX-descriptors met een fout, fragment of kromme lengte.
-    pub rx_bad: u64,
+    /// De meetlat; `doorbells` telt TxPoll.
+    stats: netdev::Stats,
 }
 
 impl Rtl8126 {
@@ -270,8 +268,7 @@ impl Rtl8126 {
             tx_head: 0,
             tx_pending: 0,
             irq: None,
-            doorbells: 0,
-            rx_bad: 0,
+            stats: netdev::Stats::default(),
         }
     }
 
@@ -808,14 +805,9 @@ impl Rtl8126 {
         dev::write32(d, DESC_OWN | end | BUF_SIZE as u32);
     }
 
-    /// Staat er een frame klaar op de kop van de RX-ring?
-    fn rx_waiting(&self) -> bool {
-        dev::read32(self.rx_desc(self.rx_head)) & DESC_OWN == 0
-    }
-
     fn ring_tx(&mut self) {
         self.regs().tx_poll.write(1);
-        self.doorbells += 1;
+        self.stats.doorbells += 1;
     }
 }
 
@@ -857,6 +849,7 @@ impl netdev::Device for Rtl8126 {
         let d = self.tx_desc(i);
         if dev::read32(d) & DESC_OWN != 0 {
             self.ring_tx();
+            self.stats.tx_full += 1;
             return Err(TxError::Full);
         }
         let buf = self.tx_bufs.add(u64::from(i) * BUF_SIZE as u64);
@@ -878,10 +871,50 @@ impl netdev::Device for Rtl8126 {
         Ok(())
     }
 
+    /// Haalt één frame op (zie `receive_one`).
+    ///
+    /// Leeg met een bedrade lijn: dan gaat het masker weer open (de ack
+    /// sloot het), en daarna kijkt de driver nog één keer. Een frame dat
+    /// tussen de lege lees en de W1C van `rearm` viel, maakt geen flank;
+    /// zonder die blik bleef het tot de vangrail liggen (de Go-pomp deed
+    /// daarvoor een extra ronde). Tot 04-10 stond de rearm in `flush`, en
+    /// die roept de pomp alleen na een ronde met werk.
+    fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+        if let Some(n) = self.receive_one(buf) {
+            return Some(n);
+        }
+        self.irq?;
+        self.rearm();
+        self.receive_one(buf)
+    }
+
+    /// Eén TxPoll per burst.
+    fn flush(&mut self) {
+        if self.tx_pending > 0 {
+            dev::mb();
+            self.ring_tx();
+            self.tx_pending = 0;
+        }
+    }
+
+    fn mac(&self) -> Mac {
+        self.mac
+    }
+
+    fn irq(&self) -> Option<&'static Signal> {
+        self.irq
+    }
+
+    fn stats(&self) -> netdev::Stats {
+        self.stats
+    }
+}
+
+impl Rtl8126 {
     /// Haalt één frame op. Een fout (RES), een fragment of een lengte die
     /// niet in de buffer past, wordt herwapend zonder kopie. Geen
     /// RX-doorbell: de MAC pollt de Own-bit zelf.
-    fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+    fn receive_one(&mut self, buf: &mut [u8]) -> Option<usize> {
         loop {
             let i = self.rx_head;
             let opts1 = dev::read32(self.rx_desc(i));
@@ -909,7 +942,7 @@ impl netdev::Device for Rtl8126 {
                     dev::copy_out(dst, src);
                 }
             } else {
-                self.rx_bad += 1;
+                self.stats.rx_bad += 1;
             }
             self.arm_rx(i);
             self.rx_head = (i + 1) % N_RX;
@@ -917,33 +950,6 @@ impl netdev::Device for Rtl8126 {
                 return Some(n);
             }
         }
-    }
-
-    /// Eén TxPoll per burst, en met een bedrade lijn de rearm (zie
-    /// [`IrqAck::ack`] en `rearm`). Een frame dat tussen de W1C en het
-    /// openen van het masker viel, maakt geen flank: daarom na de rearm een
-    /// blik op de kop van de ring, en staat daar iets, dan luidt de driver de
-    /// bel zelf (de Go-pomp deed daarvoor een extra ronde).
-    fn flush(&mut self) {
-        if self.tx_pending > 0 {
-            dev::mb();
-            self.ring_tx();
-            self.tx_pending = 0;
-        }
-        if let Some(bell) = self.irq {
-            self.rearm();
-            if self.rx_waiting() {
-                bell.set();
-            }
-        }
-    }
-
-    fn mac(&self) -> Mac {
-        self.mac
-    }
-
-    fn irq(&self) -> Option<&'static Signal> {
-        self.irq
     }
 }
 

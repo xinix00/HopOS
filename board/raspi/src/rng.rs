@@ -14,7 +14,8 @@
 
 use crate::Soc;
 use cpu::trng;
-use driver_rng200::{Mmio, Rng200};
+use dev::Mmio;
+use driver_rng200::Rng200;
 use sync::LocalCell;
 
 /// De naam van de bron, in de boot-log en in `cpu::drbg::source`.

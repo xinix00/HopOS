@@ -82,6 +82,7 @@ dependencies = [
  "driver-pcie",
  "driver-smpro",
  "executor",
+ "fw",
  "netdev",
  "sync",
 ]
@@ -257,6 +258,7 @@ dependencies = [
  "driver-gem",
  "driver-gicv2",
  "driver-mdio",
+ "driver-pcie",
  "driver-pl011",
  "netdev",
  "sync",
@@ -351,6 +353,7 @@ name = "driver-brcmpcie"
 version = "3.0.9"
 dependencies = [
  "dev",
+ "driver-pcie",
 ]
 
 [[package]]
@@ -525,6 +528,7 @@ name = "driver-smpro"
 version = "3.0.9"
 dependencies = [
  "dev",
+ "fw",
 ]
 
 [[package]]

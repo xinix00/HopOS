@@ -2,9 +2,12 @@
 //! implementaties, [`mmio::Mmio`] en [`pci::Pci`].
 //!
 //! Een virtio-driver (`driver-virtionet`, `driver-virtioblk`) praat alleen
-//! het protocol: status-handdruk, features, split-virtqueues in een
-//! DMA-regio, de device-config. Hoe die registers bereikt worden, verschilt
-//! per bus en is het enige dat deze crate bezit:
+//! het protocol: split-virtqueues in een DMA-regio en de device-config. Hoe
+//! die registers bereikt worden, verschilt per bus en is wat deze crate
+//! bezit, met wat beide drivers verder delen: de status-handdruk
+//! ([`Transport::negotiate`]), de publicatie van een avail-ring
+//! ([`publish`]), het interrupt-pad ([`IrqAck`]) en de fouten van het
+//! opzetten ([`Error`]).
 //!
 //! - **virtio-mmio** (QEMU virt, geen firmware): één registerblok van 0x200
 //!   bytes per slot, de config op 0x100.
@@ -38,7 +41,7 @@ use dev::Pa;
 pub mod mmio;
 pub mod pci;
 
-pub use mmio::Mmio;
+pub use mmio::{IrqAck, Mmio};
 pub use pci::Pci;
 
 #[cfg(test)]
@@ -59,10 +62,11 @@ pub mod status {
 /// VIRTIO_F_VERSION_1 (bit 32): bit 0 van feature-venster 1.
 pub const FEAT_VERSION_1_HI: u32 = 1 << 0;
 
-/// Hoe vaak [`Transport::reset`] de status leest voordat hij het opgeeft.
-/// QEMU reset synchroon (de eerste lees is al 0); de grens is er voor een
-/// device dat nooit terugkomt, zodat de boot niet eeuwig hangt.
-pub const RESET_POLLS: u32 = 100_000;
+/// Hoe lang [`Transport::reset`] op de status wacht voordat hij het
+/// opgeeft. QEMU reset synchroon (de eerste lees is al 0); de grens is er
+/// voor een device dat nooit terugkomt, zodat de boot niet eeuwig hangt
+/// (Linux wacht daar zonder grens).
+pub const RESET_NS: u64 = 1_000_000_000;
 
 /// Hoe vaak [`Transport::config_read64`] opnieuw leest als de
 /// config-generatie tussen de twee helften wisselt. Een device dat blijft
@@ -91,6 +95,31 @@ pub enum Error {
         /// De BAR-index.
         bar: u8,
     },
+    /// Wel virtio, maar een ander devicetype dan de driver drijft.
+    WrongDevice {
+        /// Wat de driver wilde (1 = net, 2 = blk).
+        want: u32,
+        /// Wat het device is.
+        got: u32,
+    },
+    /// Het device kwam niet terug uit de reset.
+    Reset,
+    /// Het device weigerde de features.
+    FeaturesRefused,
+    /// Een queue is er niet of is te klein.
+    NoQueue {
+        /// De queue.
+        queue: u16,
+        /// Wat het device bood (QueueNumMax).
+        offered: u16,
+    },
+    /// De DMA-regio van het board is te klein.
+    DmaTooSmall {
+        /// Wat nodig was.
+        need: u64,
+        /// Wat er was.
+        have: u64,
+    },
 }
 
 impl fmt::Display for Error {
@@ -107,6 +136,17 @@ impl fmt::Display for Error {
                 write!(f, "virtio: pci capability cfg_type {cfg_type} missing")
             }
             Self::BarUnassigned { bar } => write!(f, "virtio: pci BAR {bar} not assigned"),
+            Self::WrongDevice { want, got } => {
+                write!(f, "virtio: device id {got}, the driver wants {want}")
+            }
+            Self::Reset => f.write_str("virtio: device did not come back from reset"),
+            Self::FeaturesRefused => f.write_str("virtio: device refused the features"),
+            Self::NoQueue { queue, offered } => {
+                write!(f, "virtio: queue {queue} offers {offered} entries")
+            }
+            Self::DmaTooSmall { need, have } => {
+                write!(f, "virtio: DMA region too small ({need} > {have} bytes)")
+            }
         }
     }
 }
@@ -199,16 +239,59 @@ pub trait Transport {
     }
 
     /// Reset het device: status 0 schrijven en wachten tot hij 0 leest
-    /// (§4.1.4.3.2: een PCI-device mag de reset asynchroon doen). `false`
-    /// als het device na [`RESET_POLLS`] lezen niet terug is.
+    /// (§4.1.4.3.2: een PCI-device mag de reset asynchroon doen), op de
+    /// klok `now` (monotone nanoseconden). `false` als het device na
+    /// [`RESET_NS`] niet terug is.
     ///
     /// Nodig ook omdat de firmware het device al gebruikte: EDK2 reset zijn
     /// virtio-devices bij ExitBootServices, maar de driver rekent daar niet
     /// op.
-    fn reset(&self) -> bool {
+    fn reset(&self, now: fn() -> u64) -> bool {
         self.set_status(0);
-        (0..RESET_POLLS).any(|_| self.status() == 0)
+        dev::poll_until(now, RESET_NS, || self.status() == 0)
     }
+
+    /// De status-handdruk tot en met FEATURES_OK (§3.1.1): [`reset`],
+    /// ACKNOWLEDGE, DRIVER, dan de driver-features (wat `want` uit
+    /// venster 0 kiest, en VERSION_1 in venster 1), FEATURES_OK, en kijken
+    /// of het device dat bit liet staan. `want` mag de device-features
+    /// lezen; hij draait na DRIVER, zoals de spec vraagt. Geeft wat de
+    /// driver in venster 0 zette.
+    ///
+    /// [`reset`]: Transport::reset
+    fn negotiate(&self, now: fn() -> u64, want: impl FnOnce(&Self) -> u32) -> Result<u32>
+    where
+        Self: Sized,
+    {
+        if !self.reset(now) {
+            return Err(Error::Reset);
+        }
+        self.set_status(status::ACKNOWLEDGE);
+        self.set_status(status::ACKNOWLEDGE | status::DRIVER);
+        let lo = want(self);
+        self.set_driver_features(0, lo);
+        self.set_driver_features(1, FEAT_VERSION_1_HI);
+        self.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
+        if self.status() & status::FEATURES_OK == 0 {
+            return Err(Error::FeaturesRefused);
+        }
+        Ok(lo)
+    }
+
+    /// DRIVER_OK, na de queues: vanaf nu gebruikt het device ze.
+    fn driver_ok(&self) {
+        self.set_status(
+            status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
+        );
+    }
+}
+
+/// Publiceert avail.idx van de avail-ring op `avail`: de ring vóór de
+/// index, de index vóór de doorbell (de barrières aan beide kanten).
+pub fn publish(avail: Pa, idx: u16) {
+    dev::mb();
+    dev::write16(avail.add(2), idx);
+    dev::mb();
 }
 
 /// Splitst een adres in de lage en de hoge 32 bits: beide transports zetten

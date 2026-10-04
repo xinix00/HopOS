@@ -19,6 +19,7 @@ driver-gicv2 = { path = "../../driver/gicv2" }
 driver-gem = { path = "../../driver/nic/gem" }
 driver-mdio = { path = "../../driver/nic/mdio" }
 driver-brcmpcie = { path = "../../driver/brcmpcie" }
+driver-pcie = { path = "../../driver/pcie" }
 
 [lints]
 workspace = true

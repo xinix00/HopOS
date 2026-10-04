@@ -114,14 +114,18 @@ impl<'a, D: Device> Pump<'a, D> {
         n
     }
 
-    /// Eén ronde zonder wachten: TX, dan een RX-burst, dan de doorbells.
-    /// `true` = er was werk.
+    /// Eén ronde zonder wachten: TX, dan een RX-burst, dan de doorbells,
+    /// en de meetlat van de driver naar de tellers. `true` = er was werk.
     pub fn pass(&mut self) -> bool {
         let sent = self.tx_pass();
         let got = self.rx_pass();
         if sent || got > 0 {
             self.nic.flush();
         }
+        let n = self.nic.stats();
+        self.stats.nic_rx_bad.store(n.rx_bad, Relaxed);
+        self.stats.nic_tx_full.store(n.tx_full, Relaxed);
+        self.stats.nic_doorbells.store(n.doorbells, Relaxed);
         if got > 0 {
             // De burst ligt bij de switch: hem nú wekken, niet pas bij HOP's
             // idle of de failsafe. Onder inbound verkeer is HOP nooit idle,
@@ -191,6 +195,12 @@ mod tests {
         fn mac(&self) -> Mac {
             Mac([2, 0, 0, 0, 0, 9])
         }
+        fn stats(&self) -> netdev::Stats {
+            netdev::Stats {
+                doorbells: self.flushes as u64,
+                ..netdev::Stats::default()
+            }
+        }
     }
 
     fn leak<T>(v: T) -> &'static T {
@@ -213,6 +223,11 @@ mod tests {
         assert!(p.pass());
         assert_eq!(ing_rx.len(), RX_BATCH, "één burst is RX_BATCH frames");
         assert_eq!(p.nic().flushes, 1, "één doorbell per burst");
+        assert_eq!(
+            stats.nic_doorbells.load(Relaxed),
+            1,
+            "de meetlat van de NIC"
+        );
         assert!(door.is_set());
         assert!(p.pass());
         assert_eq!(ing_rx.len(), 40);

@@ -26,9 +26,8 @@ driver-rtl8126 = { path = "../../driver/nic/rtl8126" }
 driver-nvme = { path = "../../driver/nvme" }
 driver-scmi = { path = "../../driver/scmi" }
 driver-dvfs = { path = "../../driver/dvfs" }
-
-# De `_PRT`-toets van `probe::nic_intid` tegen de echte DSDT.
-[dev-dependencies]
+# De `_CPC`-lezer (`fw::aml::cpc`), en in de toetsen de `_PRT` van
+# `probe::nic_intid` tegen de echte DSDT.
 fw = { path = "../../fw" }
 
 # Geen doc-voorbeelden: de doctest-ronde zou alleen de hele

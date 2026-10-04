@@ -7,8 +7,11 @@
 //! per DVFS-domein, een SCMI-fastchannel) en de core-klassen (de
 //! HighestPerformance per core, omdat de Cix-firmware de efficiëntieklasse
 //! in de MADT niet invult). Wat niet parsebaar is, wordt overgeslagen: dit
-//! is invoer voor de klok, nooit een boot-blokker.
+//! is invoer voor de klok, nooit een boot-blokker. PkgLength en de
+//! integer-constanten zijn die van de `_PRT`-lezer erboven.
 
+use super::{NAME_OP, PACKAGE_OP, integer, pkg_len};
+use crate::bytes::le64;
 use bounded::BoundedVec;
 
 /// Hoeveel `_CPC`'s we bewaren: één per core, en de O6N heeft er twaalf.
@@ -63,24 +66,10 @@ impl Cpc {
     }
 }
 
-const NAME_OP: u8 = 0x08;
-const AML_ZERO: u8 = 0x00;
-const AML_ONE: u8 = 0x01;
-const AML_BYTE: u8 = 0x0a;
-const AML_WORD: u8 = 0x0b;
-const AML_DWORD: u8 = 0x0c;
-const AML_QWORD: u8 = 0x0e;
 const AML_BUFFER: u8 = 0x11;
-const AML_PACKAGE: u8 = 0x12;
-const AML_ONES: u8 = 0xff;
 /// Generic Register descriptor (large item).
 const GAS_DESCRIPTOR: u8 = 0x82;
 const GAS_SYSTEM_MEMORY: u8 = 0x00;
-
-fn le(b: &[u8], off: usize, n: usize) -> Option<u64> {
-    let s = b.get(off..off.checked_add(n)?)?;
-    Some(s.iter().rev().fold(0u64, |a, &x| (a << 8) | u64::from(x)))
-}
 
 /// Loopt de AML-bytes af op `_CPC` (na NameOp) en parseert het Package
 /// erachter; de laatst geziene `_UID`-integer is de processor. Voegt toe
@@ -92,7 +81,7 @@ pub fn scan(aml: &[u8], out: &mut BoundedVec<Cpc, MAX_CPCS>) {
         if aml.get(i) == Some(&NAME_OP) {
             match aml.get(i + 1..i + 5) {
                 Some(b"_UID") => {
-                    if let Some((v, _)) = integer(aml, i + 5) {
+                    if let Ok((v, _)) = integer(aml, i + 5) {
                         uid = Some(v as u32);
                     }
                 }
@@ -111,35 +100,6 @@ pub fn scan(aml: &[u8], out: &mut BoundedVec<Cpc, MAX_CPCS>) {
     }
 }
 
-/// Een AML PkgLength op `i`: (lengte, bytes van het lengteveld). De lengte
-/// telt het lengteveld zelf mee.
-fn pkg_length(b: &[u8], i: usize) -> Option<(usize, usize)> {
-    let lead = *b.get(i)?;
-    let n = usize::from(lead >> 6) + 1;
-    if n == 1 {
-        return Some((usize::from(lead & 0x3f), 1));
-    }
-    let mut l = usize::from(lead & 0x0f);
-    for k in 1..n {
-        l |= usize::from(*b.get(i + k)?) << (4 + 8 * (k - 1));
-    }
-    Some((l, n))
-}
-
-/// Een integer-constante op `i`: (waarde, breedte).
-fn integer(b: &[u8], i: usize) -> Option<(u64, usize)> {
-    match *b.get(i)? {
-        AML_ZERO => Some((0, 1)),
-        AML_ONE => Some((1, 1)),
-        AML_ONES => Some((u64::MAX, 1)),
-        AML_BYTE => Some((le(b, i + 1, 1)?, 2)),
-        AML_WORD => Some((le(b, i + 1, 2)?, 3)),
-        AML_DWORD => Some((le(b, i + 1, 4)?, 5)),
-        AML_QWORD => Some((le(b, i + 1, 8)?, 9)),
-        _ => None,
-    }
-}
-
 /// Eén element van het package: een integer óf een register.
 #[derive(Clone, Copy, Default)]
 struct Elem {
@@ -152,10 +112,10 @@ struct Elem {
 
 /// Het Package op `i`, element voor element.
 fn package(b: &[u8], i: usize) -> Option<Cpc> {
-    if *b.get(i)? != AML_PACKAGE {
+    if *b.get(i)? != PACKAGE_OP {
         return None;
     }
-    let (l, n) = pkg_length(b, i + 1)?;
+    let (l, n) = pkg_len(b, i + 1)?;
     let end = i + 1 + l;
     if end > b.len() {
         return None;
@@ -166,7 +126,7 @@ fn package(b: &[u8], i: usize) -> Option<Cpc> {
     let mut elems = [Elem::default(); 24];
     let mut k = 0;
     while k < count && p < end {
-        let e = if let Some((v, w)) = integer(b, p) {
+        let e = if let Ok((v, w)) = integer(b, p) {
             p += w;
             Elem {
                 val: v,
@@ -178,13 +138,13 @@ fn package(b: &[u8], i: usize) -> Option<Cpc> {
             if *b.get(p)? != AML_BUFFER {
                 return None;
             }
-            let (bl, bn) = pkg_length(b, p + 1)?;
+            let (bl, bn) = pkg_len(b, p + 1)?;
             let buf_end = p + 1 + bl;
             if buf_end > end {
                 return None;
             }
             // BufferSize (een integer-constante), dan de ruwe bytes.
-            let (_, w) = integer(b, p + 1 + bn)?;
+            let (_, w) = integer(b, p + 1 + bn).ok()?;
             let q = p + 1 + bn + w;
             let mut e = Elem {
                 is_reg: true,
@@ -198,7 +158,7 @@ fn package(b: &[u8], i: usize) -> Option<Cpc> {
             if q + 15 <= buf_end && b.get(q..q + 3) == Some(&[GAS_DESCRIPTOR, 0x0c, 0x00][..]) {
                 e.space = *b.get(q + 3)?;
                 e.bits = *b.get(q + 4)?;
-                e.addr = le(b, q + 7, 8)?;
+                e.addr = le64(b, q + 7)?;
             }
             p = buf_end;
             e
@@ -243,9 +203,13 @@ fn package(b: &[u8], i: usize) -> Option<Cpc> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
     use std::vec::Vec;
+
+    const AML_ZERO: u8 = 0x00;
+    const AML_BYTE: u8 = 0x0a;
+    const AML_DWORD: u8 = 0x0c;
 
     /// Een `Register(SystemMemory, bits, 0, addr, access)` als AML-buffer.
     fn reg(bits: u8, addr: u64) -> Vec<u8> {
@@ -268,7 +232,7 @@ pub(crate) mod tests {
 
     /// `Name(_UID, uid)` en `Name(_CPC, Package(23) {...})` zoals de Cix-DSDT
     /// ze draagt.
-    pub(crate) fn processor(uid: u32, highest: u32, nl: u32, lowest: u32, desired: u64) -> Vec<u8> {
+    fn processor(uid: u32, highest: u32, nl: u32, lowest: u32, desired: u64) -> Vec<u8> {
         let mut elems: Vec<Vec<u8>> = std::vec![
             std::vec![AML_BYTE, 23],
             std::vec![AML_BYTE, 3],
@@ -286,7 +250,7 @@ pub(crate) mod tests {
         elems.push(dword(highest * 8 / 10 * 2600 / 8192)); // NominalFrequency
         let body: Vec<u8> = elems.concat();
         let len = 1 + 1 + body.len() + 1; // count + body, PkgLength twee bytes
-        let mut pkg = std::vec![AML_PACKAGE, 0x40 | (len & 0x0f) as u8, (len >> 4) as u8, 23];
+        let mut pkg = std::vec![PACKAGE_OP, 0x40 | (len & 0x0f) as u8, (len >> 4) as u8, 23];
         pkg.extend(body);
         let mut out = std::vec![NAME_OP];
         out.extend(b"_UID");
@@ -333,13 +297,5 @@ pub(crate) mod tests {
         assert!(out.is_empty());
         assert_eq!(Cpc::default().perf(1800), (1800, false));
         assert_eq!(Cpc::default().mhz(1800), 0);
-    }
-
-    #[test]
-    fn pkg_length_decodes_one_to_four_bytes() {
-        assert_eq!(pkg_length(&[0x3f], 0), Some((0x3f, 1)));
-        assert_eq!(pkg_length(&[0x45, 0x12], 0), Some((0x125, 2)));
-        assert_eq!(pkg_length(&[0x81, 0x34, 0x12], 0), Some((0x12341, 3)));
-        assert_eq!(pkg_length(&[0x81, 0x34], 0), None);
     }
 }

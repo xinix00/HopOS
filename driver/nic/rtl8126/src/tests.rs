@@ -7,7 +7,7 @@
 //! niet Realteks parameters.
 
 use super::*;
-use netdev::Device as _;
+use netdev::{Device as _, IrqAck as _};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::vec;
@@ -369,7 +369,7 @@ fn receive_drops_errors_and_fragments() {
     dev::write32(m.dma.add(16), FIRST_FRAG | 100); // geen LastFrag
     dev::write32(m.dma.add(32), FIRST_FRAG | LAST_FRAG | 64);
     assert_eq!(n.receive(&mut [0; 4096]), Some(60));
-    assert_eq!((n.rx_head, n.rx_bad), (3, 2));
+    assert_eq!((n.rx_head, n.stats.rx_bad), (3, 2));
     // Leeg: de overflow-latches gaan weg, de andere bits blijven.
     dev::write32(at(m.base, 0x3c), INT_RX_OVERFLOW | INT_RX_OK);
     assert_eq!(n.receive(&mut [0; 4096]), None);
@@ -392,12 +392,12 @@ fn transmit_pads_batches_and_honours_ownership() {
     let mut out = [0u8; 60];
     dev::copy_out(&mut out, buf);
     assert!(out[..20].iter().all(|&b| b == 7) && out[20..].iter().all(|&b| b == 0));
-    assert_eq!(n.doorbells, 0, "TxPoll waits for flush");
+    assert_eq!(n.stats.doorbells, 0, "TxPoll waits for flush");
     n.flush();
-    assert_eq!(n.doorbells, 1);
+    assert_eq!(n.stats.doorbells, 1);
     assert_eq!(dev::read16(at(m.base, 0x90)), 1);
     n.flush();
-    assert_eq!(n.doorbells, 1, "nothing new, no doorbell");
+    assert_eq!(n.stats.doorbells, 1, "nothing new, no doorbell");
     for _ in 1..N_TX {
         n.transmit(&[1; 100]).unwrap();
     }
@@ -408,14 +408,14 @@ fn transmit_pads_batches_and_honours_ownership() {
     );
     // Descriptor 0 is nog van de NIC: vol, en de driver belt nog eens.
     assert_eq!(n.transmit(&[1; 100]), Err(TxError::Full));
-    assert_eq!(n.doorbells, 2);
+    assert_eq!(n.stats.doorbells, 2);
     dev::write32(tx(0), 0); // de NIC gaf hem terug
     n.transmit(&[1; 100]).unwrap();
     assert_eq!(n.transmit(&[]), Err(TxError::Size(0)));
 }
 
 #[test]
-fn the_irq_masks_on_ack_and_rearms_on_flush() {
+fn the_irq_masks_on_ack_and_rearms_on_an_empty_ring() {
     static BELL: Signal = Signal::new();
     let m = chip(0x649, false);
     let mut n = fake(&m);
@@ -423,18 +423,18 @@ fn the_irq_masks_on_ack_and_rearms_on_flush() {
     assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX, "mask open");
     let ack = n.irq_ack();
     dev::write32(at(m.base, 0x3c), INT_RX_OK);
-    assert_eq!(ack.ack(), INT_RX_OK);
+    ack.ack();
     assert_eq!(dev::read32(at(m.base, 0x38)), 0, "mask shut after the ack");
     assert_eq!(dev::read32(at(m.base, 0x3c)), u32::MAX, "W1C of every bit");
-    // De pomp leegt en flusht: het masker gaat weer open. Er staat geen
-    // frame, dus geen eigen bel.
-    assert!(!BELL.take());
+    // Een flush opent niets: dat doet pas een lege ring.
     n.flush();
-    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX);
-    assert!(!BELL.take());
-    // Een frame dat viel tussen de W1C en het openen: de flush ziet het en
-    // luidt de bel zelf.
+    assert_eq!(dev::read32(at(m.base, 0x38)), 0, "flush leaves the mask");
+    // Een frame op de ring: de pomp krijgt het, het masker blijft dicht.
     dev::write32(m.dma, FIRST_FRAG | LAST_FRAG | 64);
-    n.flush();
-    assert!(BELL.take());
+    assert_eq!(n.receive(&mut [0; 4096]), Some(60));
+    assert_eq!(dev::read32(at(m.base, 0x38)), 0, "not drained yet");
+    // Leeg: het masker gaat weer open.
+    assert_eq!(n.receive(&mut [0; 4096]), None);
+    assert_eq!(dev::read32(at(m.base, 0x38)), INT_RX);
+    assert!(!BELL.take(), "the driver never rings the bell itself");
 }

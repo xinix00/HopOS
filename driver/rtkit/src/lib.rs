@@ -341,11 +341,9 @@ pub struct Rtkit {
     base: Pa,
     name: &'static str,
     now: fn() -> u64,
-    pool: Pa,
-    pool_size: u64,
-    /// Bump-wijzer in de bufferregio. Geen vrijgave: de coprocessor houdt
-    /// zijn buffers vast zolang hij leeft.
-    pool_next: u64,
+    /// De bufferregio. Geen vrijgave: de coprocessor houdt zijn buffers
+    /// vast zolang hij leeft.
+    pool: dev::Bump,
     iop_power: u16,
     ap_power: u16,
     bufs: [Buf; SYS_EPS],
@@ -382,9 +380,7 @@ impl Rtkit {
             base,
             name,
             now,
-            pool,
-            pool_size,
-            pool_next: 0,
+            pool: dev::Bump::new(pool.0, pool_size),
             iop_power: 0,
             ap_power: 0,
             bufs: [Buf::default(); SYS_EPS],
@@ -602,19 +598,11 @@ impl Rtkit {
             n => n,
         };
         let size = want.next_multiple_of(BUF_ALIGN);
-        let fits = self
-            .pool_next
-            .checked_add(size)
-            .is_some_and(|end| end <= self.pool_size);
-        if !fits {
-            return Err(Error::NoRoom {
-                name: self.name,
-                ep,
-                size,
-            });
-        }
-        let pa = self.pool.add(self.pool_next);
-        self.pool_next += size;
+        let pa = Pa(self.pool.take(size, BUF_ALIGN).ok_or(Error::NoRoom {
+            name: self.name,
+            ep,
+            size,
+        })?);
         dev::clear(pa, size as usize);
         dev::push(pa, size as usize);
         if let Some(slot) = self.bufs.get_mut(usize::from(ep)) {

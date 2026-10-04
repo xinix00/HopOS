@@ -65,7 +65,7 @@ pub(crate) fn start_its<I: Icc>(gic: &Gic<I>) {
     // als Device (`boot::build_map`, ook boven 1 TB); ITS_DMA is een eigen
     // stuk van de NC-gemapte DMA-regio, 64 KB-gealigneerd, van niemand
     // anders (de const-toets in lib.rs).
-    let mut its = unsafe { Its::new(Pa(base), crate::ITS_DMA.base) };
+    let mut its = unsafe { Its::new(Pa(base), crate::ITS_DMA.base, cpu::idle::now) };
     let reused = gic.lpis_enabled();
     LPIS_REUSED.store(reused, Relaxed);
     if !reused {
@@ -172,7 +172,7 @@ fn its_for(base: u64, bdf: driver_pcie::Bdf) -> Result<usize, &'static str> {
     // SAFETY: het frame komt uit de MADT (de ITS die de IORT noemt) en is nu
     // Device-gemapt; `mem` is plek `slot - 1` van ITS_MORE_DMA, 64 KB-
     // gealigneerd, Normal-NC, en alleen van deze ITS (elke plek één keer).
-    let mut its = unsafe { Its::new(Pa(base), mem) }.beside(
+    let mut its = unsafe { Its::new(Pa(base), mem, cpu::idle::now) }.beside(
         prop,
         FIRST_LPI + (slot * driver_gicv3::its::MAX_LPIS) as u32,
     );

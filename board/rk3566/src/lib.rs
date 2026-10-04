@@ -68,7 +68,6 @@ mod tests;
 use abi::layout::Pool;
 use abi::ring::Coherence;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
-use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use cpu::irq::Line;
 use dev::Pa;
@@ -77,8 +76,9 @@ use driver_mdio::{Phy, rtl8211f};
 use driver_ns16550::Ns16550;
 use driver_stmmac::dwmac4::{self, CSR_100_150M, Dwmac4, IrqAck, Probe};
 use fw::fdt::Fdt;
+use netdev::AckSlot;
 use netdev::Mac;
-use sync::{Local, Signal};
+use sync::Signal;
 
 /// De debug-UART (UART2 op de 40-pins header: pin 8 TX, 10 RX, 6 GND):
 /// DesignWare APB, 16550-compatibel, `reg-shift = 2`. U-Boot liet hem op
@@ -211,15 +211,13 @@ static NIC_BELL: Signal = Signal::new();
 
 /// De ack van de NIC-lijn, gezet door `probe_nic`, gelezen door de
 /// dispatch-taak. Beide draaien op de executor van core 0.
-static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
 
 /// De device-ack van de NIC-lijn bij de dispatcher: masker dicht en status
 /// gewist (de level-lijn valt). De driver zet het masker weer open als de
 /// pomp de ring leeg las.
 fn nic_ack() {
-    if let Some(a) = NIC_ACK.get().get() {
-        a.ack();
-    }
+    NIC_ACK.ack();
 }
 
 /// De kopie van de DTB in de heap (adres, lengte; 0 = geen).
@@ -773,7 +771,7 @@ impl Board for Rk3566 {
                     Error::Nic("dwmac4 start failed")
                 })?;
         // 9. De lijn. Een lijn die niet aan wil, laat de NIC pollen.
-        NIC_ACK.get().set(Some(nic.irq_ack()));
+        NIC_ACK.set(nic.irq_ack());
         if cpu::irq::enable(Line(GMAC1_INTID), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
             nic.set_irq(&NIC_BELL);
         }

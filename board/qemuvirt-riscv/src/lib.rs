@@ -442,8 +442,9 @@ impl Board for QemuVirtRiscv {
         };
         // SAFETY: `base` is een virtio-mmio-transport van virt, en NET_DMA
         // is van deze driver alleen.
-        let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size) }
-            .map_err(|_| Error::Nic("virtio-net init failed"))?;
+        let mut nic =
+            unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size, cpu::riscv::idle::now) }
+                .map_err(|_| Error::Nic("virtio-net init failed"))?;
         NIC_IRQ.get().set(Some((irq, nic.irq_ack())));
         if cpu::irq::enable(Line(irq), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
             nic.set_irq(&NIC_BELL);

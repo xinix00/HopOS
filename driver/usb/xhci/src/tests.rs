@@ -80,18 +80,15 @@ fn ownership_hc(n: usize) -> Hc {
 #[test]
 fn arena_rejects_wrapped_allocation() {
     for mut a in [
-        Arena {
-            cur: u64::MAX - 8,
-            end: u64::MAX,
-        },
-        Arena { cur: 16, end: 32 },
+        Arena(dev::Bump::new(u64::MAX - 8, 8)),
+        Arena(dev::Bump::new(16, 16)),
     ] {
         assert!(
             a.alloc(u64::MAX, 4096).is_err(),
             "wrapped allocation accepted"
         );
     }
-    let mut a = Arena { cur: 16, end: 32 };
+    let mut a = Arena(dev::Bump::new(16, 16));
     assert!(a.alloc(8, 3).is_err(), "alignment that is no power of two");
 }
 
@@ -184,7 +181,10 @@ fn ten_root_hosts_fit_existing_dma_window() {
         block(h.start(Pa(start), span, &Clock)).unwrap_or_else(|e| panic!("host{i}: {e}"));
         assert_eq!(h.n_slots, usize::from(h.max_ports), "host{i}");
         assert!(h.res[h.n_slots].is_some() && h.res[h.n_slots + 1].is_none());
-        assert!(h.arena.cur <= start + span, "host{i} crossed DMA slice");
+        assert!(
+            h.arena.0.next() <= start + span,
+            "host{i} crossed DMA slice"
+        );
         assert_eq!(
             dev::read8(Pa(start + span - 1)),
             0xab,

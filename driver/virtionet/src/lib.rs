@@ -12,8 +12,9 @@
 //!
 //! De driver is een actor-onderdeel: wie hem heeft (`&mut self`) is de
 //! enige die de ringen aanraakt. Het interrupt-pad raakt alleen
-//! InterruptStatus/InterruptACK, via [`IrqAck`], en die registers delen
-//! niets met de ringen. Over PCI is er (nog) geen lijn: de driver pollt.
+//! InterruptStatus/InterruptACK, via [`IrqAck`] (van het transport), en die
+//! registers delen niets met de ringen. Over PCI is de lijn MSI-X zonder
+//! ack.
 //!
 //! Batching: [`transmit`](netdev::Device::transmit) en de RX-recycle zetten
 //! descriptors klaar; de doorbell (avail.idx publiceren plus QueueNotify)
@@ -31,10 +32,10 @@
     )
 )]
 
-use core::fmt;
 use core::mem::offset_of;
 use dev::Pa;
-use driver_virtiopci::{FEAT_VERSION_1_HI, Mmio, Transport, mmio, status};
+pub use driver_virtiopci::{Error, IrqAck};
+use driver_virtiopci::{Mmio, Transport, mmio};
 use netdev::{Mac, TxError};
 use sync::Signal;
 
@@ -74,46 +75,6 @@ pub const BUF_SIZE: usize = 2048;
 pub const MAX_QUEUE: u16 = 256;
 const DESC_BYTES: u64 = 16;
 
-/// Waarom de driver weigert.
-#[derive(Debug, PartialEq, Eq)]
-pub enum Error {
-    /// Geen virtio-mmio op dit adres.
-    NotVirtio,
-    /// Een legacy transport (QEMU zonder `force-legacy=false`).
-    Legacy,
-    /// Wel virtio, maar geen netwerkkaart.
-    NotNet(u32),
-    /// Het device kwam niet terug uit de reset.
-    Reset,
-    /// Het device weigerde VERSION_1.
-    FeaturesRefused,
-    /// Een queue is er niet (QueueNumMax = 0).
-    NoQueue(u32),
-    /// De DMA-regio is te klein.
-    DmaTooSmall {
-        /// Wat nodig was.
-        need: u64,
-        /// Wat er was.
-        have: u64,
-    },
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotVirtio => f.write_str("virtionet: no virtio-mmio"),
-            Self::Legacy => f.write_str("virtionet: legacy transport (need version 2)"),
-            Self::NotNet(id) => write!(f, "virtionet: device id {id} is not a network card"),
-            Self::Reset => f.write_str("virtionet: device did not come back from reset"),
-            Self::FeaturesRefused => f.write_str("virtionet: device refused VERSION_1"),
-            Self::NoQueue(q) => write!(f, "virtionet: queue {q} not available"),
-            Self::DmaTooSmall { need, have } => {
-                write!(f, "virtionet: DMA region too small ({need} > {have} bytes)")
-            }
-        }
-    }
-}
-
 /// De `Result` van deze crate.
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
@@ -128,26 +89,14 @@ pub unsafe fn is_modern_net(base: Pa) -> bool {
     unsafe { mmio::is_modern(base, DEVICE_NET) }
 }
 
-/// Een bump-allocator over de DMA-regio van de NIC.
-struct Dma {
-    next: u64,
-    end: u64,
-}
-
-impl Dma {
-    fn alloc(&mut self, size: u64, align: u64) -> Result<Pa> {
-        let p = self.next.next_multiple_of(align);
-        let end = p.saturating_add(size);
-        if end > self.end {
-            return Err(Error::DmaTooSmall {
-                need: end,
-                have: self.end,
-            });
-        }
-        self.next = end;
-        dev::clear(Pa(p), size as usize);
-        Ok(Pa(p))
-    }
+/// `size` bytes uit de DMA-regio van de NIC, gewist.
+fn alloc(dma: &mut dev::Bump, size: u64, align: u64) -> Result<Pa> {
+    let p = dma.take(size, align).ok_or(Error::DmaTooSmall {
+        need: size,
+        have: dma.left(),
+    })?;
+    dev::clear(Pa(p), size as usize);
+    Ok(Pa(p))
 }
 
 /// Eén split-virtqueue.
@@ -191,32 +140,9 @@ impl Vq {
         if self.avail_idx == self.published {
             return false;
         }
-        dev::mb();
-        dev::write16(self.avail.add(2), self.avail_idx);
-        dev::mb();
+        driver_virtiopci::publish(self.avail, self.avail_idx);
         self.published = self.avail_idx;
         true
-    }
-}
-
-/// Het interrupt-pad van de NIC: alleen InterruptStatus en InterruptACK.
-/// `Copy`, zodat het board hem naast de driver kan houden. Alleen over
-/// virtio-mmio: over PCI pollt de driver (geen lijn tot INTx via ACPI
-/// `_PRT` of MSI via de ITS er is).
-#[derive(Clone, Copy)]
-pub struct IrqAck {
-    t: Mmio,
-}
-
-impl IrqAck {
-    /// Bevestigt de interrupt: wat in InterruptStatus staat gaat terug naar
-    /// InterruptACK, waarop het device zijn level-lijn loslaat. Zonder deze
-    /// schrijf vuurt de lijn na de EOI meteen weer, hoe leeg de ring ook is.
-    /// Geeft de bits die stonden.
-    pub fn ack(&self) -> u32 {
-        // InterruptStatus en InterruptACK delen niets met de ringen, dus een
-        // kopie van het transport naast de driver is veilig.
-        self.t.ack_interrupt()
     }
 }
 
@@ -229,53 +155,52 @@ pub struct VirtioNet<T: Transport = Mmio> {
     rx: Vq,
     tx: Vq,
     irq: Option<&'static Signal>,
-    /// Meetlat: doorbells.
-    pub doorbells: u64,
-    /// Meetlat: RX-entries met een id of lengte die niet klopt.
-    pub rx_bad: u64,
+    /// De meetlat; `rx_bad` telt used-entries met een id of lengte die
+    /// niet klopt, `doorbells` de QueueNotifies van beide queues.
+    stats: netdev::Stats,
 }
 
 impl VirtioNet<Mmio> {
     /// Zet het device op het virtio-mmio-slot `base` op: reset, VERSION_1
     /// onderhandelen, RX- en TX-queue in `dma`, de RX-buffers publiceren,
-    /// DRIVER_OK.
+    /// DRIVER_OK. `clock` geeft monotone nanoseconden, voor de reset.
     ///
     /// # Safety
     ///
     /// `base` is een gemapt virtio-mmio-blok dat voor altijd blijft, en
     /// `[dma, dma+dma_size)` is gemapt geheugen dat alleen deze driver en
     /// het device gebruiken, nu en zolang het programma draait.
-    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64) -> Result<Self> {
+    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
         // SAFETY: de eerste helft van de voorwaarde van deze functie.
         let t = unsafe { Mmio::new(base) };
-        t.check().map_err(|e| match e {
-            driver_virtiopci::Error::Legacy { .. } => Error::Legacy,
-            _ => Error::NotVirtio,
-        })?;
+        t.check()?;
         // SAFETY: de tweede helft van de voorwaarde van deze functie.
-        unsafe { Self::with_transport(t, dma, dma_size) }
+        unsafe { Self::with_transport(t, dma, dma_size, clock) }
     }
 
     /// Het interrupt-pad, voor het board.
     #[must_use]
     pub fn irq_ack(&self) -> IrqAck {
-        IrqAck { t: self.t }
+        self.t.irq_ack()
     }
 }
 
 impl<T: Transport> VirtioNet<T> {
     /// Zet het device achter transport `t` op: reset, VERSION_1
     /// onderhandelen, RX- en TX-queue in `dma`, de RX-buffers publiceren,
-    /// DRIVER_OK.
+    /// DRIVER_OK. `clock` geeft monotone nanoseconden, voor de reset.
     ///
     /// # Safety
     ///
     /// `[dma, dma+dma_size)` is gemapt geheugen dat alleen deze driver en
     /// het device gebruiken, nu en zolang het programma draait.
-    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64) -> Result<Self> {
+    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
         let id = t.device_id();
         if id != DEVICE_NET {
-            return Err(Error::NotNet(id));
+            return Err(Error::WrongDevice {
+                want: DEVICE_NET,
+                got: id,
+            });
         }
         let mut n = Self {
             t,
@@ -284,31 +209,14 @@ impl<T: Transport> VirtioNet<T> {
             rx: Vq::default(),
             tx: Vq::default(),
             irq: None,
-            doorbells: 0,
-            rx_bad: 0,
+            stats: netdev::Stats::default(),
         };
-        let mut dma = Dma {
-            next: dma.0,
-            end: dma.0.saturating_add(dma_size),
-        };
-
-        // De status-handdruk: reset, ACK, DRIVER.
-        if !n.t.reset() {
-            return Err(Error::Reset);
-        }
-        n.t.set_status(status::ACKNOWLEDGE);
-        n.t.set_status(status::ACKNOWLEDGE | status::DRIVER);
+        let mut dma = dev::Bump::new(dma.0, dma_size);
 
         // Alleen VERSION_1. De device-features leest deze driver bewust
         // niet: QEMU levert een vaste, bekende set en wij onderhandelen
         // alleen VERSION_1.
-        n.t.set_driver_features(0, 0);
-        n.t.set_driver_features(1, FEAT_VERSION_1_HI);
-        let features_ok = status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK;
-        n.t.set_status(features_ok);
-        if n.t.status() & status::FEATURES_OK == 0 {
-            return Err(Error::FeaturesRefused);
-        }
+        n.t.negotiate(clock, |_| 0)?;
 
         let mut mac = [0u8; 6];
         for (i, b) in (0u32..).zip(mac.iter_mut()) {
@@ -327,16 +235,19 @@ impl<T: Transport> VirtioNet<T> {
         n.rx.avail_idx = n.qsize;
         n.rx.publish();
 
-        n.t.set_status(features_ok | status::DRIVER_OK);
+        n.t.driver_ok();
         n.notify(RX_QUEUE);
         Ok(n)
     }
 
-    fn setup_queue(&mut self, idx: u16, dma: &mut Dma) -> Result<Vq> {
+    fn setup_queue(&mut self, idx: u16, dma: &mut dev::Bump) -> Result<Vq> {
         self.t.select_queue(idx);
         let max = self.t.queue_num_max();
         if max == 0 {
-            return Err(Error::NoQueue(u32::from(idx)));
+            return Err(Error::NoQueue {
+                queue: idx,
+                offered: 0,
+            });
         }
         if self.qsize == 0 {
             // Een macht van twee: de ringindexen lopen als u16 rond, en
@@ -348,10 +259,10 @@ impl<T: Transport> VirtioNet<T> {
         let q = u64::from(self.qsize);
         self.t.set_queue_num(self.qsize);
         let vq = Vq {
-            desc: dma.alloc(q * DESC_BYTES, 16)?,
-            avail: dma.alloc(6 + 2 * q, 16)?,
-            used: dma.alloc(6 + 8 * q, 16)?,
-            bufs: dma.alloc(q * BUF_SIZE as u64, 16)?,
+            desc: alloc(dma, q * DESC_BYTES, 16)?,
+            avail: alloc(dma, 6 + 2 * q, 16)?,
+            used: alloc(dma, 6 + 8 * q, 16)?,
+            bufs: alloc(dma, q * BUF_SIZE as u64, 16)?,
             ..Vq::default()
         };
         self.t.set_queue_addrs(vq.desc, vq.avail, vq.used);
@@ -361,7 +272,7 @@ impl<T: Transport> VirtioNet<T> {
 
     fn notify(&mut self, queue: u16) {
         self.t.notify(queue);
-        self.doorbells += 1;
+        self.stats.doorbells += 1;
     }
 
     /// Hangt de bel van de NIC-interrupt aan de driver: de RX-pomp wacht
@@ -403,6 +314,7 @@ impl<T: Transport> netdev::Device for VirtioNet<T> {
         }
         self.tx.last_used = self.tx.used_idx();
         if self.tx.avail_idx.wrapping_sub(self.tx.last_used) >= self.qsize {
+            self.stats.tx_full += 1;
             return Err(TxError::Full);
         }
         let slot = self.tx.avail_idx % self.qsize;
@@ -436,15 +348,15 @@ impl<T: Transport> netdev::Device for VirtioNet<T> {
             let len = dev::read32(elem.add(4)) as usize;
             self.rx.last_used = self.rx.last_used.wrapping_add(1);
             let Ok(desc) = u16::try_from(id) else {
-                self.rx_bad += 1;
+                self.stats.rx_bad += 1;
                 continue;
             };
             if desc >= self.qsize {
-                self.rx_bad += 1;
+                self.stats.rx_bad += 1;
                 continue;
             }
             if len <= HDR_LEN || len > BUF_SIZE {
-                self.rx_bad += 1;
+                self.stats.rx_bad += 1;
                 self.recycle_rx(desc);
                 continue;
             }
@@ -474,6 +386,10 @@ impl<T: Transport> netdev::Device for VirtioNet<T> {
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
     }
+
+    fn stats(&self) -> netdev::Stats {
+        self.stats
+    }
 }
 
 #[cfg(test)]
@@ -481,12 +397,18 @@ mod tests {
     //! `receive_bounds_test.go`, geport: de driver op nep-geheugen.
     use super::*;
     use core::cell::{Cell, RefCell};
+    use driver_virtiopci::{FEAT_VERSION_1_HI, status};
     use netdev::Device as _;
 
     struct Fake {
         _regs: Vec<u64>,
         _mem: Vec<u64>,
         net: VirtioNet,
+    }
+
+    /// De reset van de nep-transport is synchroon; de klok telt niet.
+    fn clock() -> u64 {
+        0
     }
 
     fn pa(v: &mut [u64]) -> Pa {
@@ -515,8 +437,7 @@ mod tests {
             rx: Vq::default(),
             tx: Vq::default(),
             irq: None,
-            doorbells: 0,
-            rx_bad: 0,
+            stats: netdev::Stats::default(),
         };
         if rx {
             net.rx = q;
@@ -592,12 +513,12 @@ mod tests {
         n.transmit(&[2; 60]).unwrap();
         assert_eq!(n.transmit(&[3; 60]), Err(TxError::Full));
         assert_eq!(dev::read16(n.tx.avail.add(2)), 0);
-        assert_eq!(n.doorbells, 0);
+        assert_eq!(n.stats.doorbells, 0);
         n.flush();
         assert_eq!(dev::read16(n.tx.avail.add(2)), 2);
-        assert_eq!(n.doorbells, 1);
+        assert_eq!(n.stats.doorbells, 1);
         n.flush(); // niets nieuws: geen doorbell
-        assert_eq!(n.doorbells, 1);
+        assert_eq!(n.stats.doorbells, 1);
         // Het device verzond er één: er is weer plaats.
         dev::write16(n.tx.used.add(2), 1);
         n.transmit(&[4; 60]).unwrap();
@@ -713,7 +634,8 @@ mod tests {
         // SAFETY: `mem` leeft de hele test en is ruim genoeg voor twee
         // queues van vier.
         let mut n =
-            unsafe { VirtioNet::with_transport(FakeT::new(1, 6), dma, 3 * 1024 * 64) }.unwrap();
+            unsafe { VirtioNet::with_transport(FakeT::new(1, 6), dma, 3 * 1024 * 64, clock) }
+                .unwrap();
         assert_eq!(n.queue_size(), 4);
         assert_eq!(n.mac(), Mac([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]));
         let t = n.transport();
@@ -749,7 +671,7 @@ mod tests {
         assert_eq!(n.transport().notified.borrow().len(), 1);
         n.flush();
         assert_eq!(*n.transport().notified.borrow(), [RX_QUEUE, TX_QUEUE]);
-        assert_eq!(n.doorbells, 2);
+        assert_eq!(n.stats.doorbells, 2);
     }
 
     #[test]
@@ -757,15 +679,21 @@ mod tests {
         let mut mem = vec![0u64; 1024];
         let dma = pa(&mut mem);
         // SAFETY: `mem` leeft de hele test; er wordt niets in gezet.
-        let e = unsafe { VirtioNet::with_transport(FakeT::new(2, 4), dma, 8192) }.err();
-        assert_eq!(e, Some(Error::NotNet(2)));
+        let e = unsafe { VirtioNet::with_transport(FakeT::new(2, 4), dma, 8192, clock) }.err();
+        assert_eq!(e, Some(Error::WrongDevice { want: 1, got: 2 }));
         let mut t = FakeT::new(1, 4);
         t.refuse = true;
         // SAFETY: zie boven.
-        let e = unsafe { VirtioNet::with_transport(t, dma, 8192) }.err();
+        let e = unsafe { VirtioNet::with_transport(t, dma, 8192, clock) }.err();
         assert_eq!(e, Some(Error::FeaturesRefused));
         // SAFETY: zie boven.
-        let e = unsafe { VirtioNet::with_transport(FakeT::new(1, 0), dma, 8192) }.err();
-        assert_eq!(e, Some(Error::NoQueue(0)));
+        let e = unsafe { VirtioNet::with_transport(FakeT::new(1, 0), dma, 8192, clock) }.err();
+        assert_eq!(
+            e,
+            Some(Error::NoQueue {
+                queue: 0,
+                offered: 0
+            })
+        );
     }
 }

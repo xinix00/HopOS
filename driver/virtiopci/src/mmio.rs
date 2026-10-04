@@ -130,6 +130,12 @@ impl Mmio {
         self.base
     }
 
+    /// Het interrupt-pad, voor de dispatch van het board.
+    #[must_use]
+    pub const fn irq_ack(&self) -> IrqAck {
+        IrqAck(*self)
+    }
+
     /// Staat er virtio in het slot, en het moderne transport?
     pub fn check(&self) -> Result {
         let r = self.regs();
@@ -154,6 +160,22 @@ impl Mmio {
         let off = u64::from(off);
         let fits = off.is_multiple_of(width) && off + width <= SLOT_SIZE - CONFIG_OFF;
         fits.then(|| self.base.add(CONFIG_OFF + off))
+    }
+}
+
+/// Het interrupt-pad van een virtio-mmio-device (net of blk): alleen
+/// InterruptStatus en InterruptACK, die niets met de ringen delen. `Copy`,
+/// zodat het board hem naast de driver houdt (die is van de pomp of de
+/// hopfs-actor).
+#[derive(Clone, Copy, Debug)]
+pub struct IrqAck(Mmio);
+
+impl IrqAck {
+    /// Bevestigt de interrupt: wat in InterruptStatus staat gaat terug naar
+    /// InterruptACK, waarop het device zijn level-lijn loslaat. Zonder deze
+    /// schrijf vuurt de lijn na de EOI meteen weer, hoe leeg de ring ook is.
+    pub fn ack(&self) {
+        self.0.ack_interrupt();
     }
 }
 

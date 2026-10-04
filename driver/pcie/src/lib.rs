@@ -307,37 +307,19 @@ impl Bar {
 /// Een bereik waaruit het board BAR's uitdeelt op een kale fabric: elke
 /// BAR op zijn eigen maat gealigneerd (zo eist de spec het).
 #[derive(Copy, Clone, Debug)]
-pub struct MmioWindow {
-    next: u64,
-    end: u64,
-}
+pub struct MmioWindow(dev::Bump);
 
 impl MmioWindow {
     /// Het venster `[base, base + size)`.
     #[must_use]
     pub const fn new(base: u64, size: u64) -> Self {
-        Self {
-            next: base,
-            end: base.saturating_add(size),
-        }
+        Self(dev::Bump::new(base, size))
     }
 
     /// Een naturel gealigneerd stuk van `size` bytes (een macht van twee).
     pub fn alloc(&mut self, size: u64) -> Result<u64> {
         let size = size.max(16);
-        if !size.is_power_of_two() {
-            return Err(Error::NoSpace { size });
-        }
-        let at = self
-            .next
-            .checked_next_multiple_of(size)
-            .ok_or(Error::NoSpace { size })?;
-        let end = at.checked_add(size).ok_or(Error::NoSpace { size })?;
-        if end > self.end {
-            return Err(Error::NoSpace { size });
-        }
-        self.next = end;
-        Ok(at)
+        self.0.take(size, size).ok_or(Error::NoSpace { size })
     }
 }
 

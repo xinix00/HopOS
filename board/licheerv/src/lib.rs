@@ -47,7 +47,6 @@ pub mod watchdog;
 
 use abi::ring::Coherence;
 use board::{Board, CoreClass, Dispatched, Error, NoDisk, Plan, Region};
-use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use cpu::irq::Line;
 use cpu::riscv::clint::Clint;
@@ -56,8 +55,9 @@ use cpu::riscv::plic::{Plic, machine_context};
 use dev::Pa;
 use driver_ns16550::Ns16550;
 use driver_stmmac::dwmac1000::{self, Dwmac1000, IrqAck, Probe};
+use netdev::AckSlot;
 use netdev::Mac;
-use sync::{Local, Signal};
+use sync::Signal;
 
 /// UART0.
 pub const UART0: Pa = Pa(0x0414_0000);
@@ -137,15 +137,13 @@ static CLINT_OK: AtomicBool = AtomicBool::new(false);
 static NIC_BELL: Signal = Signal::new();
 /// De ack van de NIC-lijn, gezet door `probe_nic`, gelezen door de
 /// dispatch-taak. Beide draaien op de executor van de kern.
-static NIC_IRQ: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
 
 /// De device-ack van de NIC-lijn bij de dispatcher: masker dicht en status
 /// gewist (de level-lijn valt). De driver zet het masker weer open als de
 /// pomp de ring leeg las.
 fn nic_ack() {
-    if let Some(a) = NIC_IRQ.get().get() {
-        a.ack();
-    }
+    NIC_ACK.ack();
 }
 /// Leeft er een NIC uit `probe_nic`? Pas gezet na een gelukte probe: een
 /// mislukte (geen link) liet niets achter en mag opnieuw (hopos `nic_retry`).
@@ -519,7 +517,7 @@ impl Board for LicheeRv {
         // dan pollt de pomp (300 µs). De kern hoort een app op de C906L op de
         // failsafe van de switch (1 ms): er is geen bel van de C906L naar de
         // C906B.
-        NIC_IRQ.get().set(Some(nic.irq_ack()));
+        NIC_ACK.set(nic.irq_ack());
         if cpu::irq::enable(Line(GMAC_IRQ), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
             nic.set_irq(&NIC_BELL);
             cpu::println!("net: dwmac irq {GMAC_IRQ} on the PLIC HOPOS_NIC_IRQ");

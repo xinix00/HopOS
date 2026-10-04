@@ -6,12 +6,13 @@ use crate::{LINK_TIMEOUT_NS, is_nic, nic_irq_mode};
 use board::{Board, ClockKnob, CoreClass, Error, Thermal};
 use board_uefi::irq::{At, Mode, Wired};
 use board_uefi::{NET_BUF, NET_DMA, On, Platform, Uefi, pcie};
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use dev::Pa;
 use driver_igb::{Igb, IrqAck};
 use driver_nvme::{Nvme, pci::Pci};
 use driver_smpro::{HWMON_CHANNEL, Smpro};
 use executor::Executor;
+use netdev::AckSlot;
 use sync::{Local, Signal};
 
 // Het cacheable bufferblok van de stub (`net-wb`) is precies dat van de
@@ -26,7 +27,7 @@ static NIC_BELL: Signal = Signal::new();
 
 /// De ack van de igb (EIMC), voor de dispatch op de kern-core; gezet vóór
 /// de lijn scherp gaat.
-static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
 
 /// Hoe lang de zelftest op de afgevuurde vector wacht (zoals de tg3 op de
 /// M4).
@@ -59,9 +60,7 @@ impl core::fmt::Display for IntTest {
 
 /// De ack van de NIC-lijn, uit de dispatch vóór de EOI.
 fn igb_ack() {
-    if let Some(a) = NIC_ACK.get().get() {
-        a.ack();
-    }
+    NIC_ACK.ack();
 }
 
 /// De SMpro, zodra [`open_hwmon`] het PCC-kanaal opende. Alleen de
@@ -110,13 +109,13 @@ impl ClockKnob for Ampere {
 /// antwoord: één regel en verder zonder; telemetrie is nooit een
 /// boot-blokker.
 fn open_hwmon(pcct: &[u8]) {
-    let Some(p) = driver_smpro::pcc_from(pcct, HWMON_CHANNEL) else {
+    let Some(p) = fw::acpi::pcct_subspace(pcct, HWMON_CHANNEL) else {
         cpu::println!("hwmon: no PCC hwmon channel in the PCCT - temperature telemetry off");
         return;
     };
     // Shmem ligt in gereserveerd DRAM, de doorbell kan in hoge SoC-MMIO
     // wonen: zelfde luik als de hoge BAR's.
-    if !board_uefi::map_device(p.shmem.0, p.shmem_len) || !board_uefi::map_device(p.doorbell.0, 8) {
+    if !board_uefi::map_device(p.shmem, p.shmem_len) || !board_uefi::map_device(p.doorbell, 8) {
         cpu::println!("hwmon: PCC channel unreachable - temperature telemetry off");
         return;
     }
@@ -161,7 +160,7 @@ fn wire_nic(
     let seg = board_uefi::pcie_segments()
         .nth(hit.win)
         .map_or(0, |(_, s, _)| s);
-    NIC_ACK.get().set(Some(nic.irq_ack()));
+    NIC_ACK.set(nic.irq_ack());
     let at = At {
         ecam: e,
         seg,

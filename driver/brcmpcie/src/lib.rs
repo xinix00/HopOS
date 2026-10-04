@@ -41,6 +41,7 @@
 
 use core::fmt;
 use dev::{Pa, Reg};
+use driver_pcie::Bdf;
 
 #[cfg(test)]
 mod tests;
@@ -260,15 +261,8 @@ pub unsafe fn rescal(base: Pa, clock: fn() -> u64) -> bool {
         return false; // schrijft niet: het blok bestaat hier niet
     }
     let status = reg(base.add(8));
-    let mut ok = false;
     // Ruim boven Linux' 1 ms.
-    for _ in 0..20 {
-        if status.read() & 1 != 0 {
-            ok = true;
-            break;
-        }
-        dev::delay(clock, 100_000);
-    }
+    let ok = dev::poll_until(clock, 2_000_000, || status.read() & 1 != 0);
     start.update(|v| v & !1);
     ok
 }
@@ -581,13 +575,10 @@ impl Rc {
         });
         self.perst(false);
         dev::delay(self.clock, 100_000_000);
-        for _ in 0..40 {
+        let _ = dev::poll_until(self.clock, 200_000_000, || {
             let l = self.link_status();
-            if l.0 && l.1 {
-                return l;
-            }
-            dev::delay(self.clock, 5_000_000);
-        }
+            l.0 && l.1
+        });
         self.link_status()
     }
 
@@ -604,13 +595,19 @@ impl Rc {
         self.r(off::MISC_PCIE_STATUS).read()
     }
 
-    fn cfg(&self, bus: u8, dev: u8, func: u8, o: u64) -> &'static Reg<u32> {
+    /// Het adres van het dword met offset `o` in de configruimte: bus 0
+    /// is de RC zelf, dieper het EXT_CFG-venster (eerst de index).
+    fn cfg_at(&self, bus: u8, dev: u8, func: u8, o: u64) -> Pa {
         if bus == 0 {
-            return self.r(o & !3);
+            return self.base.add(o & !3);
         }
         self.r(off::EXT_CFG_INDEX).write(ecam_index(bus, dev, func));
         dev::mb();
-        self.r(off::EXT_CFG_DATA + (o & 0xffc))
+        self.base.add(off::EXT_CFG_DATA + (o & 0xffc))
+    }
+
+    fn cfg(&self, bus: u8, dev: u8, func: u8, o: u64) -> &'static Reg<u32> {
+        reg(self.cfg_at(bus, dev, func, o))
     }
 
     /// Configruimte lezen: bus 0 = de RC zelf, dieper via het
@@ -718,5 +715,26 @@ impl Rc {
     #[must_use]
     pub fn misc_ctrl(&self) -> u32 {
         self.r(off::MISC_CTRL).read()
+    }
+}
+
+/// De configruimte achter de RC voor `driver_pcie` (de capability-walk,
+/// MSI-X, de BAR's), met dezelfde regel als [`Rc::cfg_read32`]: nooit bus 1
+/// of dieper zonder DL_ACTIVE.
+impl driver_pcie::Config for Rc {
+    fn read32(&self, bdf: Bdf, off: u16) -> u32 {
+        self.cfg_read32(bdf.bus, bdf.dev, bdf.func, u64::from(off))
+    }
+
+    fn write32(&self, bdf: Bdf, off: u16, v: u32) {
+        self.cfg_write32(bdf.bus, bdf.dev, bdf.func, u64::from(off), v);
+    }
+
+    /// Een halfwoord door hetzelfde venster (Linux `brcm_pcie_ops`:
+    /// `pci_generic_config_write`).
+    fn write16(&self, bdf: Bdf, off: u16, v: u16) {
+        let at = self.cfg_at(bdf.bus, bdf.dev, bdf.func, u64::from(off));
+        dev::write16(at.add(u64::from(off & 2)), v);
+        dev::mb();
     }
 }

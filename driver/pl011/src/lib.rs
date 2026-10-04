@@ -23,8 +23,7 @@
 
 use core::fmt;
 use core::mem::offset_of;
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use dev::{Pa, Reg};
+use dev::{Pa, Reg, Stall};
 
 /// Het PL011-registerblok (ARM DDI 0183, tabel 3-1).
 #[repr(C)]
@@ -91,16 +90,18 @@ const CR_RXE: u32 = 1 << 9;
 /// De poll-grens op een volle TX-FIFO: ~1M leesacties is veel meer dan 16
 /// tekens op 115200 baud. Een ongeklokte of dode PL011 (de Pi 5-debug-UART
 /// zonder sessie) leest all-ones en zou de console anders eeuwig gijzelen;
-/// na deze grens valt de UART uit het printpad in plaats van de boot te
-/// laten hangen (Go-driver, `metal/driver/pl011`).
+/// na deze grens staat de lijn als gestokt ([`Stall`]) in plaats van de boot
+/// te laten hangen (Go-driver, `metal/driver/pl011`).
 const POLL_LIMIT: u32 = 1 << 20;
+/// Het budget per byte op een gestokte lijn: één blik. Een PL011 heeft geen
+/// lezer die later aanhaakt; komt hij terug, dan is zijn FIFO leeg en past
+/// de eerste byte meteen.
+const POLL_STALLED: u32 = 1;
 
 /// Eén PL011 op een vaste basis.
 pub struct Pl011 {
     base: Pa,
-    /// Bleef de TX-FIFO voorbij [`POLL_LIMIT`] vol, dan is de UART dood en
-    /// schrijven we er niet meer naar.
-    dead: AtomicBool,
+    tx: Stall,
 }
 
 impl Pl011 {
@@ -114,7 +115,7 @@ impl Pl011 {
     pub const unsafe fn new(base: Pa) -> Self {
         Self {
             base,
-            dead: AtomicBool::new(false),
+            tx: Stall::new(POLL_LIMIT, POLL_STALLED),
         }
     }
 
@@ -136,42 +137,31 @@ impl Pl011 {
         r.cr.write(CR_UARTEN | CR_TXE | CR_RXE);
     }
 
-    /// Is de UART uit het printpad gevallen?
+    /// De stand van de lijn ([`Stall`]), voor wie de UART per schrijf
+    /// opnieuw opbouwt.
     #[must_use]
-    pub fn is_dead(&self) -> bool {
-        self.dead.load(Relaxed)
+    pub fn tx(&self) -> &Stall {
+        &self.tx
     }
 
     /// Stuurt één byte, begrensd wachtend op ruimte in de TX-FIFO.
     pub fn putc(&self, c: u8) {
-        if self.dead.load(Relaxed) {
-            return;
-        }
         let r = self.regs();
-        let mut spins = 0u32;
-        while r.fr.read() & FR_TXFF != 0 {
-            spins += 1;
-            if spins > POLL_LIMIT {
-                self.dead.store(true, Relaxed);
-                return;
-            }
-        }
-        r.dr.write(u32::from(c));
+        self.tx
+            .put(|| r.fr.read() & FR_TXFF == 0, || r.dr.write(u32::from(c)));
     }
 
     /// Schrijft van `b` wat er nu in de TX-FIFO past, zonder te wachten,
     /// met `\n` als `\r\n`; geeft hoeveel bytes van `b` er helemaal uit
     /// zijn. Een `\n` waarvan alleen de `\r` nog paste, telt niet mee: de
     /// volgende schrijf begint er opnieuw mee, en de terminal ziet één `\r`
-    /// extra. Een dode UART slikt alles, zoals [`Pl011::write`].
+    /// extra. Wacht nooit, ook niet op een gestokte lijn: daar ziet de pomp
+    /// dat er niets meer uitgaat.
     ///
     /// Voor de pomp van de console (hopos `conport`): de schrijver van een
     /// regel wacht niet op de baudrate (Linux: `uart_port.xmit` met de
     /// TX-interrupt, in plaats van de console die per teken op TXFF spint).
     pub fn write_nowait(&self, b: &[u8]) -> usize {
-        if self.dead.load(Relaxed) {
-            return b.len();
-        }
         let r = self.regs();
         for (i, &c) in b.iter().enumerate() {
             if c == b'\n' {
@@ -233,15 +223,16 @@ mod tests {
     }
 
     #[test]
-    fn a_stuck_fifo_marks_the_uart_dead() {
+    fn a_stuck_fifo_stalls_the_line_until_a_byte_fits() {
         let (mut mem, u) = fake();
         mem[0x18 / 4] = FR_TXFF; // TX-FIFO blijft vol
         u.putc(b'x');
-        assert!(u.is_dead());
+        assert!(u.tx().is_stalled());
+        assert_eq!(mem[0], 0, "the byte fell");
         mem[0x18 / 4] = 0;
-        mem[0] = 0;
-        u.putc(b'y'); // dood blijft dood: DR onaangeroerd
-        assert_eq!(mem[0], 0);
+        u.putc(b'y'); // de FIFO is terug: de byte gaat erin
+        assert_eq!(mem[0], u32::from(b'y'));
+        assert!(!u.tx().is_stalled());
     }
 
     #[test]
@@ -253,7 +244,10 @@ mod tests {
         mem[0] = 0;
         assert_eq!(u.write_nowait(b"cd"), 0);
         assert_eq!(mem[0], 0, "a full FIFO gets nothing");
-        assert!(!u.is_dead(), "full is not dead: the pump comes back");
+        assert!(
+            !u.tx().is_stalled(),
+            "full is not stuck: the pump comes back"
+        );
     }
 
     #[test]

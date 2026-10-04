@@ -54,34 +54,16 @@ const COMMAND_TIMEOUT_NS: u64 = 1_000_000_000;
 /// dan van de ring af. Eén regel alignment koopt die hele klasse fouten af,
 /// en dat kost hier ruimte die we hebben.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Arena {
-    pub(crate) cur: u64,
-    pub(crate) end: u64,
-}
+pub(crate) struct Arena(pub(crate) dev::Bump);
 
 impl Arena {
-    /// Wat er nog vrij is.
-    pub(crate) fn left(&self) -> u64 {
-        self.end.saturating_sub(self.cur)
-    }
-
     /// Deelt `n` bytes uit op een veelvoud van `align` (een macht van twee)
     /// en wist ze.
     pub(crate) fn alloc(&mut self, n: u64, align: u64) -> Result<Pa> {
-        let full = Error::DmaFull {
+        let p = self.0.take(n, align).ok_or(Error::DmaFull {
             want: n,
-            left: self.left(),
-        };
-        if align == 0 || !align.is_power_of_two() {
-            return Err(full);
-        }
-        let Some(p) = self.cur.checked_add(align - 1).map(|v| v & !(align - 1)) else {
-            return Err(full);
-        };
-        if p > self.end || n > self.end - p {
-            return Err(full);
-        }
-        self.cur = p + n;
+            left: self.0.left(),
+        })?;
         dev::clear(Pa(p), n as usize);
         Ok(Pa(p))
     }
@@ -160,7 +142,7 @@ impl Hc {
         // overschreven nadat de hardware gereset is.
         self.dma_base = dma;
         self.dma_size = size;
-        self.arena = Arena { cur: dma.0, end };
+        self.arena = Arena(dev::Bump::new(dma.0, size));
 
         // Paginagrootte van de controller: bit n is 2^(n+12). Vrijwel altijd
         // 4KB, maar de scratchpad-buffers moeten er exact op passen dus we
@@ -259,18 +241,14 @@ impl Hc {
         const ALIGN: u64 = crate::TRB_MAX as u64;
         self.bulk_buf = Pa(0);
         self.bulk_size = 0;
-        let Some(start) = self
-            .arena
-            .cur
-            .checked_add(ALIGN - 1)
-            .map(|v| v & !(ALIGN - 1))
-        else {
+        let end = self.arena.0.end();
+        let Some(start) = self.arena.0.next().checked_next_multiple_of(ALIGN) else {
             return;
         };
-        if start >= self.arena.end {
+        if start >= end {
             return;
         }
-        let want = ((self.arena.end - start) & !(self.page - 1)).min(BULK_BUF_MAX);
+        let want = ((end - start) & !(self.page - 1)).min(BULK_BUF_MAX);
         if want >= BULK_BUF_MIN
             && let Ok(buf) = self.arena.alloc(want, ALIGN)
         {

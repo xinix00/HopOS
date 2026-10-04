@@ -38,7 +38,6 @@ pub mod class;
 pub mod clock;
 #[cfg(feature = "media")]
 pub mod codec;
-pub mod cpc;
 mod machine;
 pub mod probe;
 pub mod thermal;

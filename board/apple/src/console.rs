@@ -22,8 +22,7 @@
 //! een lezerloze FIFO geen 2 ms per byte, maar komt een lezer die later
 //! aanhaakt wél weer in beeld (Go `console.go`).
 
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use dev::Pa;
+use dev::{Pa, Stall};
 
 /// De dockchannel van de t8132 (GEMETEN 28-08).
 pub const DOCKCHANNEL: u64 = crate::head::DOCK_FALLBACK;
@@ -36,29 +35,21 @@ const UTRSTAT: u64 = 0x10;
 const UTXH: u64 = 0x20;
 const UTRSTAT_TXBE: u32 = 1 << 1;
 
-/// De poll per byte; en als de vorige byte al niet paste.
+/// De poll per byte; en als de vorige byte al niet paste. Hier groter dan
+/// op een PL011: de dockchannel is een FIFO naar een lezer die later kan
+/// aanhaken.
 const POLL_MAX: u32 = 20_000;
 const POLL_STALLED: u32 = 256;
 
-static DOCK_STALLED: AtomicBool = AtomicBool::new(false);
-static UART_STALLED: AtomicBool = AtomicBool::new(false);
+static DOCK_LINE: Stall = Stall::new(POLL_MAX, POLL_STALLED);
+static UART_LINE: Stall = Stall::new(POLL_MAX, POLL_STALLED);
 
-/// Wacht begrensd tot `ready` en schrijft dan `c`; lukt dat niet binnen
-/// het budget, dan valt de byte en staat de lijn als gestokt.
-fn put(status: Pa, ready: impl Fn(u32) -> bool, data: Pa, c: u8, stalled: &AtomicBool) {
-    let budget = if stalled.load(Relaxed) {
-        POLL_STALLED
-    } else {
-        POLL_MAX
-    };
-    for _ in 0..budget {
-        if ready(dev::read32(status)) {
-            dev::write32(data, u32::from(c));
-            stalled.store(false, Relaxed);
-            return;
-        }
-    }
-    stalled.store(true, Relaxed);
+/// Wacht begrensd tot `ready` en schrijft dan `c` (`dev::Stall`).
+fn put(status: Pa, ready: impl Fn(u32) -> bool, data: Pa, c: u8, tx: &Stall) {
+    tx.put(
+        || ready(dev::read32(status)),
+        || dev::write32(data, u32::from(c)),
+    );
 }
 
 fn put_both(c: u8) {
@@ -68,7 +59,7 @@ fn put_both(c: u8) {
         |v| v != 0,
         d.add(DOCK_TX),
         c,
-        &DOCK_STALLED,
+        &DOCK_LINE,
     );
     let u = Pa(UART0);
     put(
@@ -76,7 +67,7 @@ fn put_both(c: u8) {
         |v| v & UTRSTAT_TXBE != 0,
         u.add(UTXH),
         c,
-        &UART_STALLED,
+        &UART_LINE,
     );
 }
 
@@ -100,7 +91,7 @@ pub(crate) fn raw_line(dock: Pa, text: &[u8], v: u64) {
             |s| s != 0,
             dock.add(DOCK_TX),
             c,
-            &DOCK_STALLED,
+            &DOCK_LINE,
         )
     };
     for &c in b"\r\n".iter().chain(text) {

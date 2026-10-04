@@ -276,3 +276,35 @@ fn rescal_needs_start_to_stick_and_status_to_rise() {
     // SAFETY: zie hierboven.
     assert!(unsafe { rescal(p, ticking) });
 }
+
+#[test]
+fn the_config_space_serves_driver_pcie() {
+    use driver_pcie::Config as _;
+    let mut b = block(MMIO_SIZE);
+    let mut sw = block(0x100);
+    let (bp, sp) = (pa(&mut b), pa(&mut sw));
+    let cfg = |o: u64| bp.add(off::EXT_CFG_DATA + o);
+    // De RP1: id, capability-lijst (status bit 4), MSI-X op 0x40 met 64
+    // entries, de tabel in BAR2 op offset 0.
+    dev::write32(cfg(0), 0x0001_1de4);
+    dev::write32(cfg(4), 0x0010_0000);
+    dev::write32(cfg(0x18), 0x101_0000);
+    dev::write32(cfg(0x34), 0x40);
+    dev::write32(cfg(0x40), 0x003f_0011);
+    dev::write32(cfg(0x44), 2);
+    let r = rc(Soc::Bcm2712, bp, sp);
+    let bdf = driver_pcie::Bdf {
+        bus: 1,
+        dev: 0,
+        func: 0,
+    };
+    let f = driver_pcie::probe(&r, bdf).unwrap();
+    assert_eq!((f.vendor, f.device), (0x1de4, 1));
+    assert_eq!(dev::read32(bp.add(off::EXT_CFG_INDEX)), 1 << 20, "bus 1");
+    let m = f.msix(&r).unwrap();
+    assert_eq!((m.cap, m.size), (0x40, 64));
+    assert_eq!(f.msix_table_addr(&r, &m), Some(0x101_0000));
+    // Een halfwoord raakt alleen zijn helft.
+    r.write16(bdf, 0x42, 0x8000);
+    assert_eq!(dev::read32(cfg(0x40)), 0x8000_0011);
+}

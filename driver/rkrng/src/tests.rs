@@ -40,7 +40,7 @@ struct Fake {
     at_start: Vec<u32>,
 }
 
-impl Regs for Fake {
+impl Io for Fake {
     fn read(&mut self, off: u64) -> u32 {
         if self.dead {
             return 0;

@@ -336,12 +336,8 @@ pub struct Tg3 {
     fw_mbox: u32,
     /// Het PHY-id uit de probe.
     phy_id: u32,
-    /// Meetlat: RX-descriptors met een fout of een kromme lengte.
-    pub rx_bad: u64,
-    /// Meetlat: TX-doorbells.
-    pub doorbells: u64,
-    /// Meetlat: `transmit` op een volle ring.
-    pub tx_full: u64,
+    /// De meetlat; `doorbells` telt de send-mailbox.
+    stats: netdev::Stats,
     /// De bel van de lijn ([`Tg3::set_irq`]); `None` = gepold.
     irq: Option<&'static Signal>,
 }
@@ -357,14 +353,14 @@ pub struct IrqAck {
     bar0: Pa,
 }
 
-impl IrqAck {
+impl netdev::IrqAck for IrqAck {
     /// Laat INTA# los: de interrupt-mailbox op 1, en teruggelezen zodat de
     /// lijn valt vóór de controller hem completeert (`tg3_interrupt_tagged`:
     /// "writing any value to intr-mbox-0 clears PCI INTA#"; niet-nul houdt
     /// de chip stil tot de heropening). Meer niet: het status-woord wissen
     /// liet op de M4 geen interrupt meer door (Go, bundel 37, 20-09), en de
     /// INTSTAT van de Apple-poort schrijven is een synchrone abort (19-09).
-    pub fn ack(&self) {
+    fn ack(&self) {
         // SAFETY: `bar0` kwam uit `Tg3::new`, dat een voor altijd gemapt
         // BAR0 eiste; de mailbox deelt niets met de ringen.
         let r: &Regs = unsafe { dev::regs(self.bar0) };
@@ -432,9 +428,7 @@ impl Tg3 {
             tx_dirty: false,
             fw_mbox: 0,
             phy_id: 0,
-            rx_bad: 0,
-            doorbells: 0,
-            tx_full: 0,
+            stats: netdev::Stats::default(),
             irq: None,
         }
     }
@@ -1216,7 +1210,7 @@ impl Tg3 {
             dev::mb();
             wr(&self.regs().mb_tx_prod, self.tx_prod);
             self.tx_dirty = false;
-            self.doorbells = self.doorbells.wrapping_add(1);
+            self.stats.doorbells += 1;
         }
     }
 }
@@ -1253,7 +1247,7 @@ impl netdev::Device for Tg3 {
         let next = (self.tx_prod + 1) % TX_RING;
         if next == self.tx_consumer() {
             self.flush_tx();
-            self.tx_full = self.tx_full.wrapping_add(1);
+            self.stats.tx_full += 1;
             return Err(TxError::Full);
         }
         let buf = self.tx_buf(self.tx_prod);
@@ -1274,7 +1268,7 @@ impl netdev::Device for Tg3 {
     }
 
     /// Haalt één frame op. Een fout of een kromme lengte wordt teruggegeven
-    /// aan de chip zonder kopie en geteld ([`Tg3::rx_bad`]); daarna kijkt
+    /// aan de chip zonder kopie en geteld (`rx_bad`); daarna kijkt
     /// hij naar de volgende. Hoogstens één ronde over de ring per aanroep.
     /// Een lege ring heropent de lijn, als er een is (`idle`).
     fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
@@ -1288,7 +1282,7 @@ impl netdev::Device for Tg3 {
             if got.is_some() {
                 return got;
             }
-            self.rx_bad = self.rx_bad.wrapping_add(1);
+            self.stats.rx_bad += 1;
         }
         None
     }
@@ -1306,6 +1300,10 @@ impl netdev::Device for Tg3 {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    fn stats(&self) -> netdev::Stats {
+        self.stats
     }
 }
 

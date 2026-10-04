@@ -380,13 +380,15 @@ impl IrqAck {
         // EIMC deelt niets met de ringen.
         unsafe { dev::regs(self.base) }
     }
+}
 
+impl netdev::IrqAck for IrqAck {
     /// Masker van de RX-vector dicht, uit de dispatch vóór de EOI. EIAM
     /// deed dat bij het bericht al (`GPIE.EIAME`); dit is dezelfde stand
     /// zonder op dat bit te leunen, één geposte schrijf. Pas de pomp
     /// heropent hem, bij een lege ring (`receive`), het ritme van NAPI
     /// (`igb_msix_ring`, dan `igb_poll`, dan `igb_ring_irq_enable`).
-    pub fn ack(&self) {
+    fn ack(&self) {
         self.regs().eimc.write(RX_EIMS);
     }
 }
@@ -433,10 +435,8 @@ pub struct Igb {
     tx_head: u16,
     /// TX-descriptors klaargezet sinds de laatste doorbell.
     tx_pending: u16,
-    /// Meetlat: doorbells (RDT en TDT samen).
-    pub doorbells: u64,
-    /// Meetlat: RX-descriptors met een lengte of vlag die niet klopt.
-    pub rx_bad: u64,
+    /// De meetlat; `doorbells` telt RDT en TDT samen.
+    stats: netdev::Stats,
     /// De bel van de MSI-X-vector, als het board er een bedraadde.
     irq: Option<&'static Signal>,
 }
@@ -485,8 +485,7 @@ impl Igb {
             rx_since: 0,
             tx_head: 0,
             tx_pending: 0,
-            doorbells: 0,
-            rx_bad: 0,
+            stats: netdev::Stats::default(),
             irq: None,
         }
     }
@@ -708,7 +707,7 @@ impl Igb {
         self.rx_since = 0;
         if let Some(t) = self.rx_tail.take() {
             self.regs().rdt.write(u32::from(t));
-            self.doorbells += 1;
+            self.stats.doorbells += 1;
         }
     }
 
@@ -738,7 +737,7 @@ impl Igb {
                     dev::copy_out(dst, src);
                 }
             } else {
-                self.rx_bad += 1;
+                self.stats.rx_bad += 1;
             }
             self.arm_rx(i);
             dev::mb();
@@ -759,7 +758,7 @@ impl Igb {
             dev::mb();
             self.regs().tdt.write(u32::from(self.tx_head));
             self.tx_pending = 0;
-            self.doorbells += 1;
+            self.stats.doorbells += 1;
         }
     }
 }
@@ -821,6 +820,7 @@ impl netdev::Device for Igb {
         }
         let d = self.tx_ring.add(u64::from(self.tx_head) * DESC);
         if dev::read32(d.add(W2)) != 0 && dev::read32(d.add(W3)) & TX_DD == 0 {
+            self.stats.tx_full += 1;
             return Err(TxError::Full);
         }
         let buf = self.tx_buf(self.tx_head);
@@ -872,6 +872,10 @@ impl netdev::Device for Igb {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    fn stats(&self) -> netdev::Stats {
+        self.stats
     }
 }
 

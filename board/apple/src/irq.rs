@@ -19,13 +19,13 @@
 //! eeuwig terwijl de timer wél afgaat. `apple.TimerWakes` in Go.
 
 use crate::fwinfo;
-use core::cell::Cell;
 use core::sync::atomic::Ordering::Relaxed;
 use cpu::irq::Line;
 use dev::Pa;
 use driver_aic::{Aic, Props};
 use driver_tg3::{IrqAck, Tg3};
-use sync::{Local, Signal};
+use netdev::AckSlot;
+use sync::Signal;
 
 /// De AIC van dit board: leeg tot [`start`], daarna de controller van
 /// `cpu::irq`.
@@ -111,13 +111,11 @@ impl NicIrq {
 
 /// De ack van de tg3, gezet vóór de lijn scherp gaat; de dispatch roept
 /// hem op HOP's core, waar ook de probe draait.
-static NIC_ACK: Local<Cell<Option<IrqAck>>> = Local::new(Cell::new(None));
+static NIC_ACK: AckSlot<IrqAck> = AckSlot::new();
 
 /// De device-ack van de NIC-lijn: de interrupt-mailbox dicht, INTA valt.
 fn tg3_ack() {
-    if let Some(a) = NIC_ACK.get().get() {
-        a.ack();
-    }
+    NIC_ACK.ack();
 }
 
 /// De bel van de NIC-lijn: de dispatch luidt hem, de RX-pomp wacht erop.
@@ -136,7 +134,7 @@ const NIC_TEST_NS: u64 = 50_000_000;
 /// INTSTAT en INTMSK van de poort, gelezen vóór de NIC weer dichtgaat (bij
 /// een poort die INTA wél zag, staat bit 0 dan nog).
 pub(crate) fn wire_nic(nic: &mut Tg3, line: u32) -> Result<u64, (&'static str, (u32, u32))> {
-    NIC_ACK.get().set(Some(nic.irq_ack()));
+    NIC_ACK.set(nic.irq_ack());
     let bell = &NIC_BELL;
     cpu::irq::enable(Line(line), Some(tg3_ack), Some(bell)).map_err(|e| {
         let why = match e {

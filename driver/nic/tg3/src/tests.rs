@@ -7,7 +7,7 @@
 //! volgorde, de registers die de drie lessen van 29-08 dragen, en de ringen.
 
 use super::*;
-use netdev::Device as _;
+use netdev::{Device as _, IrqAck as _};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::format;
@@ -450,7 +450,7 @@ fn receive_bounds_payload_and_recycle() {
             "{name}: destination changed beyond packet"
         );
         assert_eq!((n.rx_ret_idx, n.rx_std_idx), (1, 1), "{name}: not recycled");
-        assert_eq!(n.rx_bad, u64::from(want.is_none()), "{name}");
+        assert_eq!(n.stats.rx_bad, u64::from(want.is_none()), "{name}");
         // De mailboxen wachten op de flush (één doorbell per burst).
         assert_eq!(m.r(0x026c), 0, "{name}: mailbox before flush");
         n.flush();
@@ -467,7 +467,7 @@ fn a_frame_larger_than_the_callers_buffer_is_dropped_not_overrun() {
     let mut out = [0xccu8; 32];
     assert_eq!(n.receive(&mut out), None);
     assert!(out.iter().all(|&b| b == 0xcc));
-    assert_eq!((n.rx_ret_idx, n.rx_bad), (1, 1));
+    assert_eq!((n.rx_ret_idx, n.stats.rx_bad), (1, 1));
 }
 
 #[test]
@@ -484,7 +484,7 @@ fn error_flags_drop_the_frame_but_odd_nibble_does_not() {
     dev::write32(d(2).add(20), 0x0010_0000); // ODD_NIBBLE_RCVD_MII: geen fout
     let mut out = [0u8; 2048];
     assert_eq!(n.receive(&mut out), Some(64), "the third frame");
-    assert_eq!((n.rx_ret_idx, n.rx_bad), (3, 2));
+    assert_eq!((n.rx_ret_idx, n.stats.rx_bad), (3, 2));
     assert_eq!(n.receive(&mut out), None);
 }
 
@@ -638,9 +638,9 @@ fn transmit_puts_the_length_in_the_descriptor_and_rings_on_flush() {
     assert_eq!(m.r(0x0304), 0, "doorbell deferred");
     n.flush();
     assert_eq!(m.r(0x0304), 1, "send producer");
-    assert_eq!(n.doorbells, 1);
+    assert_eq!(n.stats.doorbells, 1);
     n.flush();
-    assert_eq!(n.doorbells, 1, "nothing new, no doorbell");
+    assert_eq!(n.stats.doorbells, 1, "nothing new, no doorbell");
 }
 
 #[test]
@@ -652,7 +652,7 @@ fn transmit_refuses_bad_sizes_and_a_full_ring() {
     // De NIC staat op 1: de volgende plek (1) is nog niet vrij.
     dev::write32(m.dma.add(OFF_STATUS + STATUS_IDX0), 1 << 16);
     assert_eq!(n.transmit(&[0; 60]), Err(TxError::Full));
-    assert_eq!(n.tx_full, 1);
+    assert_eq!(n.stats.tx_full, 1);
     dev::write32(m.dma.add(OFF_STATUS + STATUS_IDX0), 0);
     assert_eq!(n.transmit(&[0; 60]), Ok(()));
     // Een volle ring belt eerst wat klaarstaat.

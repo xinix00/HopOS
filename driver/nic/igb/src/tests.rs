@@ -3,7 +3,7 @@
 //! klaar, de link komt op), zoals de tests van virtio-blk.
 
 use super::*;
-use netdev::Device as _;
+use netdev::{Device as _, IrqAck as _};
 use std::cell::RefCell;
 use std::vec;
 use std::vec::Vec;
@@ -259,7 +259,7 @@ fn receive_bounds_and_recycle() {
         assert!(out[k..].iter().all(|&b| b == 0xcc), "beyond the packet");
         assert_eq!(n.rx_head, 1, "descriptor consumed");
         assert_eq!(dev::read32(m.dma.add(8)), 0, "descriptor re-armed");
-        assert_eq!(n.rx_bad, u64::from(want.is_none()));
+        assert_eq!(n.stats.rx_bad, u64::from(want.is_none()));
         // Batching: RDT pas bij de flush, en dan op de herwapende.
         assert_eq!(dev::read32(reg(0x2818)), 255);
         n.flush();
@@ -276,7 +276,7 @@ fn receive_skips_a_fragment_and_delivers_the_next() {
     writeback(&m, 1, RX_DD | RX_EOP, 60);
     let mut out = [0u8; 2048];
     assert_eq!(n.receive(&mut out), Some(60));
-    assert_eq!((n.rx_head, n.rx_bad), (2, 1));
+    assert_eq!((n.rx_head, n.stats.rx_bad), (2, 1));
     assert_eq!(n.receive(&mut out), None);
 }
 
@@ -285,12 +285,12 @@ fn receive_rings_the_doorbell_itself_every_32_frames() {
     let m = mem(hw());
     let mut n = fake(&m);
     n.init().unwrap();
-    let before = n.doorbells;
+    let before = n.stats.doorbells;
     for i in 0..RX_SELF_FLUSH {
         writeback(&m, i, RX_DD | RX_EOP, 60);
         assert_eq!(n.receive(&mut [0u8; 64]), Some(60));
     }
-    assert_eq!(n.doorbells, before + 1);
+    assert_eq!(n.stats.doorbells, before + 1);
     assert_eq!(dev::read32(reg(0x2818)), u32::from(RX_SELF_FLUSH - 1));
 }
 

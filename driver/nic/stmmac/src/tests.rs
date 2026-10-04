@@ -7,7 +7,7 @@
 //! Ook de helpers voor die generatietoetsen staan hier.
 
 use super::*;
-use netdev::Device as _;
+use netdev::{Device as _, IrqAck as _};
 use std::cell::Cell;
 use std::vec::Vec;
 
@@ -465,8 +465,9 @@ fn the_irq_masks_on_ack_and_rearms_when_the_ring_is_empty() {
     n.set_irq(&BELL);
     let r = n.regs();
     assert_eq!(r.intr_ena.read(), F::INTR_RX);
-    r.status.write(F::STAT_RX);
-    assert_eq!(n.irq_ack().ack(), F::STAT_RX);
+    r.status.write(u32::MAX);
+    n.irq_ack().ack();
+    assert_eq!(r.status.read(), F::STAT_RX, "W1C of the RX bits only");
     assert_eq!(r.intr_ena.read(), 0, "ack leaves the line masked");
     // De pomp leest de ring leeg: het masker gaat weer open, één keer.
     let mut out = [0u8; 64];

@@ -29,8 +29,8 @@
 //! - twee gelijke opeenvolgende rondes is een vastgelopen bron, de continue
 //!   toets van FIPS 140-2 §4.9.2 per ronde van 256 bits.
 //!
-//! Sans-I/O: de driver praat via [`Regs`], op ijzer [`Mmio`] en op de host
-//! een nep-blok (tests.rs). Eén eigenaar (de DRBG op de executor van de
+//! Sans-I/O: de driver praat via [`dev::Io`], op ijzer [`dev::Mmio`] en op
+//! de host een nep-blok (tests.rs). Eén eigenaar (de DRBG op de executor van de
 //! OS-core), dus `&mut self` en geen slot.
 
 #![cfg_attr(not(test), no_std)]
@@ -45,7 +45,7 @@
 )]
 
 use core::fmt;
-use dev::Pa;
+use dev::Io;
 
 #[cfg(test)]
 mod tests;
@@ -77,42 +77,6 @@ pub const SAMPLES: u32 = 1000;
 pub const ROUND: usize = 32;
 /// Hoe lang één ronde mag duren (Linux `RK_RNG_POLL_TIMEOUT_US`).
 pub const ROUND_NS: u64 = 10_000_000;
-
-/// De registers van één TRNG: lezen en schrijven op een offset.
-pub trait Regs {
-    /// Leest het 32-bit-register op `off`.
-    fn read(&mut self, off: u64) -> u32;
-    /// Schrijft het 32-bit-register op `off`.
-    fn write(&mut self, off: u64, v: u32);
-}
-
-/// Het echte registerblok, via `dev`.
-pub struct Mmio {
-    base: Pa,
-}
-
-impl Mmio {
-    /// Het blok op `base`.
-    ///
-    /// # Safety
-    ///
-    /// `base` is het TRNG-blok van deze SoC, Device-gemapt, met zijn klokken
-    /// open en uit reset (een ongeklokt Rockchip-blok kan de bus vasthouden),
-    /// en niemand anders schrijft erin.
-    #[must_use]
-    pub const unsafe fn new(base: Pa) -> Self {
-        Self { base }
-    }
-}
-
-impl Regs for Mmio {
-    fn read(&mut self, off: u64) -> u32 {
-        dev::read32(self.base.add(off))
-    }
-    fn write(&mut self, off: u64, v: u32) {
-        dev::write32(self.base.add(off), v);
-    }
-}
 
 /// Waarom het TRNG niets leverde.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -152,13 +116,13 @@ pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 /// Eén TRNG: de registers, de klok en de vingerafdruk van de vorige ronde
 /// (voor de continue toets). Een afdruk en niet de ronde zelf: die bytes zijn
 /// seed-materiaal, en de DRBG wist zijn seed na gebruik.
-pub struct Trng<R: Regs> {
+pub struct Trng<R: Io> {
     regs: R,
     clock: fn() -> u64,
     last: Option<u64>,
 }
 
-impl<R: Regs> Trng<R> {
+impl<R: Io> Trng<R> {
     /// Een TRNG; raakt nog geen register aan. `clock` geeft monotone
     /// nanoseconden.
     pub const fn new(regs: R, clock: fn() -> u64) -> Self {

@@ -936,5 +936,64 @@ fn iort_map(t: &[u8], node: usize, id: u32) -> Option<(usize, u32)> {
     None
 }
 
+/// Een PCC-subkanaal uit de PCCT (types 0, 1 en 2): het gedeelde geheugen,
+/// de doorbell met zijn maskers en de nominale latentie. Voor de SMpro van
+/// de Altra (`driver-smpro`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct Pcc {
+    /// Het gedeelde geheugen.
+    pub shmem: u64,
+    /// Zijn lengte.
+    pub shmem_len: u64,
+    /// Het doorbell-register.
+    pub doorbell: u64,
+    /// 32 of 64 bits.
+    pub doorbell_width: u8,
+    /// Doorbell: welke bits bewaard blijven.
+    pub preserve: u64,
+    /// Doorbell: welke bits gezet worden.
+    pub write: u64,
+    /// De nominale latentie in microseconden.
+    pub latency_us: u32,
+}
+
+/// Subkanaal `idx` uit de PCCT-tabel `table` (de bytes zoals het board ze
+/// laadde), of `None` als de index niet bestaat, de entry kapot is, of het
+/// type buiten 0..2 valt. De subkanalen staan vanaf offset 48 (SDT-kop,
+/// flags, reserved) en tellen ordinaal: de positie is het kanaalnummer
+/// waar de DSDT-property "pcc-channel" naar wijst. Types 0/1/2 delen de
+/// veld-offsets die wij nodig hebben; de extended types (3+) zijn
+/// CPPC-constructies die we overslaan. QEMU virt heeft geen PCCT.
+#[must_use]
+pub fn pcct_subspace(table: &[u8], idx: u32) -> Option<Pcc> {
+    let mut off = 48usize;
+    let mut n = 0;
+    while off + 2 <= table.len() {
+        let (typ, l) = (*table.get(off)?, usize::from(*table.get(off + 1)?));
+        if l < 2 || off + l > table.len() {
+            return None; // kapotte entry: niet verder gissen
+        }
+        if n == idx {
+            if typ > 2 || l < 62 {
+                return None;
+            }
+            let e = table.get(off..off + l)?;
+            // De GAS op +24: space, breedte, offset, access, adres (8).
+            return Some(Pcc {
+                shmem: le64(e, 8)?,
+                shmem_len: le64(e, 16)?,
+                doorbell_width: *e.get(25)?,
+                doorbell: le64(e, 28)?,
+                preserve: le64(e, 36)?,
+                write: le64(e, 44)?,
+                latency_us: le32(e, 52)?,
+            });
+        }
+        n += 1;
+        off += l;
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests;

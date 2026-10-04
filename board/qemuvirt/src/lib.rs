@@ -462,7 +462,7 @@ impl Board for QemuVirt {
         // SAFETY: `base` is een virtio-mmio-slot van virt (Device-gemapt),
         // en NET_DMA is van deze driver alleen: buiten de kern-RAM, Normal
         // non-cacheable gemapt, en door niets anders uitgedeeld.
-        let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size) }
+        let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size, cpu::idle::now) }
             .map_err(|_| Error::Nic("virtio-net init failed"))?;
         if intid != 0 {
             NIC_IRQ.get().set(Some((intid, nic.irq_ack())));

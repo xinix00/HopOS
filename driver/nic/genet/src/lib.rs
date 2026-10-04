@@ -237,8 +237,9 @@ const DMA_DISABLED: u32 = 1;
 const RING16_EN: u32 = 1 << 17;
 /// Hoe lang een DMA-stop mag duren.
 const DMA_STOP_NS: u64 = 5_000_000;
-/// De MDIO-pollgrens: ~25 µs typisch, ruim begrensd, nooit eeuwig.
-const MDIO_POLLS: u32 = 100_000;
+/// Hoe lang een MDIO-transactie mag duren: ~25 µs typisch; de grens van
+/// Linux (`unimac_mdio_poll`: 100 ms).
+const MDIO_NS: u64 = 100_000_000;
 
 /// Waarom de GENET iets weigert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -433,7 +434,7 @@ impl Genet {
     fn mdio_kick(&self) -> bool {
         let m = &self.umac().mdio_cmd;
         m.update(|v| v | (1 << 29));
-        (0..MDIO_POLLS).any(|_| m.read() & (1 << 29) == 0)
+        dev::poll_until(self.clock, MDIO_NS, || m.read() & (1 << 29) == 0)
     }
 
     /// Zet MAC-adres en filters, ringen en DMA klaar en schakelt zender en

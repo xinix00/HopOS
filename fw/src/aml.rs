@@ -22,6 +22,8 @@
 use bounded::BoundedVec;
 use core::fmt;
 
+pub mod cpc;
+
 /// Zoveel routeringen houdt een tabel vast: QEMU heeft er 128 (32 slots
 /// maal 4 pinnen), de Ampere 16, de O6N 4.
 pub const MAX_ROUTES: usize = 128;
@@ -403,5 +405,7 @@ mod tests {
         }
         assert_eq!(pkg_len(&[0x4a, 0x01], 0), Some((0x1a, 2)));
         assert_eq!(pkg_len(&[0x3f], 0), Some((0x3f, 1)));
+        assert_eq!(pkg_len(&[0x81, 0x34, 0x12], 0), Some((0x12341, 3)));
+        assert_eq!(pkg_len(&[0x81, 0x34], 0), None);
     }
 }

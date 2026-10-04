@@ -8,6 +8,7 @@ description = "De Broadcom-STB PCIe-root-complex: de BCM2712-link naar de RP1 (P
 
 [dependencies]
 dev = { path = "../../dev" }
+driver-pcie = { path = "../pcie" }
 
 [lints]
 workspace = true

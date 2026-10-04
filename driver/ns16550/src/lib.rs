@@ -10,8 +10,9 @@
 //!
 //! Een UART die nooit THRE meldt (dood, ongeklokt, alle enen) mag de
 //! console niet eeuwig gijzelen: na een begrensde poll (~1M lezingen, veel
-//! meer dan zestien tekens op 115200) is hij dood verklaard en slikt hij
-//! alles. Dezelfde vangrail als de PL011 en als Go's `ns16550.Putc`.
+//! meer dan zestien tekens op 115200) staat de lijn als gestokt en krijgt
+//! elke byte één blik tot er weer een past ([`dev::Stall`]). Hetzelfde
+//! beleid als de PL011.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -24,8 +25,7 @@
     )
 )]
 
-use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
-use dev::Pa;
+use dev::{Pa, Stall};
 
 /// Transmit holding register (registerindex).
 const THR: u64 = 0;
@@ -33,14 +33,16 @@ const THR: u64 = 0;
 const LSR: u64 = 5;
 /// LSR: de THR is leeg.
 const LSR_THRE: u32 = 1 << 5;
-/// Hoe vaak we op THRE pollen voor de UART dood heet.
+/// Hoe vaak we op THRE pollen voor de lijn als gestokt staat.
 const POLL_MAX: u32 = 1 << 20;
+/// Het budget per byte op een gestokte lijn (zie `driver-pl011`).
+const POLL_STALLED: u32 = 1;
 
 /// Een 16550 op een vast adres met registerstap `1 << shift`.
 pub struct Ns16550 {
     base: Pa,
     shift: u8,
-    dead: AtomicBool,
+    tx: Stall,
 }
 
 impl Ns16550 {
@@ -56,7 +58,7 @@ impl Ns16550 {
         Self {
             base,
             shift,
-            dead: AtomicBool::new(false),
+            tx: Stall::new(POLL_MAX, POLL_STALLED),
         }
     }
 
@@ -82,26 +84,17 @@ impl Ns16550 {
         }
     }
 
-    /// Is de UART dood verklaard?
+    /// De stand van de lijn ([`Stall`]), voor wie de UART per schrijf
+    /// opnieuw opbouwt.
     #[must_use]
-    pub fn is_dead(&self) -> bool {
-        self.dead.load(Relaxed)
+    pub fn tx(&self) -> &Stall {
+        &self.tx
     }
 
     /// Eén byte, na een begrensde wacht op een lege THR.
     pub fn putc(&self, c: u8) {
-        if self.is_dead() {
-            return;
-        }
-        let mut i = 0;
-        while self.read(LSR) & LSR_THRE == 0 {
-            i += 1;
-            if i > POLL_MAX {
-                self.dead.store(true, Relaxed);
-                return;
-            }
-        }
-        self.write(THR, c);
+        self.tx
+            .put(|| self.read(LSR) & LSR_THRE != 0, || self.write(THR, c));
     }
 
     /// Schrijft `b`, met `\r` vóór elke `\n` (een terminal wil beide).
@@ -130,17 +123,17 @@ mod tests {
         let u = unsafe { Ns16550::new(base, 2) };
         u.putc(b'x');
         assert_eq!(regs[0], u32::from(b'x'));
-        assert!(!u.is_dead());
+        assert!(!u.tx().is_stalled());
     }
 
     #[test]
-    fn a_uart_that_never_drains_is_declared_dead() {
+    fn a_uart_that_never_drains_stalls_the_line() {
         let mut regs = [0u8; 8];
         let base = Pa(regs.as_mut_ptr() as usize as u64);
         // SAFETY: zie hierboven, nu op byte-stride.
         let u = unsafe { Ns16550::new(base, 0) };
         u.putc(b'x');
-        assert!(u.is_dead());
+        assert!(u.tx().is_stalled());
         assert_eq!(regs[0], 0);
     }
 }

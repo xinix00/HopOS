@@ -407,6 +407,13 @@ impl Transport for Gen {
     }
 }
 
+/// Een klok die per blik een milliseconde verder staat.
+fn ticking() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static T: AtomicU64 = AtomicU64::new(0);
+    T.fetch_add(1_000_000, Relaxed)
+}
+
 fn gen_of(gens: Vec<u32>) -> Gen {
     Gen {
         gens,
@@ -433,8 +440,8 @@ fn reset_waits_for_the_status_to_read_zero() {
     let t = gen_of(vec![0]);
     t.status.set(status::DRIVER_OK);
     t.reset_after.set(10);
-    assert!(t.reset());
+    assert!(t.reset(ticking));
     assert_eq!(t.reset_after.get(), 0);
-    t.reset_after.set(RESET_POLLS);
-    assert!(!t.reset(), "a device that never comes back");
+    t.reset_after.set(u32::MAX);
+    assert!(!t.reset(ticking), "a device that never comes back");
 }

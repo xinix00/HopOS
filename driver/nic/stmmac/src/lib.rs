@@ -533,19 +533,17 @@ pub struct IrqAck<O: Ops> {
     _ops: PhantomData<O>,
 }
 
-impl<O: Ops> IrqAck<O> {
+impl<O: Ops> netdev::IrqAck for IrqAck<O> {
     /// Laat de level-lijn los: masker dicht, status gewist (het
     /// rtl8126-ritme). De driver zet het masker weer open als de pomp de
     /// ring leeg las (`receive` die `None` geeft), dus één claim per burst
-    /// in plaats van per frame. Geeft de DMA-status die stond.
-    pub fn ack(&self) -> u32 {
+    /// in plaats van per frame.
+    fn ack(&self) {
         // SAFETY: `base` kwam uit een `Probe`, die een gemapt blok eiste;
         // het enable- en statusregister delen niets met de ringen.
         let (ena, status) = O::irq(unsafe { dev::regs(self.base) });
-        let st = status.read();
         ena.write(0);
         status.write(O::STAT_RX);
-        st
     }
 }
 
@@ -757,5 +755,13 @@ impl<O: Ops> netdev::Device for Stmmac<O> {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    fn stats(&self) -> netdev::Stats {
+        netdev::Stats {
+            rx_bad: self.stats.rx_errors + self.stats.rx_bad_len,
+            tx_full: self.stats.tx_full,
+            doorbells: self.stats.doorbells,
+        }
     }
 }

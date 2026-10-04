@@ -8,6 +8,7 @@ description = "De SoC-thermometer van de Ampere Altra: Ampere's SMpro via een AC
 
 [dependencies]
 dev = { path = "../../dev" }
+fw = { path = "../../fw" }
 
 [lints]
 workspace = true

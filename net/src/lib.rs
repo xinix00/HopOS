@@ -134,6 +134,13 @@ pub struct Stats {
     pub rx_idle: AtomicU64,
     /// Frames die de NIC weigerde (vol of dood).
     pub nic_tx_errors: AtomicU64,
+    /// De meetlat van de NIC-driver (`netdev::Stats`), na elke ronde van de
+    /// pomp overgenomen: afgekeurde RX-descriptors.
+    pub nic_rx_bad: AtomicU64,
+    /// Idem: `transmit` op een volle ring.
+    pub nic_tx_full: AtomicU64,
+    /// Idem: doorbells naar de NIC.
+    pub nic_doorbells: AtomicU64,
     /// Frames van de node-stack die niet in de host-TX-ring pasten.
     pub host_tx_drops: AtomicU64,
     /// Frames op de host-naad gedropt: een fysiek LAN-frame met een intern
@@ -165,6 +172,9 @@ impl Stats {
             uplink_tx_drops: AtomicU64::new(0),
             rx_idle: AtomicU64::new(0),
             nic_tx_errors: AtomicU64::new(0),
+            nic_rx_bad: AtomicU64::new(0),
+            nic_tx_full: AtomicU64::new(0),
+            nic_doorbells: AtomicU64::new(0),
             host_tx_drops: AtomicU64::new(0),
             host_rx_drops: AtomicU64::new(0),
             slot_src_drops: AtomicU64::new(0),

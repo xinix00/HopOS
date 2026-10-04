@@ -38,6 +38,7 @@ use cpu::irq::{Line, Trigger};
 use dev::Pa;
 use driver_brcmpcie::{EpBar, InWin, OutWin, Rc};
 use driver_gem::Gem;
+use driver_pcie::{self as pcie, Bdf, Config as _};
 use driver_pl011::Pl011;
 
 // De twee xHCI's in de RP1 (usb.rs).
@@ -412,24 +413,26 @@ const fn mip_line(v: u32) -> (Line, Trigger) {
 /// Elke stap die faalt laat de NIC pollen, met de reden.
 fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     // 1. De MSI-X-capability van de RP1 (bus 1, dev 0): tabel-BAR en offset.
-    let cap = msix_cap(rc).ok_or("rp1: no MSI-X capability")?;
-    let hdr = rc.cfg_read32(1, 0, 0, cap);
-    let entries = ((hdr >> 16) & 0x7ff) + 1;
-    if entries <= RP1_INT_ETH {
+    let f = pcie::probe(rc, RP1_BDF).ok_or("rp1: nothing on bus 1")?;
+    let m = f.msix(rc).ok_or("rp1: no MSI-X capability")?;
+    if u32::from(m.size) <= RP1_INT_ETH {
         return Err("rp1: MSI-X table too small");
     }
-    let tab = rc.cfg_read32(1, 0, 0, cap + 4);
-    let (bir, off) = (u64::from(tab & 7), u64::from(tab & !7));
-    let bar = u64::from(rc.cfg_read32(1, 0, 0, 0x10 + 4 * bir) & !0xf);
-    let entry = Pa(RP1 + bar + off + 16 * u64::from(RP1_INT_ETH));
+    let table = f
+        .msix_table_addr(rc, &m)
+        .ok_or("rp1: MSI-X BAR not assigned")?;
+    let entry = Pa(RP1 + table + 16 * u64::from(RP1_INT_ETH));
     MSIX_ENTRY.store(entry.0, Relaxed);
     dev::write32(entry, MIP_MSI_ADDR as u32);
     dev::write32(entry.add(4), (MIP_MSI_ADDR >> 32) as u32);
     dev::write32(entry.add(8), RP1_INT_ETH);
     dev::write32(entry.add(12), 0);
     dev::mb();
-    // Function mask eraf, MSI-X aan.
-    rc.cfg_write32(1, 0, 0, cap, (hdr & !(1 << 30)) | (1 << 31));
+    // Function mask eraf, MSI-X aan: één dword over de kop, zoals op ijzer
+    // bewezen (`Function::msix_enable` schrijft een halfwoord en zet INTx
+    // uit, Linux' weg, maar die is hier nog niet gezien).
+    let hdr = rc.read32(RP1_BDF, m.cap);
+    rc.write32(RP1_BDF, m.cap, (hdr & !(1 << 30)) | (1 << 31));
 
     // 2. De MIP open naar de host (mip_probe: MASK_HOST 0, MASK_VPU ~0,
     //    CFG_HOST ~0), de lijn als flank (de MIP levert een MSI als edge).
@@ -467,22 +470,12 @@ fn wire_irq(rc: &Rc, nic: &mut Gem) -> Result<u32, &'static str> {
     Ok(id)
 }
 
-/// De offset van de MSI-X-capability van de RP1 (bus 1, dev 0) in zijn
-/// configruimte, of `None`.
-fn msix_cap(rc: &Rc) -> Option<u64> {
-    let mut ptr = u64::from(rc.cfg_read32(1, 0, 0, 0x34) & 0xff);
-    for _ in 0..48 {
-        if ptr < 0x40 {
-            return None;
-        }
-        let hdr = rc.cfg_read32(1, 0, 0, ptr);
-        if hdr & 0xff == 0x11 {
-            return Some(ptr);
-        }
-        ptr = u64::from((hdr >> 8) & 0xff);
-    }
-    None
-}
+/// De RP1 achter de RC.
+const RP1_BDF: Bdf = Bdf {
+    bus: 1,
+    dev: 0,
+    func: 0,
+};
 
 /// De MSI-X-entry van de GEM in de RP1-tabel, zoals `wire_irq` hem zette
 /// (0 = nog niet), voor [`nic_diag`].
@@ -519,7 +512,9 @@ pub fn nic_diag() {
         ring.0
     );
     let cmd = rc.cfg_read32(1, 0, 0, 0x04);
-    let ctl = msix_cap(&rc).map_or(0, |c| rc.cfg_read32(1, 0, 0, c) >> 16);
+    let ctl = pcie::probe(&rc, RP1_BDF)
+        .and_then(|f| f.msix(&rc).map(|m| f.msix_control(&rc, &m)))
+        .unwrap_or(0);
     let e = MSIX_ENTRY.load(Relaxed);
     let entry = if e == 0 {
         [0; 4]

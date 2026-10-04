@@ -8,7 +8,7 @@
 //! CMD_COMPLETE in plaats van de platform-interrupt af te wachten; één
 //! temperatuur per minuut rechtvaardigt geen GIC-bedrading.
 //!
-//! Waar het kanaal woont, zegt de PCCT (fw/acpi, het board zet hem om in
+//! Waar het kanaal woont, zegt de PCCT (`fw::acpi::pcct_subspace` geeft de
 //! [`Pcc`]); dit crate kent het board niet. Eén aanroeper (de
 //! telemetrie-taak), dus `&mut self` en geen slot.
 
@@ -25,6 +25,7 @@
 
 use core::mem::offset_of;
 use dev::{Pa, Reg};
+pub use fw::acpi::Pcc;
 
 /// Het PCC-kanaal van de hardware-monitor op socket 0: vast in alle
 /// Altra-firmware (edk2-platforms `Dsdt.asl`: device APMC0D29 met `_DSD`
@@ -73,69 +74,6 @@ const MSG_TYPE_ERR: u32 = 7;
 /// microseconden.
 const BUDGET_FLOOR_NS: u64 = 50_000_000;
 
-/// Een PCC-subkanaal zoals de PCCT het beschrijft (type 0/1/2).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct Pcc {
-    /// Het gedeelde geheugen.
-    pub shmem: Pa,
-    /// Zijn lengte.
-    pub shmem_len: u64,
-    /// Het doorbell-register.
-    pub doorbell: Pa,
-    /// 32 of 64 bits.
-    pub doorbell_width: u8,
-    /// Doorbell: welke bits bewaard blijven.
-    pub preserve: u64,
-    /// Doorbell: welke bits gezet worden.
-    pub write: u64,
-    /// De nominale latentie in microseconden.
-    pub latency_us: u32,
-}
-
-fn le(b: &[u8], off: usize, n: usize) -> u64 {
-    b.get(off..off + n)
-        .map(|s| s.iter().rev().fold(0u64, |a, &x| (a << 8) | u64::from(x)))
-        .unwrap_or(0)
-}
-
-/// Subkanaal `idx` uit de PCCT-tabel `pcct` (de bytes zoals het board ze
-/// laadde), of `None` als de index niet bestaat, de entry kapot is, of het
-/// type buiten 0..2 valt. De subkanalen staan vanaf offset 48 (SDT-kop,
-/// flags, reserved) en tellen ordinaal: de positie ís het kanaalnummer
-/// waar de DSDT-property "pcc-channel" naar wijst. Types 0/1/2 delen de
-/// veld-offsets die wij nodig hebben; de extended types (3+) zijn
-/// CPPC-constructies die we overslaan. QEMU virt heeft geen PCCT.
-#[must_use]
-pub fn pcc_from(pcct: &[u8], idx: u32) -> Option<Pcc> {
-    let mut off = 48usize;
-    let mut n = 0;
-    while off + 2 <= pcct.len() {
-        let (typ, l) = (*pcct.get(off)?, usize::from(*pcct.get(off + 1)?));
-        if l < 2 || off + l > pcct.len() {
-            return None; // kapotte entry: niet verder gissen
-        }
-        if n == idx {
-            if typ > 2 || l < 62 {
-                return None;
-            }
-            let e = pcct.get(off..off + l)?;
-            // De GAS op +24: space, breedte, offset, access, adres (8).
-            return Some(Pcc {
-                shmem: Pa(le(e, 8, 8)),
-                shmem_len: le(e, 16, 8),
-                doorbell_width: *e.get(25)?,
-                doorbell: Pa(le(e, 28, 8)),
-                preserve: le(e, 36, 8),
-                write: le(e, 44, 8),
-                latency_us: le(e, 52, 4) as u32,
-            });
-        }
-        n += 1;
-        off += l;
-    }
-    None
-}
-
 /// Eén open PCC-kanaal naar de SMpro.
 pub struct Smpro {
     ch: u32,
@@ -167,7 +105,7 @@ impl Smpro {
 
     fn shm(&self) -> &'static Shmem {
         // SAFETY: de voorwaarde van `new`; `call` toetst de lengte eerst.
-        unsafe { dev::regs(self.pcc.shmem) }
+        unsafe { dev::regs(Pa(self.pcc.shmem)) }
     }
 
     /// De SoC-temperatuur in milligraden Celsius; `None` als de SMpro niet
@@ -186,7 +124,7 @@ impl Smpro {
     /// Eén synchroon bericht: kop en payload in het gedeelde geheugen,
     /// doorbell, pollen op CMD_COMPLETE.
     fn call(&mut self, m0: u32, m1: u32, m2: u32) -> Option<(u32, u32)> {
-        if self.pcc.shmem.0 == 0 || self.pcc.shmem_len < SHMEM_MIN {
+        if self.pcc.shmem == 0 || self.pcc.shmem_len < SHMEM_MIN {
             return None;
         }
         let s = self.shm();
@@ -223,7 +161,7 @@ impl Smpro {
     /// semantiek). De Altra meldt een 32-bit register; 64 voor de
     /// volledigheid van de GAS.
     fn ring(&self) {
-        let db = self.pcc.doorbell;
+        let db = Pa(self.pcc.doorbell);
         if self.pcc.doorbell_width == 64 {
             dev::write64(db, (dev::read64(db) & self.pcc.preserve) | self.pcc.write);
         } else {
@@ -238,7 +176,6 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::vec;
-    use std::vec::Vec;
 
     thread_local! {
         /// De nep-SMpro: shmem en doorbell, en de temperatuur die hij meldt.
@@ -274,9 +211,9 @@ mod tests {
         let db = shm.add(32);
         HW.with(|h| *h.borrow_mut() = (shm, db, temp, alive));
         let pcc = Pcc {
-            shmem: shm,
+            shmem: shm.0,
             shmem_len: 20,
-            doorbell: db,
+            doorbell: db.0,
             doorbell_width: 32,
             preserve: 0,
             write: 1,
@@ -319,52 +256,6 @@ mod tests {
         let st = dev::read32(shm.add(4));
         dev::write32(shm.add(4), st | (ST_CMD_COMPLETE << 16));
         assert_eq!(d.soc_temp_milli_c(), Some(47_000));
-    }
-
-    /// Eén type-`typ`-subkanaal van 62 bytes met herkenbare velden.
-    fn subspace(typ: u8, shmem: u64, db: u64, preserve: u64, write: u64, lat: u32) -> Vec<u8> {
-        let mut e = vec![0u8; 62];
-        e[0] = typ;
-        e[1] = 62;
-        e[8..16].copy_from_slice(&shmem.to_le_bytes());
-        e[16..24].copy_from_slice(&0x100u64.to_le_bytes());
-        e[25] = 32;
-        e[28..36].copy_from_slice(&db.to_le_bytes());
-        e[36..44].copy_from_slice(&preserve.to_le_bytes());
-        e[44..52].copy_from_slice(&write.to_le_bytes());
-        e[52..56].copy_from_slice(&lat.to_le_bytes());
-        e
-    }
-
-    /// `pcct_test.go`: de ordinale nummering, de offsets uit de spec, en
-    /// nette afwijzing van ontbrekende indexen en extended types.
-    #[test]
-    fn pcct_subspaces_are_counted_in_order() {
-        let mut t = vec![0u8; 48];
-        t.extend(subspace(2, 0x8860_0000, 0x1000_0054_0010, !1, 1, 500));
-        t.extend(subspace(1, 0x8860_1000, 0x1000_0054_0020, 0, 0x53, 100));
-        t.extend(subspace(3, 0xdead, 0xbeef, 0, 0, 0));
-        let p = pcc_from(&t, 0).unwrap();
-        assert_eq!(
-            p,
-            Pcc {
-                shmem: Pa(0x8860_0000),
-                shmem_len: 0x100,
-                doorbell: Pa(0x1000_0054_0010),
-                doorbell_width: 32,
-                preserve: !1,
-                write: 1,
-                latency_us: 500,
-            }
-        );
-        let p = pcc_from(&t, 1).unwrap();
-        assert_eq!((p.shmem, p.write), (Pa(0x8860_1000), 0x53));
-        assert_eq!(pcc_from(&t, 2), None, "extended type");
-        assert_eq!(pcc_from(&t, 9), None);
-        assert_eq!(pcc_from(&[], 0), None);
-        let mut broken = vec![0u8; 48];
-        broken.extend([2, 200]);
-        assert_eq!(pcc_from(&broken, 0), None);
     }
 
     #[test]

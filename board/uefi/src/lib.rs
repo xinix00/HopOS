@@ -276,16 +276,14 @@ static NIC_BELL: Signal = Signal::new();
 static NIC_CLAIMED: AtomicBool = AtomicBool::new(false);
 /// Is de schijf al geprobed? `probe_disk` mag één keer.
 static DISK_CLAIMED: AtomicBool = AtomicBool::new(false);
-/// Is de console dood verklaard (de UART meldde nooit ruimte)?
-static CONSOLE_DEAD: AtomicBool = AtomicBool::new(false);
+/// Staat de console als gestokt (`dev::Stall`)? De UART wordt per schrijf
+/// opnieuw opgebouwd, dus de stand woont hier.
+static CONSOLE_STALLED: AtomicBool = AtomicBool::new(false);
 
 /// De console na de exit: de SPCR-UART, per schrijf opgebouwd uit de
 /// feiten (de adressen zijn pas bij boot bekend, dus geen `static` met
 /// een vaste UART zoals op virt).
 fn console_write(b: &[u8]) {
-    if CONSOLE_DEAD.load(Relaxed) {
-        return;
-    }
     let base = facts::CONSOLE_BASE.load(Relaxed);
     if base == 0 {
         return;
@@ -296,14 +294,16 @@ fn console_write(b: &[u8]) {
         // SAFETY: de SPCR wees dit blok aan; de identity map mapt het als
         // Device (`boot::build_map`).
         let u = unsafe { Ns16550::new(Pa(base), shift) };
+        u.tx().set_stalled(CONSOLE_STALLED.load(Relaxed));
         u.write_bytes(b);
-        CONSOLE_DEAD.store(u.is_dead(), Relaxed);
+        CONSOLE_STALLED.store(u.tx().is_stalled(), Relaxed);
     } else {
         // SAFETY: zie hierboven; een PL011 (of SBSA-subset: dezelfde DR- en
         // FR-offsets).
         let u = unsafe { Pl011::new(Pa(base)) };
+        u.tx().set_stalled(CONSOLE_STALLED.load(Relaxed));
         u.write(b);
-        CONSOLE_DEAD.store(u.is_dead(), Relaxed);
+        CONSOLE_STALLED.store(u.tx().is_stalled(), Relaxed);
     }
 }
 
@@ -311,9 +311,6 @@ fn console_write(b: &[u8]) {
 /// `Board::console_nowait`; een 16550 kent hier alleen THRE en blijft
 /// wachtend).
 fn console_nowait(b: &[u8]) -> usize {
-    if CONSOLE_DEAD.load(Relaxed) {
-        return b.len();
-    }
     let base = facts::CONSOLE_BASE.load(Relaxed);
     if base == 0 {
         return b.len();
@@ -757,8 +754,9 @@ impl Board for Uefi {
             t.use_msix(0);
         }
         // SAFETY: NET_DMA is van deze driver alleen, Normal-NC gemapt.
-        let mut nic = unsafe { VirtioNet::with_transport(t, NET_DMA.base, NET_DMA.size) }
-            .map_err(|_| Error::Nic("virtio-net init failed"))?;
+        let mut nic =
+            unsafe { VirtioNet::with_transport(t, NET_DMA.base, NET_DMA.size, cpu::idle::now) }
+                .map_err(|_| Error::Nic("virtio-net init failed"))?;
         // Alleen MSI-X: INTx op virtio-pci vraagt een ack die het
         // ISR-register leest, en QEMU's `_PRT` loopt via link-devices die
         // `fw::aml` luid weigert. Zonder MSI-X pollt de pomp.

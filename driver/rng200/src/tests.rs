@@ -38,7 +38,7 @@ struct Fake {
     sticky_status: bool,
 }
 
-impl Regs for Fake {
+impl Io for Fake {
     fn read(&mut self, off: u64) -> u32 {
         if self.absent {
             return 0;

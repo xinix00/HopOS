@@ -8,6 +8,7 @@
 
 use super::*;
 use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
+use driver_virtiopci::{FEAT_VERSION_1_HI, status};
 use std::cell::{Cell, RefCell};
 use std::vec;
 use std::vec::Vec;
@@ -158,6 +159,9 @@ fn write_then_read_round_trips_through_the_chain() {
         ]
     );
     assert_eq!(b.requests, 3);
+    let mut line = std::string::String::new();
+    assert_eq!(AsyncBlockDevice::stats(&b, &mut line), Ok(3));
+    assert!(line.starts_with("commands=3 slowest_us="), "{line}");
 }
 
 #[test]
@@ -412,18 +416,30 @@ fn init_refuses_wrong_devices_small_queues_and_small_dma() {
     let dma = Pa(mem.as_mut_ptr() as usize as u64);
     // SAFETY: `mem` leeft de hele test en is `DMA_NEED` groot.
     let e = unsafe { VirtioBlk::with_transport(FakeT::new(1, 8), dma, DMA_NEED, clock) }.err();
-    assert_eq!(e, Some(Error::NotBlock(1)));
+    assert_eq!(
+        e,
+        Some(Error::Setup(driver_virtiopci::Error::WrongDevice {
+            want: 2,
+            got: 1
+        }))
+    );
     // SAFETY: zie boven.
     let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 2), dma, DMA_NEED, clock) }.err();
-    assert_eq!(e, Some(Error::NoQueue(2)));
+    assert_eq!(
+        e,
+        Some(Error::Setup(driver_virtiopci::Error::NoQueue {
+            queue: 0,
+            offered: 2
+        }))
+    );
     // SAFETY: zie boven.
     let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, 4096, clock) }.err();
     assert_eq!(
         e,
-        Some(Error::DmaTooSmall {
+        Some(Error::Setup(driver_virtiopci::Error::DmaTooSmall {
             need: DMA_NEED,
             have: 4096
-        })
+        }))
     );
     drop(mem);
 }

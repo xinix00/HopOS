@@ -5,7 +5,6 @@
 
 use crate::class::{self, CoreFacts};
 use crate::clock::{self, CpcKnob};
-use crate::cpc::{self, Cpc, MAX_CPCS};
 use crate::probe;
 use crate::thermal::{self, SCMI_CHANNEL, Thermo};
 use board::{Board, ClockKnob, CoreClass, Error, Thermal};
@@ -23,12 +22,14 @@ const _: () = assert!(
         && driver_rtl8126::DMA_NEED <= NET_BUF.end().0 - NET_DMA.base.0
 );
 use bounded::BoundedVec;
-use core::cell::{Cell, RefCell};
+use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use dev::Pa;
 use driver_nvme::{Nvme, pci::Pci};
 use driver_rtl8126::Rtl8126;
 use driver_scmi::{Channel, Sensor};
+use fw::aml::cpc::{self, Cpc, MAX_CPCS};
+use netdev::AckSlot;
 use sync::{Local, Signal};
 
 /// Hoe lang de Realtek op een link wacht: NBASE-T-autonegotiatie kan
@@ -238,9 +239,9 @@ impl Platform for Cix {
     /// `hopos.nicirq` kiest anders (`msix`, `intx`, `off`, een INTID).
     ///
     /// De ack is voor beide dezelfde (`IrqAck::ack`: masker dicht, status
-    /// schoon); de driver heropent het masker in `flush`. Bij INTx is dat
-    /// de level-lijn laten vallen (de freeze van 17/18-09), bij MSI-X de
-    /// voorwaarde voor een volgende flank.
+    /// schoon); de driver heropent het masker in `receive` als de ring leeg
+    /// is. Bij INTx is dat de level-lijn laten vallen (de freeze van
+    /// 17/18-09), bij MSI-X de voorwaarde voor een volgende flank.
     fn probe_nic(&self, _uefi: &Uefi) -> Result<Option<Rtl8126>, Error> {
         let segs = pcie::segments();
         let Some(hit) = pcie::first_in(&segs, 2, |f| driver_rtl8126::supported(f.vendor, f.device))
@@ -274,7 +275,7 @@ impl Platform for Cix {
         })?;
         let wired = match segs.as_slice().iter().find(|(_, s)| *s == hit.root_bus) {
             Some((e, _)) => {
-                NIC_ACK.get().set(Some(nic.irq_ack()));
+                NIC_ACK.set(nic.irq_ack());
                 let at = board_uefi::irq::At {
                     ecam: e,
                     seg: seg_of(hit.root_bus),
@@ -307,13 +308,11 @@ static NIC_BELL: Signal = Signal::new();
 
 /// De ack van de Realtek (masker dicht, status schoon), voor de dispatch
 /// op de kern-core; gezet vóór de lijn scherp gaat.
-static NIC_ACK: Local<Cell<Option<driver_rtl8126::IrqAck>>> = Local::new(Cell::new(None));
+static NIC_ACK: AckSlot<driver_rtl8126::IrqAck> = AckSlot::new();
 
 /// De ack van de NIC-lijn, uit de dispatch vóór de EOI.
 fn rtl_ack() {
-    if let Some(a) = NIC_ACK.get().get() {
-        let _ = a.ack();
-    }
+    NIC_ACK.ack();
 }
 
 /// Het PCI-segment van het venster dat op `root_bus` begint (op de O6N

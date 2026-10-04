@@ -114,8 +114,10 @@ const CBASER_INNER_NC: u64 = 1 << 59;
 const BASER_TYPE_DEVICES: u64 = 1;
 const BASER_TYPE_COLLECTIONS: u64 = 4;
 /// Hoe lang we op de ITS wachten (commando's, quiescent): ruim boven wat
-/// een GIC-600 of -700 doet (microseconden), ver onder een hang.
-const POLLS: u32 = 1 << 20;
+/// een GIC-600 of -700 doet (microseconden), ver onder een hang; Linux
+/// wacht beide keren een seconde (`its_force_quiescent`,
+/// `its_wait_for_range_completion`).
+const WAIT_NS: u64 = 1_000_000_000;
 
 /// De commando's (ARM IHI 0069, §5.13).
 mod cmd {
@@ -308,6 +310,8 @@ impl fmt::Display for Describe {
 pub struct Its {
     base: Pa,
     mem: Pa,
+    /// Monotone nanoseconden, voor de wachten.
+    now: fn() -> u64,
     /// De LPI-configuratietabel van de redistributor: de eigen, of die van
     /// de eerste ITS ([`Its::beside`]).
     prop: Pa,
@@ -328,7 +332,8 @@ pub struct Its {
 }
 
 impl Its {
-    /// De ITS op `base` met zijn tabellen in `mem`.
+    /// De ITS op `base` met zijn tabellen in `mem`; `now` geeft monotone
+    /// nanoseconden.
     ///
     /// # Safety
     ///
@@ -337,11 +342,12 @@ impl Its {
     /// van niemand anders dan deze ITS en de redistributor van de kern-core,
     /// zolang het programma draait.
     #[must_use]
-    pub const unsafe fn new(base: Pa, mem: Pa) -> Self {
+    pub const unsafe fn new(base: Pa, mem: Pa, now: fn() -> u64) -> Self {
         // INVARIANT: de voorwaarde hierboven.
         Self {
             base,
             mem,
+            now,
             prop: mem.add(PROP_OFF),
             lpi_base: crate::FIRST_LPI,
             cwriter: 0,
@@ -425,12 +431,8 @@ impl Its {
         // Uit en quiescent: alleen dan mogen BASER en CBASER veranderen (een
         // vorige kern, of firmware die hem aanliet).
         g.ctlr.update(|c| c & !CTLR_ENABLED);
-        let mut n = 0;
-        while g.ctlr.read() & CTLR_QUIESCENT == 0 {
-            n += 1;
-            if n > POLLS {
-                return Err(Error::Busy);
-            }
+        if !dev::poll_until(self.now, WAIT_NS, || g.ctlr.read() & CTLR_QUIESCENT != 0) {
+            return Err(Error::Busy);
         }
         self.ite = ((typer >> 4) & 0xf) + 1;
         let dev_bits = (((typer >> 13) & 0x1f) + 1) as u32;
@@ -561,23 +563,21 @@ impl Its {
         }
         dev::mb();
         g.cwriter.write(self.cwriter);
-        let mut n = 0;
-        loop {
-            let r = g.creadr.read();
-            if r & 1 != 0 {
-                return Err(Error::Stalled { at: r & !0x1f });
-            }
-            if r & 0xf_ffe0 == self.cwriter {
-                return Ok(());
-            }
-            n += 1;
-            if n > POLLS {
-                return Err(Error::Timeout {
-                    creadr: r,
-                    cwriter: self.cwriter,
-                });
-            }
+        let mut r = 0;
+        let done = dev::poll_until(self.now, WAIT_NS, || {
+            r = g.creadr.read();
+            r & 1 != 0 || r & 0xf_ffe0 == self.cwriter
+        });
+        if r & 1 != 0 {
+            return Err(Error::Stalled { at: r & !0x1f });
         }
+        if !done {
+            return Err(Error::Timeout {
+                creadr: r,
+                cwriter: self.cwriter,
+            });
+        }
+        Ok(())
     }
 
     /// Zorgt dat DeviceID `dev` in de device-tabel past; in twee niveaus
@@ -730,6 +730,14 @@ impl Its {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+    /// Een klok die per blik een milliseconde verder staat: een wacht die
+    /// nooit slaagt, loopt na duizend blikken af.
+    fn ticking() -> u64 {
+        static T: AtomicU64 = AtomicU64::new(0);
+        T.fetch_add(1_000_000, Relaxed)
+    }
 
     /// Nep-ITS: het frame (128 KB) en de regio als u64-vectoren.
     struct Fake {
@@ -790,7 +798,7 @@ mod tests {
         let mut f = Fake::new(TYPER, &[dev_baser, coll_baser]);
         let (base, mem) = (f.base(), f.mem());
         // SAFETY: nep-frame en nep-regio leven de hele test.
-        let mut its = unsafe { Its::new(base, mem) };
+        let mut its = unsafe { Its::new(base, mem, ticking) };
         // De nep-rij loopt nooit leeg: init komt tot MAPC en wacht dan.
         let e = its.init(Pa(0x0808_0000), 0x0100).unwrap_err();
         assert!(matches!(e, Error::Timeout { .. }), "{e:?}");
@@ -822,7 +830,7 @@ mod tests {
         let mut f = Fake::new(typer, &[dev_baser]);
         let (base, mem) = (f.base(), f.mem());
         // SAFETY: zie hierboven.
-        let mut its = unsafe { Its::new(base, mem) };
+        let mut its = unsafe { Its::new(base, mem, ticking) };
         let _ = its.init(Pa(0x0808_0000), 0);
         let d = dev::read64(base.add(0x100));
         assert_ne!(d & BASER_INDIRECT, 0);
@@ -856,9 +864,9 @@ mod tests {
         let mut a = Fake::new(TYPER, &[dev_baser]);
         let mut b = Fake::new(TYPER, &[dev_baser]);
         // SAFETY: frames en regio's liggen in `a` en `b`.
-        let first = unsafe { Its::new(a.base(), a.mem()) };
+        let first = unsafe { Its::new(a.base(), a.mem(), ticking) };
         // SAFETY: zie hierboven.
-        let mut second = unsafe { Its::new(b.base(), b.mem()) }
+        let mut second = unsafe { Its::new(b.base(), b.mem(), ticking) }
             .beside(first.prop_table(), crate::FIRST_LPI + MAX_LPIS as u32);
         assert_eq!(second.base(), b.base());
         dev::write8(first.prop_table(), 0x55);
@@ -888,7 +896,7 @@ mod tests {
         let mut f = Fake::new(TYPER, &[dev_baser]);
         let (base, mem) = (f.base(), f.mem());
         // SAFETY: zie hierboven.
-        let mut its = unsafe { Its::new(base, mem) };
+        let mut its = unsafe { Its::new(base, mem, ticking) };
         let _ = its.init(Pa(0), 0);
         // De nep-ITS leest niets: doe alsof hij bij is, zodat `route` zijn
         // commando's kwijt kan en we ze kunnen lezen.
@@ -914,7 +922,7 @@ mod tests {
         let mut f = Fake::new(0, &[]);
         let (base, mem) = (f.base(), f.mem());
         // SAFETY: zie hierboven.
-        let mut its = unsafe { Its::new(base, mem) };
+        let mut its = unsafe { Its::new(base, mem, ticking) };
         assert_eq!(its.init(Pa(0), 0).unwrap_err(), Error::NotPhysical);
         assert_eq!(its.route(1, 0).unwrap_err(), Error::Down);
     }

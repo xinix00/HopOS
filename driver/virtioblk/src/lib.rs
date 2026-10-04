@@ -47,7 +47,8 @@ use core::fmt;
 use core::mem::{offset_of, size_of};
 use core::task::Poll;
 use dev::Pa;
-use driver_virtiopci::{FEAT_VERSION_1_HI, Mmio, Transport, mmio, status};
+pub use driver_virtiopci::IrqAck;
+use driver_virtiopci::{Mmio, Transport, mmio};
 use sync::Signal;
 
 /// De config van virtio-blk (virtio 1.2 §5.2.4), alleen voor de offsets:
@@ -172,27 +173,11 @@ const _: () = {
 /// Waarom de driver weigert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
-    /// Geen virtio-mmio op dit adres.
-    NotVirtio,
-    /// Een legacy transport (QEMU zonder `force-legacy=false`).
-    Legacy,
-    /// Wel virtio, maar geen blokapparaat.
-    NotBlock(u32),
-    /// Het device kwam niet terug uit de reset.
-    Reset,
+    /// Het opzetten liep vast in het transport of de handdruk (ook: geen
+    /// blokapparaat, een queue kleiner dan [`QSIZE`], te weinig DMA).
+    Setup(driver_virtiopci::Error),
     /// De capaciteit bleef veranderen terwijl de driver hem las.
     ConfigUnstable,
-    /// Het device weigerde de features.
-    FeaturesRefused,
-    /// De queue is er niet, of kleiner dan [`QSIZE`].
-    NoQueue(u32),
-    /// De DMA-regio is te klein.
-    DmaTooSmall {
-        /// Wat nodig was.
-        need: u64,
-        /// Wat er was.
-        have: u64,
-    },
     /// Een lengte die geen veelvoud van de sector is, of buiten de schijf.
     Range {
         /// De eerste sector.
@@ -227,16 +212,8 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
-            Self::NotVirtio => f.write_str("virtioblk: no virtio-mmio"),
-            Self::Legacy => f.write_str("virtioblk: legacy transport (need version 2)"),
-            Self::NotBlock(id) => write!(f, "virtioblk: device id {id} is not a block device"),
-            Self::Reset => f.write_str("virtioblk: device did not come back from reset"),
+            Self::Setup(e) => write!(f, "virtioblk: {e}"),
             Self::ConfigUnstable => f.write_str("virtioblk: capacity kept changing while read"),
-            Self::FeaturesRefused => f.write_str("virtioblk: device refused the features"),
-            Self::NoQueue(n) => write!(f, "virtioblk: queue 0 offers {n} entries, need {QSIZE}"),
-            Self::DmaTooSmall { need, have } => {
-                write!(f, "virtioblk: DMA region too small ({need} > {have} bytes)")
-            }
             Self::Range { sector, len } => {
                 write!(f, "virtioblk: {len} bytes at sector {sector} out of range")
             }
@@ -253,6 +230,12 @@ impl fmt::Display for Error {
             Self::Busy => f.write_str("virtioblk: a request is still in flight"),
             Self::Idle => f.write_str("virtioblk: no request in flight"),
         }
+    }
+}
+
+impl From<driver_virtiopci::Error> for Error {
+    fn from(e: driver_virtiopci::Error) -> Self {
+        Self::Setup(e)
     }
 }
 
@@ -282,25 +265,6 @@ struct Pending {
     noop: bool,
 }
 
-/// De lijn-kant van virtio-blk over virtio-mmio: de interrupt bevestigen
-/// in de dispatch van het board, los van de driver (die is van de
-/// hopfs-actor).
-#[derive(Clone, Copy)]
-pub struct IrqAck {
-    t: Mmio,
-}
-
-impl IrqAck {
-    /// Bevestigt de interrupt (InterruptStatus terug naar InterruptACK),
-    /// waarop het device zijn level-lijn loslaat. Geeft de bits die stonden.
-    pub fn ack(&self) -> u32 {
-        // InterruptStatus en InterruptACK delen niets met de ring, dus een
-        // kopie van het transport naast de driver is veilig (virtio-net doet
-        // hetzelfde).
-        self.t.ack_interrupt()
-    }
-}
-
 /// Eén virtio-blk met zijn queue en DMA-buffer, over een virtio-transport:
 /// virtio-mmio op QEMU virt, virtio-pci onder EDK2.
 pub struct VirtioBlk<T: Transport = Mmio> {
@@ -316,9 +280,9 @@ pub struct VirtioBlk<T: Transport = Mmio> {
     pending: Option<Pending>,
     irq: Option<&'static Signal>,
     /// Meetlat: afgehandelde verzoeken.
-    pub requests: u64,
+    requests: u64,
     /// Meetlat: het langste verzoek in nanoseconden.
-    pub slowest_ns: u64,
+    slowest_ns: u64,
 }
 
 impl VirtioBlk<Mmio> {
@@ -336,10 +300,7 @@ impl VirtioBlk<Mmio> {
     pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
         // SAFETY: de eerste helft van de voorwaarde van deze functie.
         let t = unsafe { Mmio::new(base) };
-        t.check().map_err(|e| match e {
-            driver_virtiopci::Error::Legacy { .. } => Error::Legacy,
-            _ => Error::NotVirtio,
-        })?;
+        t.check()?;
         // SAFETY: de tweede helft van de voorwaarde van deze functie.
         unsafe { Self::with_transport(t, dma, dma_size, clock) }
     }
@@ -347,7 +308,7 @@ impl VirtioBlk<Mmio> {
     /// Het interrupt-pad, voor de dispatch van het board.
     #[must_use]
     pub fn irq_ack(&self) -> IrqAck {
-        IrqAck { t: self.t }
+        self.t.irq_ack()
     }
 }
 
@@ -364,14 +325,19 @@ impl<T: Transport> VirtioBlk<T> {
     /// draait.
     pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
         if dma_size < DMA_NEED {
-            return Err(Error::DmaTooSmall {
+            return Err(driver_virtiopci::Error::DmaTooSmall {
                 need: DMA_NEED,
                 have: dma_size,
-            });
+            }
+            .into());
         }
         let id = t.device_id();
         if id != DEVICE_BLK {
-            return Err(Error::NotBlock(id));
+            return Err(driver_virtiopci::Error::WrongDevice {
+                want: DEVICE_BLK,
+                got: id,
+            }
+            .into());
         }
         let mut d = Self {
             t,
@@ -388,7 +354,11 @@ impl<T: Transport> VirtioBlk<T> {
             requests: 0,
             slowest_ns: 0,
         };
-        d.negotiate()?;
+        // VERSION_1, plus wat van FLUSH en RO geboden wordt.
+        let lo =
+            d.t.negotiate(clock, |t| t.device_features(0) & (FEAT_FLUSH | FEAT_RO))?;
+        d.flush = lo & FEAT_FLUSH != 0;
+        d.read_only = lo & FEAT_RO != 0;
 
         // De capaciteit, consistent gelezen: de config-generatie mag tussen
         // de twee helften niet wisselen.
@@ -399,38 +369,18 @@ impl<T: Transport> VirtioBlk<T> {
         d.t.select_queue(0);
         let max = d.t.queue_num_max();
         if max < QSIZE {
-            return Err(Error::NoQueue(u32::from(max)));
+            return Err(driver_virtiopci::Error::NoQueue {
+                queue: 0,
+                offered: max,
+            }
+            .into());
         }
         d.t.set_queue_num(QSIZE);
         dev::clear(dma, DATA_OFF as usize);
         d.t.set_queue_addrs(dma.add(DESC_OFF), dma.add(AVAIL_OFF), dma.add(USED_OFF));
         d.t.enable_queue();
-        d.t.set_status(
-            status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK,
-        );
+        d.t.driver_ok();
         Ok(d)
-    }
-
-    /// De status-handdruk tot en met FEATURES_OK: reset, ACK, DRIVER, en
-    /// VERSION_1 plus wat van FLUSH en RO geboden wordt.
-    fn negotiate(&mut self) -> Result {
-        let t = &self.t;
-        if !t.reset() {
-            return Err(Error::Reset);
-        }
-        t.set_status(status::ACKNOWLEDGE);
-        t.set_status(status::ACKNOWLEDGE | status::DRIVER);
-
-        let offered = t.device_features(0);
-        self.flush = offered & FEAT_FLUSH != 0;
-        self.read_only = offered & FEAT_RO != 0;
-        t.set_driver_features(0, offered & (FEAT_FLUSH | FEAT_RO));
-        t.set_driver_features(1, FEAT_VERSION_1_HI);
-        t.set_status(status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK);
-        if t.status() & status::FEATURES_OK == 0 {
-            return Err(Error::FeaturesRefused);
-        }
-        Ok(())
     }
 
     /// De capaciteit in sectoren van 512 bytes.
@@ -495,10 +445,7 @@ impl<T: Transport> VirtioBlk<T> {
         let avail = self.dma.add(AVAIL_OFF);
         dev::write16(avail.add(4 + u64::from(self.avail_idx % QSIZE) * 2), 0);
         self.avail_idx = self.avail_idx.wrapping_add(1);
-        // De keten staat er vóór de index; de index vóór de doorbell.
-        dev::mb();
-        dev::write16(avail.add(2), self.avail_idx);
-        dev::mb();
+        driver_virtiopci::publish(avail, self.avail_idx);
         self.t.notify(0);
     }
 
@@ -671,6 +618,17 @@ impl<T: Transport> blkdev::AsyncBlockDevice for VirtioBlk<T> {
 
     fn irq(&self) -> Option<&'static Signal> {
         self.irq
+    }
+
+    /// Dezelfde namen als de NVMe-kern (`commands`, `slowest_us`).
+    fn stats(&self, out: &mut dyn fmt::Write) -> core::result::Result<u64, fmt::Error> {
+        write!(
+            out,
+            "commands={} slowest_us={}",
+            self.requests,
+            self.slowest_ns / 1000
+        )?;
+        Ok(self.requests)
     }
 }
 

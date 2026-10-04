@@ -11,10 +11,10 @@
 //! de klok (867 tegen 267 Msteps/s = 2600/800 MHz), het beleid zakt na 30 s
 //! en klokt onder last binnen ~15 ms op.
 
-use crate::cpc::Cpc;
 use bounded::BoundedVec;
 use dev::Pa;
 use driver_dvfs::{Knob, Level};
+use fw::aml::cpc::Cpc;
 
 /// Hoeveel domeinen: de O6N heeft er vijf (vier A720-paren en de A520's).
 pub const MAX_DOMAINS: usize = 8;

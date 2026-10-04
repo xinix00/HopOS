@@ -14,8 +14,8 @@
 //! Dat is de DRBG van de kern (`cpu::drbg`), die dan op timing-jitter zaait;
 //! de PRNG-terugval die Go per trekking had, bestaat hier dus niet meer.
 //!
-//! Sans-I/O: de driver praat via [`Regs`], op ijzer [`Mmio`] en op de host
-//! een nep-blok met een FIFO (tests.rs). Eén eigenaar (de DRBG op de
+//! Sans-I/O: de driver praat via [`dev::Io`], op ijzer [`dev::Mmio`] en op
+//! de host een nep-blok met een FIFO (tests.rs). Eén eigenaar (de DRBG op de
 //! executor van core 0), dus `&mut self` en geen slot; Go had hier een
 //! `sync.Mutex` omdat de Go-runtime vanaf elke core trok.
 //!
@@ -45,7 +45,7 @@
 )]
 
 use core::fmt;
-use dev::Pa;
+use dev::Io;
 
 #[cfg(test)]
 mod tests;
@@ -92,41 +92,6 @@ pub const WARMUP_NS: u64 = 2_000_000_000;
 /// Hoe lang elk volgend woord mag duren. Na de warm-up levert de RBG
 /// continu; dit raakt alleen bij een storing.
 pub const WORD_NS: u64 = 20_000_000;
-
-/// De registers van één RNG200: lezen en schrijven op een offset.
-pub trait Regs {
-    /// Leest het 32-bit-register op `off`.
-    fn read(&mut self, off: u64) -> u32;
-    /// Schrijft het 32-bit-register op `off`.
-    fn write(&mut self, off: u64, v: u32);
-}
-
-/// Het echte registerblok, via `dev`.
-pub struct Mmio {
-    base: Pa,
-}
-
-impl Mmio {
-    /// Het blok op `base`.
-    ///
-    /// # Safety
-    ///
-    /// `base` is het RNG200-blok van deze SoC, Device-gemapt, en niemand
-    /// anders schrijft erin.
-    #[must_use]
-    pub const unsafe fn new(base: Pa) -> Self {
-        Self { base }
-    }
-}
-
-impl Regs for Mmio {
-    fn read(&mut self, off: u64) -> u32 {
-        dev::read32(self.base.add(off))
-    }
-    fn write(&mut self, off: u64, v: u32) {
-        dev::write32(self.base.add(off), v);
-    }
-}
 
 /// Waarom de RNG200 niets leverde.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -176,14 +141,14 @@ impl fmt::Display for Error {
 pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 
 /// Eén RNG200: de registers, de klok en of de warm-up al gedaan is.
-pub struct Rng200<R: Regs> {
+pub struct Rng200<R: Io> {
     regs: R,
     clock: fn() -> u64,
     started: bool,
     last: Option<u32>,
 }
 
-impl<R: Regs> Rng200<R> {
+impl<R: Io> Rng200<R> {
     /// Een RNG200 die nog niet gestart is; de eerste [`fill`](Self::fill)
     /// start hem. `clock` geeft monotone nanoseconden.
     pub const fn new(regs: R, clock: fn() -> u64) -> Self {

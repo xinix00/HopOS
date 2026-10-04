@@ -19,8 +19,8 @@
 //! is zelf een `LocalCell`), bij de boot en bij elke herzaaiing.
 
 use cpu::trng;
-use dev::Pa;
-use driver_rkrng::{Mmio, Trng};
+use dev::{Mmio, Pa};
+use driver_rkrng::Trng;
 use sync::LocalCell;
 
 /// Het TRNG-blok (rk356x-base.dtsi: `rng@fe388000`, `rockchip,rk3568-rng`).

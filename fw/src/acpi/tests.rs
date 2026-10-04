@@ -817,3 +817,49 @@ fn iort_maps_a_requester_id_to_its_device_id() {
     assert_eq!(r.its, (1, Some(7)));
     assert_eq!(iort_route(&t, 0, 0x10).unwrap().smmu, None);
 }
+
+/// Eén type-`typ`-subkanaal van 62 bytes met herkenbare velden.
+fn subspace(typ: u8, shmem: u64, db: u64, preserve: u64, write: u64, lat: u32) -> Vec<u8> {
+    let mut e = vec![0u8; 62];
+    e[0] = typ;
+    e[1] = 62;
+    e[8..16].copy_from_slice(&shmem.to_le_bytes());
+    e[16..24].copy_from_slice(&0x100u64.to_le_bytes());
+    e[25] = 32;
+    e[28..36].copy_from_slice(&db.to_le_bytes());
+    e[36..44].copy_from_slice(&preserve.to_le_bytes());
+    e[44..52].copy_from_slice(&write.to_le_bytes());
+    e[52..56].copy_from_slice(&lat.to_le_bytes());
+    e
+}
+
+/// `pcct_test.go`: de ordinale nummering, de offsets uit de spec, en
+/// nette afwijzing van ontbrekende indexen en extended types.
+#[test]
+fn pcct_subspaces_are_counted_in_order() {
+    let mut t = vec![0u8; 48];
+    t.extend(subspace(2, 0x8860_0000, 0x1000_0054_0010, !1, 1, 500));
+    t.extend(subspace(1, 0x8860_1000, 0x1000_0054_0020, 0, 0x53, 100));
+    t.extend(subspace(3, 0xdead, 0xbeef, 0, 0, 0));
+    let p = pcct_subspace(&t, 0).unwrap();
+    assert_eq!(
+        p,
+        Pcc {
+            shmem: 0x8860_0000,
+            shmem_len: 0x100,
+            doorbell: 0x1000_0054_0010,
+            doorbell_width: 32,
+            preserve: !1,
+            write: 1,
+            latency_us: 500,
+        }
+    );
+    let p = pcct_subspace(&t, 1).unwrap();
+    assert_eq!((p.shmem, p.write), (0x8860_1000, 0x53));
+    assert_eq!(pcct_subspace(&t, 2), None, "extended type");
+    assert_eq!(pcct_subspace(&t, 9), None);
+    assert_eq!(pcct_subspace(&[], 0), None);
+    let mut broken = vec![0u8; 48];
+    broken.extend([2, 200]);
+    assert_eq!(pcct_subspace(&broken, 0), None);
+}
