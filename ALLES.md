@@ -39,26 +39,17 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Nu
 
-- [ ] Agent: `tools/meet`, de meetronde als één programma (de O6N als
-      tegenpartij, per bord de kolom van measurements.md, wachten op markers
-      in plaats van op slaap, parallel waar het kan, opruimen, `--write` zet
-      de cellen vooraan); doel ongeveer tien minuten voor alle borden in
-      plaats van 80 minuten met zeven agenten.
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
       van dit weekend), geland zijn 8.1, 8.2 en 8.3, 8.4, 8.5, 8.6, 8.9 (ebea7eb), 8.13
       (249963d), 8.15 en 8.16, en de restjes (92071eb: clock naar now,
       HOPOS_IRQ_STUCK en HOPOS_IRQ_STORM, de Hop-bootregel na een warme flip
-      met HOPOS_HOP_GROUP_COLD); nog bezig 8.7 en 8.8 (arm64 en riscv, de
-      assembly), 8.10 en 8.11 (oneshot, de dubbele paden), 8.12 (pollen),
-      8.14 (de scripts). Alles na 3.0.9
+      met HOPOS_HOP_GROUP_COLD); 8.14 (de scripts, d4d8700); nog bezig 8.7 en 8.8 (arm64 en riscv, de
+      assembly: herbasseert), 8.10 en 8.11 (oneshot, de dubbele paden), 8.12
+      (pollen). Alles na 3.0.9
       komt in een volgende release na een eigen ijzerronde (de bootregels
       per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
       paden), 8.12 (pollen), 8.13 (apps).
-- [ ] Agent (herbasseert op main). NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
-      eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
-      zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
-      de igb en de RTL8125 al hebben.
 - [ ] De media met `hop image --config` op v3.0.9 (Derek; Hop blijft 3.0.8,
       de ABI is gelijk): Radxa-kaart
       (v3.0.5 stormt na 2 GiB door de MMC-maskers), Altra-stick (v3.0.7
@@ -105,6 +96,12 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
+- [ ] De hairpin-storm lag in de ronde van tools/meet lager dan vanochtend:
+      O6N 891 tegen 1983, Pi 4 1085 tegen 1942, Altra 710 tegen 1000 conn/s;
+      en over de draad wisselt de O6N-kant sterk per ronde (Pi 5 in 69 tot
+      86, de O6N van de M4 73 tot 118). Opnieuw meten met `tools/meet.py`
+      als er niets anders op de borden gebeurt; dan weten we of het de
+      kern van vandaag is of de drukte.
 - [ ] Pi 4 ontvangen 65 MB/s tegen zenden 113: de genet leest sinds bca6c70
       uit WB met een veeg en dat gaf niets (P70 64,8, daarvoor 52 tot 72),
       dus de rem zit in de gepolde RX-weg zelf (geen IRQ-lijn: de pomp pollt
