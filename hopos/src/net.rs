@@ -1113,8 +1113,8 @@ async fn console_reader(
     if let Some(n) = crate::conport::READERS.freed(why) {
         // Met het budget van de stack erbij: een SYN die geen budget krijgt,
         // krijgt een RST, en dan faalt ook `nc -z` (O6N, Radxa, 02-10).
-        let (free, refused) = on_stack(|st| Ok((st.budget_free(), st.stats().refused_no_budget)))
-            .unwrap_or((0, 0));
+        let (free, refused) =
+            on_stack(|st| Ok((st.budget_free(), st.stats().refused_no_budget))).unwrap_or((0, 0));
         println!(
             "console: {n}; stack budget {} KiB free, {refused} SYNs refused for budget HOPOS_CONPORT_FREED",
             free / 1024

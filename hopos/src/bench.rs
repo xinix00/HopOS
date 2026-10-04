@@ -1,5 +1,7 @@
 //! De meetbanken van de kern, aan met een bootparameter: `hopos.nvmebench=1`
-//! (of de feature `nvmebench`, voor een meetkern die je flipt)
+//! (of de feature `nvmebench`, voor een meetkern die je flipt), de
+//! watchdogtoets (feature `wdtest`: Hop stopt na een minuut, de watchdog
+//! moet resetten),
 //! (de schijf rauw en door hopfs, Go: `nvmeBench` en `hopfsBench` in
 //! `OLD/metal/cmd/hopos/nvmebench.go`) en `hopos.idlestat=1` (de
 //! idle-meetlat van de OS-core, Go: `idleStat` in `node.go`).
@@ -30,9 +32,11 @@ use alloc::vec::Vec;
 use blkdev::{AsyncBlockDevice, BlockIo, LBA_SIZE, Op, Paced, Queue, Spin, block_on};
 use core::sync::atomic::Ordering::Relaxed;
 use core::task::Poll;
+use core::time::Duration;
 use cpu::println;
 use executor::Executor;
 use kern::hopfs::Fs;
+use kern::slots::{Reply, Request, Response};
 use sync::Pool;
 
 /// De staart die de bench hoogstens beschrijft.
@@ -85,6 +89,15 @@ pub(crate) fn start(
             Err(_) => println!("bench: idlestat not spawned HOPOS_IDLESTAT_FAIL"),
         }
     }
+    if cfg!(feature = "wdtest") {
+        match exec.spawn(wdtest(exec)) {
+            Ok(()) => println!(
+                "bench: watchdog test armed: Hop stops in {} s, the watchdog must reset this node HOPOS_WDTEST_ARMED",
+                WDTEST_AFTER.as_secs()
+            ),
+            Err(_) => println!("bench: wdtest not spawned HOPOS_WDTEST_FAIL"),
+        }
+    }
     if cfg!(feature = "nvmebench") || bootparam(dtb, "hopos.nvmebench") == "1" {
         match disk.as_mut() {
             Some(d) => bench_disk(exec, d),
@@ -92,6 +105,38 @@ pub(crate) fn start(
         }
     }
     disk
+}
+
+/// Hoe lang de watchdogtoets de node gewoon laat draaien voordat hij Hop
+/// stopt: lang genoeg voor de boot, de adoptie na een flip en de eerste
+/// canary-rondes.
+const WDTEST_AFTER: Duration = Duration::from_secs(60);
+
+/// De brievenbus van de watchdogtoets bij de lifecycle-actor.
+static WDTEST_REPLY: Reply = Reply::new();
+
+/// De watchdogtoets (feature `wdtest`): na [`WDTEST_AFTER`] vraagt de kern
+/// de lifecycle-actor Hop (slot 1) te stoppen. Daarna slaagt de canary
+/// niet meer, de kern pet de watchdog niet meer, en de hardware-watchdog
+/// moet de node binnen zijn termijn terugzetten op de kern van de kaart of
+/// stick. Zo toets je de echte watchdog zonder een kabel te trekken.
+async fn wdtest(exec: &'static Executor) {
+    exec.after(WDTEST_AFTER).await;
+    let Some(slot) = kern::Slot::new(1) else {
+        return;
+    };
+    let req = Request::Stop {
+        slot,
+        timeout: Duration::from_secs(5),
+    };
+    match kern::slots::call(&crate::LIFECYCLE, &WDTEST_REPLY, req).await {
+        Ok(Response::Failed(e)) | Err(e) => {
+            println!("bench: watchdog test could not stop Hop: {e} HOPOS_WDTEST_FAIL");
+        }
+        Ok(_) => println!(
+            "bench: Hop stopped for the watchdog test; no canary, no pets: the reset must follow HOPOS_WDTEST_HOP_STOPPED"
+        ),
+    }
 }
 
 /// De idle-meetlat van de OS-core, per `every` seconden: wekken en

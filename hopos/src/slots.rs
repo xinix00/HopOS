@@ -811,7 +811,10 @@ fn init_hop_group(hop_cfg: &str) {
     let want = cfg.one("hopos.hop.sharegroup");
     let (name, why): (&[u8], &str) = match want {
         "" if arch::SHARES_OS_CORE => (kern::pool::SYSTEM_GROUP, "default"),
-        "" => (kern::pool::HOP_GROUP, "default, this board does not share the OS core"),
+        "" => (
+            kern::pool::HOP_GROUP,
+            "default, this board does not share the OS core",
+        ),
         "system" if !arch::SHARES_OS_CORE => (
             kern::pool::HOP_GROUP,
             "hopos.hop.sharegroup=system refused: this board does not share the OS core",
@@ -823,7 +826,9 @@ fn init_hop_group(hop_cfg: &str) {
             "slots: Hop in the sharegroup {} ({why}) HOPOS_HOP_GROUP",
             core::str::from_utf8(name).unwrap_or("?")
         ),
-        Err(e) => println!("slots: hopos.hop.sharegroup: {e}, Hop in the group hop HOPOS_HOP_GROUP"),
+        Err(e) => {
+            println!("slots: hopos.hop.sharegroup: {e}, Hop in the group hop HOPOS_HOP_GROUP")
+        }
     }
 }
 
