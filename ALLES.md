@@ -40,15 +40,20 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 ### Nu
 
 - [ ] Hoofdstuk 8 van docs/description.md (de kanttekeningen vóór de release
-      van dit weekend), eerste golf: geland zijn 8.1 (de zeven fouten, 0f03544), 8.4 (het
-      Board-contract, a0eaeb0), 8.5 (interrupts via één Controller,
-      8e8cea4) en 8.15 en 8.16 (docs en dode code, f1917f0); 8.6 (de
-      drivers) wordt herbasseerd op het Board-contract; nog bezig 8.2 en
-      8.3 abi als enige waarheid en 8.14 de scripts in lib.sh met één
-      runner. Alles na 3.0.9 komt in een volgende release na een eigen
-      ijzerronde (de bootregels per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
+      van dit weekend), geland zijn 8.1 (0f03544), 8.2 en 8.3 (c6e0bf8), 8.4 (a0eaeb0), 8.5
+      (8e8cea4), 8.6 (67e5a3a), 8.15 en 8.16 (f1917f0); nog bezig 8.14 (de
+      scripts) en de tweede golf: 8.7 en 8.8 (arm64 en riscv, de assembly),
+      8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
+      paden), 8.12 (pollen), 8.13 (apps), plus de restjes (clock naar now,
+      HOPOS_IRQ_STUCK, de Hop-bootregel na een warme flip). Alles na 3.0.9
+      komt in een volgende release na een eigen ijzerronde (de bootregels
+      per bord letterlijk gelijk). Tweede golf daarna: 8.7 en 8.8 (arm64 en riscv, de assembly),
       8.9 (config en firmware-feiten), 8.10 en 8.11 (oneshot, de dubbele
       paden), 8.12 (pollen), 8.13 (apps).
+- [ ] Agent op de Altra en de O6N. NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
+      eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
+      zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
+      de igb en de RTL8125 al hebben.
 - [ ] De media met `hop image --config` op v3.0.9 (Derek; Hop blijft 3.0.8,
       de ABI is gelijk): Radxa-kaart
       (v3.0.5 stormt na 2 GiB door de MMC-maskers), Altra-stick (v3.0.7
@@ -65,10 +70,6 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       zegt de bootregel `hop` terwijl Hop nog in `system` zit, en jobs met
       `sharegroup: hop` krijgen tot de volgende koude start een eigen core.
       De bootregel moet zeggen waar Hop echt zit.
-- [ ] NVMe op PCI zonder interruptlijn: de pacer van blkdev::Queue pollt de
-      eerste 100 us na elke opdracht elke ronde, dus de OS-core slaapt nooit
-      zolang er een lees in de lucht is en kern-cpu zegt niets; MSI-X zoals
-      de igb en de RTL8125 al hebben.
 - [ ] Hop: chunked transfer weigert; een plaatsing zonder capaciteit blijft
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
