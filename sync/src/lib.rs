@@ -16,6 +16,8 @@
 //! - [`Timer`]: de klok en de slaap van een taak.
 //! - [`Futures`]: een vaste set futures van één soort in één taak (een
 //!   actor met meerdere verzoeken in de lucht).
+//! - [`Doors`]: een vaste pool werkers met één acceptor; wie vrijkomt,
+//!   wekt de acceptor.
 //!
 //! Wat hier NIET staat: een mutex. Zie het handboek §1 en §3.
 
@@ -30,6 +32,7 @@
     )
 )]
 
+pub mod doors;
 pub mod futures;
 pub mod local;
 pub mod mpsc;
@@ -39,6 +42,7 @@ pub mod spsc;
 pub mod stop;
 pub mod waker;
 
+pub use doors::Doors;
 pub use futures::Futures;
 pub use local::{Local, LocalCell};
 pub use select::{Either, select};

@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::hopfs::Fs;
-use crate::slots::tests::{FakeConsole, Obey, actor, start};
+use crate::slots::tests::{FakeConsole, Obey, actor, start, stop};
 use abi::hopabi::STATUS_ERROR;
 use std::vec;
 use std::vec::Vec;
@@ -1304,4 +1304,44 @@ fn two_bundles_of_one_app_share_the_device_and_a_write_waits_for_both() {
         d.out[at..at + 4096].iter().all(|&x| x == 9),
         "zag de schrijf"
     );
+}
+
+/// Een klok die nooit afloopt: wat de committer dan nog doet, deed hij op
+/// een gebeurtenis.
+struct Frozen;
+
+impl Timer for Frozen {
+    fn now(&self) -> u64 {
+        0
+    }
+    fn sleep(&self, _: Duration) -> impl Future<Output = ()> {
+        core::future::pending()
+    }
+}
+
+// De committer hoort een stop van de servicer-tabel, niet van een ronde
+// langs de tabel: met een klok die stilstaat legt hij de boom toch vast,
+// meteen na de stop, en verder niets.
+#[test]
+fn the_committer_commits_on_the_bell_of_a_stop() {
+    let (svc, con) = (Servicers::new(), FakeConsole::default());
+    let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+    let inbox: FsInbox<'_> = Mailbox::new();
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    let mut c = core::pin::pin!(committer(&svc, &inbox, &Frozen, 4));
+    start(&mut a, 2, 8, 1).unwrap();
+    assert!(c.as_mut().poll(&mut cx).is_pending());
+    assert!(inbox.try_recv().is_none(), "a start is no reason to commit");
+    stop(&mut a, 2).unwrap();
+    assert!(c.as_mut().poll(&mut cx).is_pending());
+    let Some(FsEnvelope {
+        msg: FsMsg::Commit(why),
+        ..
+    }) = inbox.try_recv()
+    else {
+        panic!("no commit after the stop");
+    };
+    assert_eq!(why, CommitWhy::Stopped(s(2)));
+    assert!(c.as_mut().poll(&mut cx).is_pending());
+    assert!(inbox.try_recv().is_none(), "one stop, one commit");
 }

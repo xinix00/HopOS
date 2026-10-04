@@ -145,9 +145,11 @@ board waar de app voor bedoeld is. Wat langer duurt, is werk voor een
 ### Pools, geen taak per verbinding
 
 Het aantal taken staat vast bij de compiler (het handboek, §2). Een werker
-wacht op zijn mailbox; een acceptor deelt uit. Een pool die vol is, laat de
-verbinding wachten in de accept-wachtrij; hij gaat niet rondkijken of er al
-een werker vrij is.
+wacht achter zijn deur; een acceptor deelt uit (`sync::Doors`, zoals in
+welcome, bench en vitals). Een pool die vol is, laat de verbinding wachten
+in de accept-wachtrij, en de acceptor wacht op de eerste werker die zich
+vrij meldt (`Doors::place`); hij gaat niet rondkijken of er al een werker
+vrij is.
 
 ### Veel kleine lezingen: bundelen
 

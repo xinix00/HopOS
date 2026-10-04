@@ -119,7 +119,7 @@ use kern::slots::{Reply, Request, Response, SlotState};
 use kern::system::FlipBundle;
 use net::nat::{self as nat, MAX_ADOPT};
 use net::switch::{Ack, Command, NatReply};
-use sync::{Either, Local, Signal, select};
+use sync::{Either, Local, Signal, Stop, select};
 use vboard::slots::{
     BOOT_SCRATCH_PA, FLIP_RECORDER_PA, FLIP_TRAMP_PA, STAGE_HDR_PA, STAGE_MAX, STAGE_PA,
 };
@@ -202,8 +202,9 @@ static FIRMWARE_X0: AtomicU64 = AtomicU64::new(0);
 static GENERATION: AtomicU64 = AtomicU64::new(1);
 /// De som van de bundel waaruit deze kern kwam (0 = koud).
 static SUM: AtomicU64 = AtomicU64::new(0);
-/// Gezet door de slots na een geslaagde adoptie (de guard leest).
-static ADOPTED: AtomicBool = AtomicBool::new(false);
+/// Geluid door de slots na een geslaagde adoptie: de guard leest hem, het
+/// NAT-herstel wacht erop.
+static ADOPTED: Stop = Stop::new();
 /// Deze kern landde uit een KOUDE flip: niets te adopteren, wel de guard.
 static COLD_LANDED: AtomicBool = AtomicBool::new(false);
 /// De zwarte doos staat open: vanaf nu gaat elke consoleregel erin. Pas na
@@ -593,7 +594,7 @@ fn reset() -> ! {
 
 /// De slots meldden een geslaagde adoptie.
 pub(crate) fn adopted_ok() {
-    ADOPTED.store(true, Relaxed);
+    ADOPTED.set();
 }
 
 /// De flip-boot-guard: een geflipte kern moet binnen [`GRACE`] zijn
@@ -617,7 +618,7 @@ pub(crate) async fn guard(exec: &'static Executor) {
     let generation = generation();
     let cold = COLD_LANDED.load(Relaxed);
     loop {
-        if (cold || ADOPTED.load(Relaxed)) && crate::net::uplink_ip().is_some() {
+        if (cold || ADOPTED.is_set()) && crate::net::uplink_ip().is_some() {
             let (mut mem, p) = (DevMem, plan());
             kernflip::stage(&mut mem, &p, Stage::NetUp, generation);
             let _ = kernflip::take_last_flip(&mut mem, &p);
@@ -633,7 +634,7 @@ pub(crate) async fn guard(exec: &'static Executor) {
             println!(
                 "flip: generation {generation} not settled within {} s (adopted={}), resetting cold HOPOS_FLIP_GUARD",
                 GRACE.as_secs(),
-                ADOPTED.load(Relaxed)
+                ADOPTED.is_set()
             );
             reset();
         }
@@ -1005,11 +1006,8 @@ fn hold_ports(state: &Nat) {
 /// `RestoreNat`, dan de claim op de poorten los.
 async fn restore_nat(exec: &'static Executor, state: Nat) {
     let total = state.flows.len();
-    let deadline = exec.now().saturating_add(GRACE.as_nanos() as u64);
-    while !ADOPTED.load(Relaxed) && exec.now() < deadline {
-        exec.after(Duration::from_millis(20)).await;
-    }
-    let restored = if ADOPTED.load(Relaxed) {
+    let _ = select(ADOPTED.wait(), exec.after(GRACE)).await;
+    let restored = if ADOPTED.is_set() {
         // 'static voor de brievenbus, zoals de poorten.
         let st = nat::NatState {
             flows: &*Vec::leak(state.flows),

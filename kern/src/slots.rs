@@ -279,6 +279,12 @@ pub enum Request {
     },
     /// De status van een slot.
     Status(Slot),
+    /// Het eerste slot zonder eigenaar, behalve die in `skip` (bit `i - 1`
+    /// voor slot `i`); het antwoord is [`Response::Free`].
+    FirstEmpty {
+        /// Wat de vrager zelf al bezet weet.
+        skip: SlotSet,
+    },
     /// De servicer zag een SMP-verzoek (vuur-en-vergeet).
     Smp(Slot),
     /// Beschrijf elke levende bewoner voor de kern-flip
@@ -303,6 +309,11 @@ pub enum Request {
     },
 }
 
+/// Een verzameling slots: bit `i - 1` voor slot `i`.
+pub type SlotSet = u128;
+
+const _: () = assert!(SLOT_CAP <= SlotSet::BITS as usize);
+
 /// Het antwoord van de actor.
 #[derive(Debug)]
 pub enum Response {
@@ -312,6 +323,8 @@ pub enum Response {
     Done,
     /// De status.
     Status(SlotStatus),
+    /// Het slot van [`Request::FirstEmpty`]; `None` als alles bezet is.
+    Free(Option<Slot>),
     /// De bewoners voor het handoff-blob van de kern-flip.
     Snapshot(Vec<SlotState>),
     /// De env van de start, met wat de grant-aanbieder erbij zette.
@@ -474,11 +487,15 @@ impl ServicerCtl {
 /// slot): de actor schrijft hem bij de start, de hopfs-actor leest hem kort
 /// bij elke bestandscall ([`crate::rpc::resolve`]). `None` is "geen zicht":
 /// elke bestandscall wordt dan geweigerd.
+///
+/// Elke wissel in de tabel luidt [`Servicers::changed`]: de committer hoort
+/// een stop zo, en hoeft niet rond te kijken.
 pub struct Servicers {
     ctl: [ServicerCtl; SLOT_CAP + 1],
     table: LocalCell<[Option<u32>; SLOT_CAP + 1]>,
     mounts: LocalCell<[Option<Vec<Mount>>; SLOT_CAP + 1]>,
     jobs: LocalCell<[Option<Vec<u8>>; SLOT_CAP + 1]>,
+    changed: Signal,
 }
 
 impl Servicers {
@@ -490,7 +507,14 @@ impl Servicers {
             table: LocalCell::cell([None; SLOT_CAP + 1]),
             mounts: LocalCell::cell([const { None }; SLOT_CAP + 1]),
             jobs: LocalCell::cell([const { None }; SLOT_CAP + 1]),
+            changed: Signal::new(),
         }
+    }
+
+    /// Wacht tot een slot een levensduur begon of beëindigde. Eén wachter
+    /// (de committer); tien wissels vóór de wachter kijkt zijn één wek.
+    pub fn changed(&self) -> sync::signal::Wait<'_> {
+        self.changed.wait()
     }
 
     /// Doet `f` op de jobnaam van de levende bewoner van `slot` (leeg = geen
@@ -564,10 +588,12 @@ impl Servicers {
 
     fn set(&self, slot: Slot, v: Option<u32>) -> Option<u32> {
         let mut t = self.table.borrow_mut();
-        match t.get_mut(slot.get()) {
+        let old = match t.get_mut(slot.get()) {
             Some(e) => core::mem::replace(e, v),
-            None => None,
-        }
+            None => return None,
+        };
+        self.changed.set();
+        old
     }
 }
 
@@ -798,6 +824,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 self.stop(slot, timeout).await.map(|()| Response::Done)
             }
             Request::Status(slot) => Ok(Response::Status(self.status(slot))),
+            Request::FirstEmpty { skip } => Ok(Response::Free(self.first_empty(skip))),
             Request::Smp(slot) => {
                 self.smp(slot);
                 Ok(Response::Done)
@@ -1378,6 +1405,14 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
                 Status::default()
             },
         }
+    }
+
+    /// Het eerste slot zonder bewoner dat niet in `skip` staat.
+    fn first_empty(&self, skip: SlotSet) -> Option<Slot> {
+        (1..=self.parts.max_slots().min(SLOT_CAP))
+            .filter(|i| (skip >> (i - 1)) & 1 == 0)
+            .filter_map(Slot::new)
+            .find(|s| self.resident(*s).is_none())
     }
 
     /// Dispatcht een extra SMP-core namens de app. Alleen de breedte uit

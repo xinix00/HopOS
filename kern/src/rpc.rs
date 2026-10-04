@@ -47,9 +47,9 @@
 //! # Vastleggen
 //!
 //! [`committer`] legt de boom vast elke [`COMMIT_EVERY`] (Go:
-//! `fsCommitEvery`) en meteen na de stop van een slot, zodat wat een app
-//! schreef een stroomuitval overleeft. De data zelf staat er al; de commit is
-//! de boom die haar terugvindt.
+//! `fsCommitEvery`) en meteen na de stop van een slot (de servicer-tabel
+//! luidt zijn bel), zodat wat een app schreef een stroomuitval overleeft.
+//! De data zelf staat er al; de commit is de boom die haar terugvindt.
 
 use crate::cage::{Console, Timer};
 use crate::hopfs::{
@@ -71,7 +71,7 @@ use core::pin::Pin;
 use core::task::Poll;
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Futures, LocalCell};
+use sync::{Futures, LocalCell, select};
 
 /// De map onder hopfs waar de eigen roots van de taken wonen.
 pub const TASKS_DIR: &[u8] = b"/.tasks";
@@ -89,8 +89,6 @@ pub const FS_DEPTH: usize = 16;
 /// `fsCommitEvery`): de grens van wat een harde stroomuitval kost aan namen
 /// en groottes.
 pub const COMMIT_EVERY: Duration = Duration::from_secs(10);
-/// Het ritme waarop de committer de servicer-tabel naloopt voor een stop.
-pub const COMMIT_POLL: Duration = Duration::from_secs(1);
 
 /// Is `op` een bestandscall die deze module bedient?
 #[must_use]
@@ -1419,8 +1417,9 @@ fn answer(reply: Option<&Reply>, c: FsCall, result: Result<(u64, usize)>) {
 }
 
 /// Legt de boom vast: elke [`COMMIT_EVERY`], en meteen als een slot stopte
-/// (de servicer-tabel verliest zijn generatie). Vuur-en-vergeet: een volle
-/// brievenbus is de volgende ronde opnieuw.
+/// (de servicer-tabel verliest zijn generatie en luidt
+/// [`Servicers::changed`]). Vuur-en-vergeet: een volle brievenbus is de
+/// volgende ronde opnieuw.
 pub async fn committer<T: Timer>(
     svc: &Servicers,
     inbox: &FsInbox<'_>,
@@ -1428,11 +1427,12 @@ pub async fn committer<T: Timer>(
     max_slots: usize,
 ) {
     let mut live = [false; SLOT_CAP + 1];
-    let every = COMMIT_EVERY.as_secs() / COMMIT_POLL.as_secs().max(1);
-    let mut rounds = 0u64;
+    let every = u64::try_from(COMMIT_EVERY.as_nanos()).unwrap_or(u64::MAX);
+    let mut next = timer.now().saturating_add(every);
     loop {
-        timer.sleep(COMMIT_POLL).await;
-        rounds += 1;
+        let left = Duration::from_nanos(next.saturating_sub(timer.now()));
+        let _ = select(svc.changed(), timer.sleep(left)).await;
+        let at = timer.now();
         let mut why = None;
         for i in 1..=max_slots.min(SLOT_CAP) {
             let Some(slot) = Slot::new(i) else { continue };
@@ -1444,18 +1444,15 @@ pub async fn committer<T: Timer>(
                 *was = now;
             }
         }
-        if why.is_none() && rounds >= every {
+        if why.is_none() && at >= next {
             why = Some(CommitWhy::Periodic);
         }
-        if let Some(w) = why
-            && inbox
-                .try_send(FsEnvelope {
-                    msg: FsMsg::Commit(w),
-                    reply: None,
-                })
-                .is_ok()
-        {
-            rounds = 0;
+        if let Some(w) = why {
+            let _ = inbox.try_send(FsEnvelope {
+                msg: FsMsg::Commit(w),
+                reply: None,
+            });
+            next = at.saturating_add(every);
         }
     }
 }

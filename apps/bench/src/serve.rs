@@ -14,12 +14,10 @@ use applib::appnet::{self, Endpoint, NetError, TcpListener, TcpStream, UdpSocket
 use applib::rt::Exec;
 use applib::{App, EXEC, clock, log};
 use bounded::Text;
-use core::cell::Cell;
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
-use sync::Local;
-use sync::spsc::{Channel, Receiver, Sender};
+use sync::Doors;
 
 /// De werkers: zoveel verbindingen tegelijk. netmeter meet met hooguit acht
 /// parallelle verbindingen (`--conns`); een negende wacht op de eerste die
@@ -32,10 +30,6 @@ const BUF_LEN: usize = 16 << 10;
 
 /// De langste stilte op een verbinding voor de werker hem opgeeft.
 const IDLE_CAP: Duration = Duration::from_secs(30);
-
-/// Hoe vaak de acceptor kijkt of er een werker vrij is (het koude pad, zoals
-/// in welcome).
-const BUSY_POLL: Duration = Duration::from_millis(2);
 
 /// Om de zoveel verbindingen één logregel.
 const LOG_EVERY: u64 = 256;
@@ -53,13 +47,9 @@ static ABORTS: AtomicU64 = AtomicU64::new(0);
 /// teller (handboek §6: luid, maar één keer).
 const ABORT_LOG: u64 = 3;
 
-/// De rij naar elke werker: één verbinding tegelijk.
-static QUEUES: Local<[Channel<TcpStream, 1>; WORKERS]> =
-    Local::new([const { Channel::new() }; WORKERS]);
-
-/// Welke werker een verbinding heeft (zoals in welcome: de acceptor zet,
-/// de werker wist, nooit over een `.await` geleend).
-static BUSY: Local<[Cell<bool>; WORKERS]> = Local::new([const { Cell::new(false) }; WORKERS]);
+/// De deuren van de werkers (zoals in welcome): een negende verbinding
+/// wacht in de acceptor op de eerste werker die vrijkomt.
+static DOORS: Doors<TcpStream, WORKERS> = Doors::new();
 
 /// Waarom een verbinding eindigde zonder dat de client klaar was.
 #[derive(Debug)]
@@ -94,18 +84,12 @@ pub(crate) async fn run(app: &'static App, port: u16) {
     pattern.resize(PATTERN_LEN, 0);
     proto::fill_pattern(&mut pattern);
     let pattern: &'static [u8] = alloc::boxed::Box::leak(pattern.into_boxed_slice());
-    let mut senders: Vec<Sender<'static, TcpStream, 1>> = Vec::new();
-    senders
-        .try_reserve_exact(WORKERS)
-        .expect("bench: worker table");
-    for (i, q) in QUEUES.get().iter().enumerate() {
-        let (tx, rx) = q.split().expect("bench: queue split once");
-        senders.push(tx);
+    for i in 0..WORKERS {
         let mut buf = Vec::new();
         buf.try_reserve_exact(BUF_LEN)
             .expect("bench: worker buffer");
         buf.resize(BUF_LEN, 0);
-        exec.spawn(worker(i, rx, buf, pattern))
+        exec.spawn(worker(i, buf, pattern))
             .expect("bench: spawn worker");
     }
     exec.spawn(udp_echo(udp)).expect("bench: spawn udp echo");
@@ -113,59 +97,26 @@ pub(crate) async fn run(app: &'static App, port: u16) {
     log!(
         "bench: serving echo, sink and source on tcp {a}.{b}.{c}.{d}:{port}, udp echo on :{port}, {WORKERS} workers HOPOS_BENCH_UP role=serve port={port}"
     );
-    accept(listener, &mut senders, exec).await;
+    accept(listener, exec).await;
 }
 
 /// De acceptor: elke verbinding naar de eerste vrije werker.
-async fn accept(
-    listener: TcpListener,
-    senders: &mut [Sender<'static, TcpStream, 1>],
-    exec: &'static Exec,
-) {
+async fn accept(listener: TcpListener, exec: &'static Exec) {
     loop {
-        let mut stream = match listener.accept().await {
-            Ok(s) => s,
+        match listener.accept().await {
+            Ok(stream) => DOORS.place(stream).await,
             Err(e) => {
                 log!("bench: accept: {e} HOPOS_BENCH_ACCEPT");
                 exec.after(Duration::from_millis(100)).await;
-                continue;
             }
-        };
-        while let Some(back) = hand_off(stream, senders) {
-            stream = back;
-            exec.after(BUSY_POLL).await;
         }
     }
 }
 
-/// Geeft `stream` aan een vrije werker; alle werkers bezig is `Some` terug.
-fn hand_off(stream: TcpStream, senders: &mut [Sender<'static, TcpStream, 1>]) -> Option<TcpStream> {
-    let busy = BUSY.get();
-    let free = senders
-        .iter_mut()
-        .zip(busy.iter())
-        .find(|(tx, b)| !b.get() && tx.free() > 0);
-    match free {
-        Some((tx, b)) => match tx.try_send(stream) {
-            Ok(()) => {
-                b.set(true);
-                None
-            }
-            Err(sync::Full(back)) => Some(back),
-        },
-        None => Some(stream),
-    }
-}
-
 /// Eén werker: wacht op een verbinding, bedient hem, en meldt zich vrij.
-async fn worker(
-    i: usize,
-    mut rx: Receiver<'static, TcpStream, 1>,
-    mut buf: Vec<u8>,
-    pattern: &'static [u8],
-) {
+async fn worker(i: usize, mut buf: Vec<u8>, pattern: &'static [u8]) {
     loop {
-        let stream = rx.recv().await;
+        let stream = DOORS.take(i).await;
         match serve(stream, &mut buf, pattern).await {
             Ok(()) => {}
             // Een client die halverwege wegging of een reset stuurde, is
@@ -190,9 +141,7 @@ async fn worker(
                 ABORTS.load(Relaxed)
             );
         }
-        if let Some(b) = BUSY.get().get(i) {
-            b.set(false);
-        }
+        DOORS.free(i);
     }
 }
 

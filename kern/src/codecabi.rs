@@ -40,7 +40,7 @@
 //! niemand anders, dus die lening is de beurt van de eigenaar; een slot is
 //! er niet.
 
-use crate::cage::Console;
+use crate::cage::{Console, Timer};
 use crate::{Region, Slot};
 use abi::hopabi::codec::{
     BufArgs, EVENT_LEN, Event as WireEvent, FeedArgs, Kind as WireKind, OpenArgs,
@@ -53,6 +53,7 @@ use alloc::vec::Vec;
 use bounded::BoundedVec;
 use core::cell::RefCell;
 use core::fmt;
+use core::time::Duration;
 use driver_codec::{
     Buffer, Codec, Config, Direction, Engine, Error as CodecError, Event, Flags, Kind, Pixel,
     Session,
@@ -73,6 +74,13 @@ pub const MAX_HELD: usize = 64;
 /// ligt: een round-trip per beeld is precies de kost die deze naad moest
 /// vermijden.
 pub const MAX_POLL: usize = 32;
+/// De langste wachtende poll, wat de app ook vraagt: zolang is haar
+/// verbinding van die ene call.
+pub const POLL_WAIT_MAX: Duration = Duration::from_secs(1);
+/// Hoe vaak de kern de engine pompt tijdens een wachtende poll: de driver
+/// heeft geen interrupt (`media/mve/src/pump.rs`), dus de eigenaar van het
+/// ijzer kijkt, niet de app over de draad.
+pub const POLL_PUMP: Duration = Duration::from_millis(1);
 
 /// Is `op` een codec-call?
 #[must_use]
@@ -788,6 +796,7 @@ pub fn install(p: &'static dyn Port) -> bool {
 /// Laadt firmware voor een open buiten de enginebeurt. De antwoordplek blijft
 /// geleend tot de bestandsactor antwoordt, ook als de app zijn eigen timeout haalt.
 /// De slotgeneratie wordt daarna opnieuw gecontroleerd door de gewone open.
+/// Een poll met `n` > 0 wacht op events ([`poll_wait`]).
 pub async fn serve_with_firmware<'a>(
     slot: Slot,
     generation: u32,
@@ -795,12 +804,46 @@ pub async fn serve_with_firmware<'a>(
     out: &mut [u8],
     inbox: Option<&crate::rpc::FsInbox<'a>>,
     reply: &'a crate::slots::Reply,
+    timer: &impl Timer,
 ) -> usize {
     let port = *PORT.borrow();
     let Some(port) = port else {
         return refuse(out, req, b"this node has no codec hardware");
     };
-    serve_loaded(port, slot, generation, req, out, inbox, reply).await
+    let len = serve_loaded(port, slot, generation, req, out, inbox, reply).await;
+    poll_wait(port, slot, generation, req, out, timer, len).await
+}
+
+/// De wachtende poll: `OP_CODEC_POLL` met `n` > 0 antwoordt pas als er een
+/// event is, of na `n` ms (hoogstens [`POLL_WAIT_MAX`]). De app slaapt
+/// zolang op haar antwoord, en dat wekt haar zoals elke ontvangst; de kern
+/// pompt de engine elke [`POLL_PUMP`] in een eigen beurt. `len` is het
+/// eerste antwoord; met `n` = 0, of met events of een fout, gaat het meteen.
+async fn poll_wait(
+    port: &dyn Port,
+    slot: Slot,
+    generation: u32,
+    req: &Req<'_>,
+    out: &mut [u8],
+    timer: &impl Timer,
+    mut len: usize,
+) -> usize {
+    if req.op != OP_CODEC_POLL || req.n == 0 {
+        return len;
+    }
+    let empty = |out: &[u8], len: usize| {
+        abi::hopabi::decode_resp(out.get(..len).unwrap_or_default())
+            .is_ok_and(|r| r.status == STATUS_OK && r.size == 0)
+    };
+    let wait = Duration::from_millis(req.n).min(POLL_WAIT_MAX);
+    let until = timer
+        .now()
+        .saturating_add(u64::try_from(wait.as_nanos()).unwrap_or(u64::MAX));
+    while empty(out, len) && timer.now() < until {
+        timer.sleep(POLL_PUMP).await;
+        len = port.serve(slot, generation, req, out);
+    }
+    len
 }
 
 async fn serve_loaded<'a>(

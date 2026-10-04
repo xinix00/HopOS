@@ -641,9 +641,9 @@ Nagelopen op 04-10; wat dubbel was, is één keer.
 ### 8.10 Verzoek en antwoord zonder bouwsteen
 
 `sync` heeft geen oneshot. Daardoor is het patroon "zend, wacht op een bel,
-neem het antwoord" zes keer met de hand gemaakt: `slots::Reply`,
-`switch::Ack`, `NatReply`, de `done[i]` van store, `Door` in hopos, en de
-helpers `slots::call`, `rpc::call`, `rpc::freeze`, `rpc::kern_read`,
+neem het antwoord" vijf keer met de hand gemaakt: `slots::Reply`,
+`switch::Ack`, `NatReply`, de `done[i]` van store (de `Door` van hopos is
+`sync::Doors` geworden, zie 8.12), en de helpers `slots::call`, `rpc::call`, `rpc::freeze`, `rpc::kern_read`,
 `deviceabi::call`. M-H dat het één bouwsteen kan zijn.
 
 ### 8.11 Twee paden waar één bedoeld is
@@ -670,17 +670,29 @@ helpers `slots::call`, `rpc::call`, `rpc::freeze`, `rpc::kern_read`,
 
 ### 8.12 Pollen waar een gebeurtenis hoort
 
-- **De acceptor van welcome, bench en vitals** pollt elke 2 tot 5 ms als
-  alle werkers bezet zijn, precies wat `docs/apps.md` verbiedt; de kern
-  heeft een vierde pool (`DOORS`). Eén pool in applib met een `Signal`.
-  ± 140 regels. H, open sinds de review van 01-10.
-- **decode pollt de codec elke 1 ms** met een system-call; de ABI heeft
-  geen wachtende poll. H.
-- De committer kijkt elke seconde naar `Servicers` in plaats van een bericht
-  van de lifecycle te krijgen; `flip::restore_nat` pollt elke 20 ms;
-  `free_slot` doet tot `max_slots` rondreizen. M.
-- In applib wekt een stille secundaire core 100 keer per seconde om vlaggen
-  te zien. V of een kick dit kan vervangen.
+Nagelopen op 04-10; wat hieronder als gedaan staat, wacht nu op een bel.
+
+- **De acceptor van welcome, bench en vitals** en de pool van de
+  system-API in de kern zijn één bouwsteen: `sync::Doors` (per werker een
+  deur met een bel, en een bel voor de acceptor die een werker luidt als
+  hij vrijkomt). Met alle werkers bezet wacht `Doors::place` op die bel,
+  niet op de klok; de kern weigert nog steeds meteen (`Doors::hand`).
+- **decode** vraagt de codec met een wachtende poll: `OP_CODEC_POLL` met
+  `n` = de wacht in ms (de kern klemt op een seconde). De kern houdt het
+  antwoord tot het eerste event en pompt de engine zelf elke milliseconde;
+  de app slaapt op het antwoord. Open: de VPU-interrupt (intid 358 op de
+  O6N) als bel in plaats van die pomp, en dat vraagt ijzer. V.
+- De committer wacht op de bel van de servicer-tabel
+  (`Servicers::changed`) en op `COMMIT_EVERY`; `flip::restore_nat` wacht
+  op de adoptie (`ADOPTED` is een `Stop`); `free_slot` is één vraag
+  (`Request::FirstEmpty`).
+- **Een stille secundaire core** slaapt in WFE tot zijn eigen deadline: de
+  vlaggen (stop, delen, yield) ziet hij na elke WFE. In de yield (QEMU,
+  Apple, een gedeelde core) blijft de vangrail van 10 ms, want daar maakt
+  alleen zijn wektijd of een HVC #4 van een sibling een context due, niet
+  de kick van de kern bij een stop of de SEV van een waker. Open: de kern
+  zet bij een stop de wek-latch van de hele keten; dan kan de vangrail ook
+  in de yield weg. `CTRL_WAKES` telt de rondes van alle cores.
 
 ### 8.13 Apps
 

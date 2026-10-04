@@ -54,7 +54,7 @@ use net::switch::{self, Ack, Command, Commands, Doorbell, Published, Switch, Wir
 use net::{Egress, Ingress, Stats};
 use netdev::Device;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, Signal, select};
+use sync::{Doors, Either, LocalCell, Signal, select};
 
 /// De leeskant van een ring zoals de switch en poort 0 hem zien.
 type RingRx = AbiTx;
@@ -903,36 +903,10 @@ struct Job {
     who: Admitted<'static>,
 }
 
-/// De deur van één verbindingstaak.
-enum Seat {
-    /// De taak wacht op werk.
-    Free,
-    /// De listener gaf een verbinding; de taak haalt hem op.
-    Handed(Job),
-    /// De taak dient een verbinding.
-    Busy,
-}
-
-/// De deur van één verbindingstaak: de listener schrijft `Free` naar
-/// `Handed` en luidt de bel; de taak neemt het werk en zet `Busy`, en na
-/// de verbinding weer `Free`. Een leesbare tabel (handboek §1.1): elke
-/// lening is één statement.
-struct Door {
-    seat: LocalCell<Seat>,
-    bell: Signal,
-}
-
-impl Door {
-    const fn new() -> Door {
-        Door {
-            seat: LocalCell::cell(Seat::Free),
-            bell: Signal::new(),
-        }
-    }
-}
-
-/// De deuren van de pool, één per verbindingstaak.
-static DOORS: [Door; SYSTEM_WORKERS] = [const { Door::new() }; SYSTEM_WORKERS];
+/// De deuren van de pool, één per verbindingstaak: de listener geeft een
+/// verbinding aan de eerste vrije taak (en weigert als alle bezet zijn),
+/// de taak meldt zich vrij na de verbinding.
+static DOORS: Doors<Job, SYSTEM_WORKERS> = Doors::new();
 
 /// De listener op [`PORT`] (Go: `ServeSystem`): per verbinding `admit`
 /// (het slot uit het bron-IP, een levende servicer, hooguit
@@ -988,13 +962,8 @@ async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) 
             close(exec, h);
             continue;
         };
-        match hand(Job { h, remote, who }) {
-            Ok(i) => {
-                served = served.wrapping_add(1);
-                if let Some(d) = DOORS.get(i) {
-                    d.bell.set();
-                }
-            }
+        match DOORS.hand(Job { h, remote, who }) {
+            Ok(()) => served = served.wrapping_add(1),
             Err(job) => {
                 // Alle taken bezet: de toelating gaat met de job terug.
                 full = full.wrapping_add(1);
@@ -1108,21 +1077,6 @@ async fn console_reader(
     }
 }
 
-/// Geeft `job` aan de eerste vrije taak; geeft haar index, of de job terug
-/// als alles bezet is. Eén lening per deur.
-fn hand(job: Job) -> Result<usize, Job> {
-    for (i, d) in DOORS.iter().enumerate() {
-        let Ok(mut seat) = d.seat.try_borrow_mut() else {
-            continue;
-        };
-        if matches!(*seat, Seat::Free) {
-            *seat = Seat::Handed(job);
-            return Ok(i);
-        }
-    }
-    Err(job)
-}
-
 /// Spawnt de verbindingstaken, elk met haar eigen buffers (boot: de heap
 /// geeft ze eenmalig) en haar eigen antwoordplek. Geeft hoeveel er draaien.
 fn spawn_workers(exec: &'static Executor, api: &SystemApi) -> usize {
@@ -1168,18 +1122,9 @@ struct Worker {
 
 impl Worker {
     async fn run(mut self) {
-        let Some(door) = DOORS.get(self.door) else {
-            return;
-        };
         let timer = ExecTimer(self.exec);
         loop {
-            door.bell.wait().await;
-            let seat = core::mem::replace(&mut *door.seat.borrow_mut(), Seat::Busy);
-            let Seat::Handed(job) = seat else {
-                // Een bel zonder werk (samengevoegd): de deur blijft zoals hij was.
-                *door.seat.borrow_mut() = seat;
-                continue;
-            };
+            let job = DOORS.take(self.door).await;
             let mut conn = TcpConn {
                 exec: self.exec,
                 h: job.h,
@@ -1210,7 +1155,7 @@ impl Worker {
             // oude nooit nog half open.
             close(self.exec, job.h);
             drop(job);
-            *door.seat.borrow_mut() = Seat::Free;
+            DOORS.free(self.door);
         }
     }
 }

@@ -59,11 +59,9 @@ use applib::appnet::{self, Net, TcpListener, TcpStream};
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
 use applib::{App, EXEC, clock, log};
-use core::cell::Cell;
 use core::time::Duration;
 use leanhttp::{Exchange, Found, Mux};
-use sync::Local;
-use sync::spsc::{Channel, Receiver, Sender};
+use sync::Doors;
 
 applib::main!(vitals);
 
@@ -83,10 +81,6 @@ const WORKERS: usize = 8;
 /// een stille browser anders een werker een minuut vast.
 const READ_CAP: Duration = Duration::from_secs(5);
 
-/// Hoe vaak de acceptor kijkt of er een werker vrij is, als ze alle
-/// bezet zijn.
-const BUSY_POLL: Duration = Duration::from_millis(2);
-
 /// De maat van het patroonblok dat `/blob` en de disk-test herhalen.
 const BLOB: usize = 256 << 10;
 
@@ -100,13 +94,9 @@ const ARCH: &str = if cfg!(target_arch = "riscv64") {
     "arm64"
 };
 
-/// De rij naar elke werker: één verbinding tegelijk.
-static QUEUES: Local<[Channel<TcpStream, 1>; WORKERS]> =
-    Local::new([const { Channel::new() }; WORKERS]);
-
-/// Welke werker een verbinding heeft (zie welcome: de acceptor zet, de
-/// werker wist, nooit over een `.await`).
-static BUSY: Local<[Cell<bool>; WORKERS]> = Local::new([const { Cell::new(false) }; WORKERS]);
+/// De deuren van de werkers (zie welcome): met alle werkers bezet wacht
+/// de acceptor op de eerste die vrijkomt.
+static DOORS: Doors<TcpStream, WORKERS> = Doors::new();
 
 /// De paden van deze server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -215,15 +205,8 @@ async fn vitals(app: &'static App) {
     }));
     exec.spawn(idle::sample(app))
         .expect("vitals: spawn idle sampler");
-    let mut senders: Vec<Sender<'static, TcpStream, 1>> = Vec::new();
-    senders
-        .try_reserve_exact(WORKERS)
-        .expect("vitals: worker table");
-    for (i, q) in QUEUES.get().iter().enumerate() {
-        let (tx, rx) = q.split().expect("vitals: queue split once");
-        senders.push(tx);
-        exec.spawn(worker(i, rx, shared))
-            .expect("vitals: spawn worker");
+    for i in 0..WORKERS {
+        exec.spawn(worker(i, shared)).expect("vitals: spawn worker");
     }
     let [a, b, c, d] = shared.ip;
     log!(
@@ -231,7 +214,7 @@ async fn vitals(app: &'static App) {
         app.slot(),
         app.cores()
     );
-    accept(listener, &mut senders, exec).await;
+    accept(listener, exec).await;
 }
 
 /// Vult `buf` met een xorshift-patroon: de inhoud doet er niet toe (niemand
@@ -247,56 +230,23 @@ fn fill_pattern(buf: &mut [u8]) {
 }
 
 /// De acceptor: elke verbinding naar de eerste vrije werker.
-async fn accept(
-    listener: TcpListener,
-    senders: &mut [Sender<'static, TcpStream, 1>],
-    exec: &'static Exec,
-) {
+async fn accept(listener: TcpListener, exec: &'static Exec) {
     loop {
-        let mut stream = match listener.accept().await {
-            Ok(s) => s,
+        match listener.accept().await {
+            Ok(stream) => DOORS.place(stream).await,
             Err(e) => {
                 log!("vitals: accept: {e} HOPOS_VITALS_ACCEPT");
                 exec.after(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-        loop {
-            match hand_off(stream, senders) {
-                None => break,
-                Some(back) => {
-                    stream = back;
-                    exec.after(BUSY_POLL).await;
-                }
             }
         }
     }
 }
 
-/// Geeft `stream` aan een vrije werker; alle werkers bezig is `Some` terug.
-fn hand_off(stream: TcpStream, senders: &mut [Sender<'static, TcpStream, 1>]) -> Option<TcpStream> {
-    let busy = BUSY.get();
-    let free = senders
-        .iter_mut()
-        .zip(busy.iter())
-        .find(|(tx, b)| !b.get() && tx.free() > 0);
-    match free {
-        Some((tx, b)) => match tx.try_send(stream) {
-            Ok(()) => {
-                b.set(true);
-                None
-            }
-            Err(sync::Full(back)) => Some(back),
-        },
-        None => Some(stream),
-    }
-}
-
 /// Eén werker: wacht op een verbinding, bedient hem met leanhttp tot hij
 /// sluit, en meldt zich weer vrij.
-async fn worker(i: usize, mut rx: Receiver<'static, TcpStream, 1>, shared: &'static Shared) {
+async fn worker(i: usize, shared: &'static Shared) {
     loop {
-        let stream = rx.recv().await;
+        let stream = DOORS.take(i).await;
         let conn = TcpConn::new(stream, shared.exec).with_read_cap(READ_CAP);
         // Een verbinding die eindigt met een termijn of een reset is een
         // client die wegging; dat is geen logregel waard.
@@ -304,9 +254,7 @@ async fn worker(i: usize, mut rx: Receiver<'static, TcpStream, 1>, shared: &'sta
             handle(ex, shared).await
         })
         .await;
-        if let Some(b) = BUSY.get().get(i) {
-            b.set(false);
-        }
+        DOORS.free(i);
     }
 }
 

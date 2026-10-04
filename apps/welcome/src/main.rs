@@ -39,12 +39,10 @@ use applib::appnet::{self, TcpListener, TcpStream};
 use applib::rt::Exec;
 use applib::tcp::TcpConn;
 use applib::{App, EXEC, clock, heap::HEAP, log};
-use core::cell::Cell;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use leanhttp::{Exchange, Found, Mux};
-use sync::Local;
-use sync::spsc::{Channel, Receiver, Sender};
+use sync::Doors;
 
 applib::main!(welcome);
 
@@ -66,11 +64,6 @@ const WORKERS: usize = 4;
 /// stille browser anders een werker een minuut vast.
 const READ_CAP: Duration = Duration::from_secs(5);
 
-/// Hoe vaak de acceptor kijkt of er een werker vrij is, als ze alle vier
-/// bezig zijn. Een koud pad: een vijfde gelijktijdige verbinding is hier
-/// een uitzondering, geen ritme, en pollen is dan eenvoudiger dan een bel.
-const BUSY_POLL: Duration = Duration::from_millis(5);
-
 /// Om de zoveel verzoeken één logregel.
 const LOG_EVERY: u64 = 100;
 
@@ -81,14 +74,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// (handboek §1.3).
 static REQUESTS: AtomicU64 = AtomicU64::new(0);
 
-/// De rij naar elke werker: één verbinding tegelijk.
-static QUEUES: Local<[Channel<TcpStream, 1>; WORKERS]> =
-    Local::new([const { Channel::new() }; WORKERS]);
-
-/// Welke werker een verbinding heeft. De acceptor zet de vlag bij de
-/// overdracht, de werker wist hem als de verbinding dicht is; beide op de
-/// executor van deze core, nooit over een `.await` geleend.
-static BUSY: Local<[Cell<bool>; WORKERS]> = Local::new([const { Cell::new(false) }; WORKERS]);
+/// De deuren van de werkers: de acceptor zet een verbinding achter de
+/// eerste vrije, de werker meldt zich vrij als hij dicht is. Zijn ze alle
+/// bezet, dan wacht de vijfde in de acceptor op de eerste die vrijkomt.
+static DOORS: Doors<TcpStream, WORKERS> = Doors::new();
 
 /// De paden van deze server.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -141,14 +130,8 @@ async fn welcome(app: &'static App) {
         started_ns: clock::now_ns(),
         mux,
     }));
-    let mut senders: Vec<Sender<'static, TcpStream, 1>> = Vec::new();
-    senders
-        .try_reserve_exact(WORKERS)
-        .expect("welcome: worker table");
-    for (i, q) in QUEUES.get().iter().enumerate() {
-        let (tx, rx) = q.split().expect("welcome: queue split once");
-        senders.push(tx);
-        exec.spawn(worker(i, rx, shared))
+    for i in 0..WORKERS {
+        exec.spawn(worker(i, shared))
             .expect("welcome: spawn worker");
     }
     let [a, b, c, d] = shared.ip;
@@ -156,60 +139,27 @@ async fn welcome(app: &'static App) {
         "welcome: serving http on {a}.{b}.{c}.{d}:{port} for node {node}, slot {}, {WORKERS} workers HOPOS_WELCOME_UP port={port}",
         shared.slot
     );
-    accept(listener, &mut senders, exec).await;
+    accept(listener, exec).await;
 }
 
 /// De acceptor: elke verbinding naar de eerste vrije werker.
-async fn accept(
-    listener: TcpListener,
-    senders: &mut [Sender<'static, TcpStream, 1>],
-    exec: &'static Exec,
-) {
+async fn accept(listener: TcpListener, exec: &'static Exec) {
     loop {
-        let mut stream = match listener.accept().await {
-            Ok(s) => s,
+        match listener.accept().await {
+            Ok(stream) => DOORS.place(stream).await,
             Err(e) => {
                 log!("welcome: accept: {e} HOPOS_WELCOME_ACCEPT");
                 exec.after(Duration::from_millis(100)).await;
-                continue;
-            }
-        };
-        loop {
-            match hand_off(stream, senders) {
-                None => break,
-                Some(back) => {
-                    stream = back;
-                    exec.after(BUSY_POLL).await;
-                }
             }
         }
     }
 }
 
-/// Geeft `stream` aan een vrije werker; alle werkers bezig is `Some` terug.
-fn hand_off(stream: TcpStream, senders: &mut [Sender<'static, TcpStream, 1>]) -> Option<TcpStream> {
-    let busy = BUSY.get();
-    let free = senders
-        .iter_mut()
-        .zip(busy.iter())
-        .find(|(tx, b)| !b.get() && tx.free() > 0);
-    match free {
-        Some((tx, b)) => match tx.try_send(stream) {
-            Ok(()) => {
-                b.set(true);
-                None
-            }
-            Err(sync::Full(back)) => Some(back),
-        },
-        None => Some(stream),
-    }
-}
-
 /// Eén werker: wacht op een verbinding, bedient hem met leanhttp tot hij
 /// sluit, en meldt zich weer vrij.
-async fn worker(i: usize, mut rx: Receiver<'static, TcpStream, 1>, shared: &'static Shared) {
+async fn worker(i: usize, shared: &'static Shared) {
     loop {
-        let stream = rx.recv().await;
+        let stream = DOORS.take(i).await;
         let conn = TcpConn::new(stream, shared.exec).with_read_cap(READ_CAP);
         // Een verbinding die eindigt met een termijn of een reset is een
         // browser die wegging; dat is geen logregel waard.
@@ -217,9 +167,7 @@ async fn worker(i: usize, mut rx: Receiver<'static, TcpStream, 1>, shared: &'sta
             handle(ex, shared).await
         })
         .await;
-        if let Some(b) = BUSY.get().get(i) {
-            b.set(false);
-        }
+        DOORS.free(i);
     }
 }
 

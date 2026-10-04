@@ -22,6 +22,7 @@
 //! ```no_run
 //! use applib::codec::{Codec, Config, Direction, Event, Flags, Kind, Pixel, Session};
 //! use applib::sys::{Client, Dial, Result, Timer};
+//! use core::time::Duration;
 //!
 //! /// Eén hap HEVC op 1 MB in de partitie, twaalf beeldbuffers erachter.
 //! async fn decode<D: Dial, T: Timer>(c: &mut Client<D, T>, len: u64) -> Result {
@@ -36,7 +37,7 @@
 //!     s.feed(c, 1 << 20, 1 << 20, len, Flags::EOS, 0).await?;
 //!     let mut evs = [Event::default(); 32];
 //!     loop {
-//!         let n = s.poll(c, &mut evs).await?;
+//!         let n = s.poll(c, &mut evs, Duration::from_secs(1)).await?;
 //!         for e in evs.iter().take(n) {
 //!             match e.kind {
 //!                 // De maat is bekend: beeldbuffers van e.size aanbieden.
@@ -160,18 +161,23 @@ impl Session {
     }
 
     /// Haalt alles op wat klaarstaat (hoogstens `dst.len()` en
-    /// [`MAX_EVENTS`]); geeft het aantal.
+    /// [`MAX_EVENTS`]); geeft het aantal. Ligt er niets, dan wacht de kern
+    /// tot er iets is, hoogstens `wait` (en een seconde): de app slaapt op
+    /// het antwoord in plaats van zelf rond te kijken. `Duration::ZERO`
+    /// antwoordt meteen.
     pub async fn poll<D: Dial, T: Timer>(
         &self,
         c: &mut Client<D, T>,
         dst: &mut [Event],
+        wait: Duration,
     ) -> Result<usize> {
         let a = BufArgs {
             handle: self.handle,
         }
         .encode();
+        let ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
         let mut raw = [0u8; MAX_EVENTS * EVENT_LEN];
-        let (n, len) = call(c, OP_CODEC_POLL, 0, 0, &a, &mut raw).await?;
+        let (n, len) = call(c, OP_CODEC_POLL, 0, ms, &a, &mut raw).await?;
         let got = usize::try_from(n).unwrap_or(0).min(len / EVENT_LEN);
         let mut k = 0;
         for (i, d) in dst.iter_mut().enumerate().take(got) {
@@ -331,9 +337,19 @@ mod tests {
         }
         .encode(&mut w[EVENT_LEN..])
         .unwrap();
+        k.borrow_mut().sent.clear();
         answer(&k, 3, 0, 2, &w);
         let mut evs = [Event::default(); 4];
-        assert_eq!(block_on(s.poll(&mut c, &mut evs)).unwrap(), 2);
+        assert_eq!(
+            block_on(s.poll(&mut c, &mut evs, Duration::from_millis(250))).unwrap(),
+            2
+        );
+        let (op, _, n, _) = last_req(&k);
+        assert_eq!(
+            (op, n),
+            (OP_CODEC_POLL, 250),
+            "the wait travels in n, in ms"
+        );
         assert_eq!(
             (evs[0].kind, evs[0].size, evs[0].bytes),
             (Kind::Format, 24 << 20, 6)

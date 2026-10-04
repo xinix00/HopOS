@@ -51,7 +51,8 @@ use crate::kernflip;
 use crate::pool::{GroupName, Placement};
 use crate::rpc::{self, FsCall, FsInbox};
 use crate::slots::{
-    self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, Servicers, StartSpec, try_vec,
+    self, Envelope, ImageGrant, Occupancy, Reply, Request, Response, Servicers, SlotSet, StartSpec,
+    try_vec,
 };
 use crate::{Error, Result, SLOT_CAP, Slot};
 use abi::hopabi::{
@@ -1497,6 +1498,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                         out,
                         self.fs,
                         reply,
+                        w.timer,
                     )
                     .await
                 }
@@ -1834,25 +1836,30 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         Ok((slot.get() as u64, 0))
     }
 
-    /// Het eerste slot zonder eigenaar. Hop serialiseert zijn starts, dus
-    /// tussen de vraag en de claim komt er niemand tussen; komt er toch
-    /// iemand, dan weigert de claim met `StillOwned` en faalt de start luid.
+    /// Het eerste slot zonder eigenaar, in één vraag aan de actor: de
+    /// slots van Hop, van een lopende stroom en boven `max_slots` slaat hij
+    /// over. Hop serialiseert zijn starts, dus tussen de vraag en de claim
+    /// komt er niemand tussen; komt er toch iemand, dan weigert de claim met
+    /// `StillOwned` en faalt de start luid.
     async fn free_slot(&self, reply: &'r Reply) -> Result<Slot> {
+        let mut skip: SlotSet = u32::try_from(self.max_slots)
+            .ok()
+            .and_then(|n| SlotSet::MAX.checked_shl(n))
+            .unwrap_or(0);
         for i in 1..=self.max_slots.min(SLOT_CAP) {
             let Some(slot) = Slot::new(i) else { continue };
             if self.privilege.as_ref().is_some_and(|p| p.slot == slot) || self.has_stream(slot) {
-                continue;
-            }
-            match slots::call(self.inbox, reply, Request::Status(slot)).await? {
-                Response::Status(st) if st.occupancy == Occupancy::Empty => return Ok(slot),
-                Response::Status(_) => {}
-                Response::Failed(e) => return Err(e),
-                _ => return Err(Error::Busy),
+                skip |= 1 << (i - 1);
             }
         }
-        Err(Error::Full {
-            cap: self.max_slots,
-        })
+        match slots::call(self.inbox, reply, Request::FirstEmpty { skip }).await? {
+            Response::Free(Some(slot)) => Ok(slot),
+            Response::Free(None) => Err(Error::Full {
+                cap: self.max_slots,
+            }),
+            Response::Failed(e) => Err(e),
+            _ => Err(Error::Busy),
+        }
     }
 
     /// STREAM_IMAGE: bytes naar hun plek; bij de laatste plaatsen en armen.

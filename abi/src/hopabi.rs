@@ -115,8 +115,9 @@ pub const CTRL_SMP_MAIR: u64 = 0xF8;
 /// Kern naar app: 1 als dit slot zijn core deelt; de idle-governor yieldt
 /// dan naar de switcher in plaats van WFE te slapen.
 pub const CTRL_SHARED: u64 = 0x100;
-/// App naar kern: het aantal idle-rondes. Bewust ongelezen (besluit Derek
-/// 06-08) tot een onverklaarbaar hoog cpu-percentage erom vraagt.
+/// App naar kern: het aantal idle-rondes, van alle cores van de app (zoals
+/// `CTRL_IDLE`). Bewust ongelezen (besluit Derek 06-08) tot een
+/// onverklaarbaar hoog cpu-percentage erom vraagt.
 pub const CTRL_WAKES: u64 = 0x108;
 /// App naar switcher: de wek-drempel van de doorbell (head | bit 63). Alleen
 /// wie de ring draint mag hem wapenen: anders maakt elke ARP-flood een app
@@ -448,7 +449,8 @@ pub const OP_CODEC_OPEN: u8 = 14;
 pub const OP_CODEC_FEED: u8 = 15;
 /// Een lege beeldbuffer erin.
 pub const OP_CODEC_OFFER: u8 = 16;
-/// Nul of meer events.
+/// Nul of meer events. Met `n` > 0 wacht de kern tot er een is, hoogstens
+/// `n` ms (en een seconde); met `n` = 0 antwoordt hij meteen.
 pub const OP_CODEC_POLL: u8 = 17;
 /// Codec sluiten.
 pub const OP_CODEC_CLOSE: u8 = 18;

@@ -320,6 +320,76 @@ fn codec_poll_verliest_geen_events() {
     );
 }
 
+/// De wachtende poll: met `n` > 0 antwoordt de kern pas als er een event is
+/// (de kern pompt, de app slaapt op haar antwoord), of na `n` ms, nooit
+/// langer dan [`POLL_WAIT_MAX`]; met `n` = 0 meteen, zoals altijd.
+#[test]
+fn a_waiting_poll_answers_on_the_first_event() {
+    use core::task::{Context, Poll, Waker};
+    let lives = FakeLives {
+        generation: Cell::new(Some(1)),
+    };
+    let cache = Cache::default();
+    let port = CodecCell::new(&lives, &cache, Quiet);
+    port.with(|s, _| s.install(FakeEngine::new())).unwrap();
+    let mut out = [0u8; 4096];
+    port.serve(slot1(), 1, &open_req(&OPEN), &mut out);
+    let poll = |ms: u64| Req {
+        op: OP_CODEC_POLL,
+        n: ms,
+        data: &[1, 0, 0, 0],
+        ..Req::default()
+    };
+    let events = |out: &[u8], n: usize| abi::hopabi::decode_resp(&out[..n]).unwrap().size;
+    let t = crate::testutil::FakeTimer::default();
+    let ms = 1_000_000;
+
+    // Niets: meteen met `n` = 0, na `n` ms met `n` > 0, en nooit langer
+    // dan de grens.
+    for (wait, slept) in [(0, 0), (5, 5), (60_000, 1000)] {
+        let start = t.now.get();
+        let first = port.serve(slot1(), 1, &poll(wait), &mut out);
+        let n = crate::rpc::tests::on(poll_wait(
+            &port,
+            slot1(),
+            1,
+            &poll(wait),
+            &mut out,
+            &t,
+            first,
+        ));
+        assert_eq!(events(&out, n), 0);
+        assert_eq!(t.now.get() - start, slept * ms, "wait {wait} ms");
+    }
+
+    // Een event na drie pompen: het antwoord gaat bij het eerste.
+    let req = poll(100);
+    let first = port.serve(slot1(), 1, &req, &mut out);
+    let start = t.now.get();
+    let n = {
+        let mut f = core::pin::pin!(poll_wait(&port, slot1(), 1, &req, &mut out, &t, first));
+        let mut cx = Context::from_waker(Waker::noop());
+        let mut rounds = 0;
+        loop {
+            if let Poll::Ready(n) = f.as_mut().poll(&mut cx) {
+                break n;
+            }
+            rounds += 1;
+            if rounds == 3 {
+                port.with(|s, _| {
+                    s.engine().unwrap().open[0]
+                        .events
+                        .push(Event::of(Kind::Done))
+                })
+                .unwrap();
+            }
+            assert!(rounds < 1000, "the poll never answered");
+        }
+    };
+    assert_eq!(events(&out, n), 1);
+    assert!(t.now.get() - start <= 4 * ms);
+}
+
 /// De VPU is niet coherent: feed schrijft uit, offer schrijft uit en gooit
 /// weg, een gevuld resultaat wordt weggegooid vóór de app kijkt, en een
 /// teruggegeven invoer kost niets.
@@ -462,6 +532,7 @@ fn zonder_ijzer_weigert_de_dienst_luid() {
         &mut out,
         None,
         &reply,
+        &crate::testutil::FakeTimer::default(),
     ));
     let r = abi::hopabi::decode_resp(&out[..n]).unwrap();
     assert_eq!(

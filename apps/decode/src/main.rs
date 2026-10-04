@@ -93,8 +93,9 @@ const FRAMES: usize = 12;
 /// Meer beeldbuffers houdt de boekhouding niet bij.
 const MAX_FRAMES: usize = 32;
 
-/// Niets te doen: zo lang wachten voor de volgende poll.
-const IDLE: Duration = Duration::from_millis(1);
+/// Hoe lang de kern een poll laat wachten op een event: de app slaapt op
+/// het antwoord en ziet een stilgevallen decoder na [`QUIET`].
+const WAIT: Duration = Duration::from_secs(1);
 
 /// Zo lang zonder event is een stilgevallen decoder.
 const QUIET: Duration = Duration::from_secs(20);
@@ -390,7 +391,10 @@ async fn run(
                     .map_err(Stop::Codec)?;
             }
         }
-        let k = ses.poll(sys, &mut evs).await.map_err(Stop::Codec)?;
+        // Na Done is er niets meer te verwachten: dan de laatste blik meteen,
+        // anders telt de wacht mee in de meting.
+        let wait = if done { Duration::ZERO } else { WAIT };
+        let k = ses.poll(sys, &mut evs, wait).await.map_err(Stop::Codec)?;
         if k == 0 {
             if done {
                 break;
@@ -398,7 +402,6 @@ async fn run(
             if clock::now_ns().saturating_sub(last_event) > quiet {
                 return Err(Stop::Quiet { frames: m.frames });
             }
-            exec.after(IDLE).await;
             continue;
         }
         last_event = clock::now_ns();
