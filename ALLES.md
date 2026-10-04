@@ -9,7 +9,7 @@ in docs/measurements.md, de details per board in docs/boards-*.md.
 De afvinkmatrix van de Go-tijd (OLD/docs/support.md: boot, idle en klokken,
 devices en diensten per board), nu voor v3 en bijgehouden op ijzer. Legenda:
 ✓ gezien op het board, ○ gebouwd maar op dit board nog niet gezien, ✗ ontbreekt
-of faalt, en een streep waar het bewust niet komt. Stand 04-10-2026, ochtend (main 182480b; Pi 4 P40, Pi 5 Q40, Radxa X40, O6N O40, M4 M40 met Hop 3.0.0, LicheeRV R40, Altra A56g met de boot-stack-fix; release v3.0.10 in de maak, Hop v3.0.8).
+of faalt, en een streep waar het bewust niet komt. Stand 04-10-2026, ochtend (main 182480b; Pi 4 P40, Pi 5 Q40, Radxa X40, O6N O40, M4 M40 met Hop 3.0.0, LicheeRV R40, Altra A56g met de boot-stack-fix; release v3.0.10, Hop v3.0.8; alle borden op 3.0.10).
 Een cel zegt alleen of het slaagt, met hooguit de stempel of een paar
 woorden waarom niet; een gepolde NIC is geen ✓. De getallen staan in
 docs/measurements.md, de details per board in docs/boards-*.md.
@@ -45,7 +45,7 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       herbasseren, puur opruimen zonder gedrag). 3.0.10 draagt de rest; op
       ijzer te zien per bord bij de flip van 3.0.10 (bootregels gelijk,
       `HOPOS_SLOT_PUBLISH` voor Hop's poorten, `HOPOS_NVME_IRQ`).
-- [ ] De media met `hop image --config` op v3.0.9 (Derek; Hop blijft 3.0.8,
+- [ ] De media met `hop image --config` op v3.0.10 (Derek; Hop blijft 3.0.8,
       de ABI is gelijk): Radxa-kaart
       (v3.0.5 stormt na 2 GiB door de MMC-maskers), Altra-stick (v3.0.7
       boot daar niet), M4 via Recovery (Hop is daar nog 3.0.0 en de leader
@@ -91,12 +91,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
-- [ ] De hairpin-storm lag in de ronde van tools/meet lager dan vanochtend:
-      O6N 891 tegen 1983, Pi 4 1085 tegen 1942, Altra 710 tegen 1000 conn/s;
-      en over de draad wisselt de O6N-kant sterk per ronde (Pi 5 in 69 tot
-      86, de O6N van de M4 73 tot 118). Opnieuw meten met `tools/meet.py`
-      als er niets anders op de borden gebeurt; dan weten we of het de
-      kern van vandaag is of de drukte.
+- [ ] De hairpin-storm ligt sinds de middag lager dan vanochtend, ook met een
+      stille node op 3.0.10: O6N 906 tegen 1983, Pi 4 1091 tegen 1942, Altra
+      707 tegen 1000, Radxa 468 tegen 620 conn/s (tools/meet, 04-10 16:xx);
+      de M4 doet 1954 zoals vanochtend. Welke middagcommit (hop-cost5 of de
+      lees-bundel zaten al in de ochtendmeting; sindsdien de Dispatcher, de
+      conport-pomp, Hop in een eigen groep, de drivers, oneshot, Doors)
+      verlaagt de hairpin: bisect met `tools/meet.py --only o6n --skip-wire`.
 - [ ] Pi 4 ontvangen 65 MB/s tegen zenden 113: de genet leest sinds bca6c70
       uit WB met een veeg en dat gaf niets (P70 64,8, daarvoor 52 tot 72),
       dus de rem zit in de gepolde RX-weg zelf (geen IRQ-lijn: de pomp pollt
