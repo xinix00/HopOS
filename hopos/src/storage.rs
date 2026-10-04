@@ -25,14 +25,17 @@
 //! niets meer aan ([`freeze_for_flip`]); de nieuwe kern mount dezelfde
 //! schijf en vindt precies die generatie.
 //!
-//! Stateful: een koude boot laadt de laatst vastgelegde boom (Go:
-//! `hopos.storage=stateful`). Deze kern kent nog geen bootparameters, en
-//! Hop's staat op `/hop/` moet een herstart overleven; wie leeg wil
-//! beginnen, geeft QEMU een verse schijf (image/qemu-run.sh).
+//! Stateless of stateful, zoals in Go: `hopos.storage=stateless` (de default)
+//! negeert bij een koude boot het indexbestand en begint leeg
+//! (`HOPOS_FS_STATELESS`): een device begint schoon en vergeet alles.
+//! `hopos.storage=stateful` laadt de laatst vastgelegde boom, en Hop's staat
+//! op `/hop/` overleeft dan een herstart. Een flip is altijd stateful: de
+//! nieuwe kern mount precies de generatie die de oude vastlegde.
 
 use crate::Disk;
 use alloc::boxed::Box;
 use blkdev::{AsyncBlockDevice, LBA_SIZE, Pace, Queue, block_on};
+use board::Board;
 use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::println;
@@ -205,13 +208,23 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
     // Vóór `exec.run`: de mount wacht zelf (block_on pollt het device over
     // hetzelfde pad als de actor straks), en er is nog niemand die stil zou
     // staan.
+    // De default is stateless: bij een koude boot wordt het indexbestand
+    // genegeerd en begint de boom leeg. Alleen `hopos.storage=stateful`
+    // laadt hem. Een flip-landing houdt altijd de boom van de vorige kern.
+    let stateless =
+        crate::BOARD.boot_param("hopos.storage") != "stateful" && !crate::flip::jumped();
+    if stateless {
+        println!(
+            "hopfs: stateless (hopos.storage), the index is ignored and the tree starts empty HOPOS_FS_STATELESS"
+        );
+    }
     let mounted = block_on(Fs::mount(
         disk,
         0,
         sectors,
         LBA_SIZE,
         max_transfer as u64,
-        false,
+        stateless,
     ));
     let (fs, found) = match mounted {
         Ok(m) => m,
@@ -229,7 +242,7 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
             (0, "restored")
         }
         Mounted::Empty => (1, "empty disk"),
-        Mounted::Fresh => (1, "wiped"),
+        Mounted::Fresh => (1, if stateless { "stateless" } else { "wiped" }),
         Mounted::Volatile { blocks } => {
             println!(
                 "hopfs: {blocks} blocks is too small to keep the tree, volatile HOPOS_FS_VOLATILE"

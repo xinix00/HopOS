@@ -407,7 +407,7 @@ mod facts {
 /// en de firmware a0 = het hart, op hart 0 ook 0): daar blijft het paar het
 /// bewijs, en het wissen ervan. Daar bestaat ook alleen de koude flip, en een
 /// oud koud blob boot hoe dan ook koud.
-fn jumped() -> bool {
+pub(crate) fn jumped() -> bool {
     cfg!(target_arch = "riscv64") || cpu::boot::FLIP_ENTERED.load(Relaxed)
 }
 
