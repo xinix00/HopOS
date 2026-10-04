@@ -118,17 +118,17 @@ pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 /// seed-materiaal, en de DRBG wist zijn seed na gebruik.
 pub struct Trng<R: Io> {
     regs: R,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     last: Option<u64>,
 }
 
 impl<R: Io> Trng<R> {
-    /// Een TRNG; raakt nog geen register aan. `clock` geeft monotone
+    /// Een TRNG; raakt nog geen register aan. `now` geeft monotone
     /// nanoseconden.
-    pub const fn new(regs: R, clock: fn() -> u64) -> Self {
+    pub const fn new(regs: R, now: fn() -> u64) -> Self {
         Self {
             regs,
-            clock,
+            now,
             last: None,
         }
     }
@@ -177,7 +177,7 @@ impl<R: Io> Trng<R> {
     fn round(&mut self) -> Result<[u8; ROUND]> {
         self.regs.write(RNG_CTL, (CTL_START << 16) | CTL_START);
         let mut ctl = 0;
-        if !dev::poll_until(self.clock, ROUND_NS, || {
+        if !dev::poll_until(self.now, ROUND_NS, || {
             ctl = self.regs.read(RNG_CTL);
             ctl & CTL_START == 0
         }) {

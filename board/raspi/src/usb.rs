@@ -38,7 +38,7 @@ pub struct UsbCtx {
     /// Het DMA-geheugen voor alle controllers samen ([`USB_DMA`]).
     pub dma: Region,
     /// De klok, voor de PCIe-bring-up.
-    pub clock: fn() -> u64,
+    pub now: fn() -> u64,
 }
 
 /// De controllers van dit board (`Board::usb_hosts`).
@@ -73,7 +73,7 @@ mod imp {
     pub(super) fn hosts<S: Soc>() -> UsbHosts {
         S::usb_hosts(&UsbCtx {
             dma: USB_DMA,
-            clock: cpu::idle::now,
+            now: cpu::idle::now,
         })
     }
 }
@@ -198,7 +198,7 @@ pub fn vl805_handshake(
     version: &mut dyn FnMut() -> u32,
     notify: &mut dyn FnMut() -> Result<u32, &'static str>,
     after: &mut dyn FnMut(&'static str),
-    clock: fn() -> u64,
+    now: fn() -> u64,
     wait: Vl805Wait,
 ) -> Vl805 {
     let v = version();
@@ -212,16 +212,16 @@ pub fn vl805_handshake(
         Ok(r) => r,
         Err(e) => return Vl805::Refused(e),
     };
-    let t0 = clock();
+    let t0 = now();
     let mut next = wait.first_ns;
     loop {
         let at = t0.saturating_add(next);
-        while clock() < at {
+        while now() < at {
             core::hint::spin_loop();
         }
         let v = version();
         after(STEP_VERSION);
-        let waited_ns = clock().saturating_sub(t0);
+        let waited_ns = now().saturating_sub(t0);
         if vl805_is_running(v) {
             return Vl805::Loaded {
                 version: v,
@@ -284,7 +284,7 @@ mod tests {
     }
 
     /// Een klok die bij elke lezing 100 µs verspringt.
-    fn clock() -> u64 {
+    fn now() -> u64 {
         NOW.with(|n| {
             let v = n.get();
             n.set(v + 100_000);
@@ -353,7 +353,7 @@ mod tests {
         };
         let mut notify = notify_ok;
         let mut after = after;
-        let r = vl805_handshake(&mut version, &mut notify, &mut after, clock, VL805_WAIT);
+        let r = vl805_handshake(&mut version, &mut notify, &mut after, now, VL805_WAIT);
         assert_eq!(
             r,
             Vl805::Running {
@@ -370,7 +370,7 @@ mod tests {
         let mut version = vl805(Some(500_000), 0x0001_38c0);
         let mut notify = notify_ok;
         let mut after = after;
-        let r = vl805_handshake(&mut version, &mut notify, &mut after, clock, VL805_WAIT);
+        let r = vl805_handshake(&mut version, &mut notify, &mut after, now, VL805_WAIT);
         let Vl805::Loaded {
             version: v,
             waited_ns,
@@ -407,7 +407,7 @@ mod tests {
         let mut version = vl805(Some(250_000_000), 0x0001_38c0);
         let mut notify = notify_ok;
         let mut after = after;
-        let r = vl805_handshake(&mut version, &mut notify, &mut after, clock, VL805_WAIT);
+        let r = vl805_handshake(&mut version, &mut notify, &mut after, now, VL805_WAIT);
         let Vl805::Loaded { waited_ns, .. } = r else {
             panic!("{r:?}");
         };
@@ -429,7 +429,7 @@ mod tests {
             Ok(0x8000_0000)
         };
         let mut after = after;
-        let r = vl805_handshake(&mut version, &mut notify, &mut after, clock, VL805_WAIT);
+        let r = vl805_handshake(&mut version, &mut notify, &mut after, now, VL805_WAIT);
         let Vl805::Silent {
             last,
             waited_ns,
@@ -459,7 +459,7 @@ mod tests {
             Err("mailbox busy")
         };
         let mut after = after;
-        let r = vl805_handshake(&mut version, &mut notify, &mut after, clock, VL805_WAIT);
+        let r = vl805_handshake(&mut version, &mut notify, &mut after, now, VL805_WAIT);
         assert_eq!(r, Vl805::Refused("mailbox busy"));
         let names: Vec<_> = accesses(&taken()).iter().map(|e| e.0).collect();
         assert_eq!(names, ["version", "notify"], "no reads after a refusal");

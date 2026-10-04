@@ -265,7 +265,7 @@ pub(crate) struct Params {
     /// Het hoogste slotnummer van dit board.
     pub(crate) max_slots: usize,
     /// De klok van het board (monotone nanoseconden).
-    pub(crate) clock: Clock,
+    pub(crate) now: Clock,
     /// De kick van slot `i` na een leeg-naar-niet-leeg-schrijf in zijn
     /// RX-ring (van de slot-lifecycle; zonder slots niets).
     pub(crate) slot_wake: fn(usize),
@@ -343,7 +343,7 @@ pub(crate) fn start<D: Device + 'static>(
     let mut sw = Switch::new(
         switch::Config {
             max_slots: p.max_slots,
-            clock: p.clock,
+            now: p.now,
             log: log_line,
             slot_wake: p.slot_wake,
             resident: p.resident,

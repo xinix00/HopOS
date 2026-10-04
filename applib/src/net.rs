@@ -444,7 +444,7 @@ mod tests {
     #[test]
     fn transmit_gives_up_after_the_backpressure_window() {
         static CLOCK: AtomicU64 = AtomicU64::new(0);
-        fn clock() -> u64 {
+        fn now() -> u64 {
             CLOCK.fetch_add(4_000_000, Relaxed) // 4 ms per lees
         }
         let txb = Backing::new(256);
@@ -456,7 +456,7 @@ mod tests {
         let rx = Reader::open(rxb.pa(), 256).unwrap();
         let mut nic = Nic::over(tx, rx, Peek::new(rxb.pa(), 256), mac_of(1));
         let drops = TX_DROPS.load(Relaxed);
-        let mut fut = pin!(nic.transmit_wait(&[1; 100], clock));
+        let mut fut = pin!(nic.transmit_wait(&[1; 100], now));
         let mut cx = Context::from_waker(Waker::noop());
         let mut polls = 0;
         let r = loop {

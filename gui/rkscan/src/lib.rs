@@ -338,11 +338,11 @@ pub struct Status {
 /// De keten op één set blokken, met een klok voor de grenzen.
 pub struct Chain {
     b: Blocks,
-    clock: fn() -> u64,
+    now: fn() -> u64,
 }
 
 impl Chain {
-    /// Een keten op `blocks`. `clock` geeft monotone nanoseconden.
+    /// Een keten op `blocks`. `now` geeft monotone nanoseconden.
     ///
     /// # Safety
     ///
@@ -351,17 +351,17 @@ impl Chain {
     /// bestaan zolang het programma draait, en niemand anders programmeert
     /// deze blokken.
     #[must_use]
-    pub const unsafe fn new(blocks: Blocks, clock: fn() -> u64) -> Self {
-        Self { b: blocks, clock }
+    pub const unsafe fn new(blocks: Blocks, now: fn() -> u64) -> Self {
+        Self { b: blocks, now }
     }
 
     /// De keten op het silicium van de RK3566.
     #[must_use]
-    pub fn rk3566(clock: fn() -> u64) -> Self {
+    pub fn rk3566(now: fn() -> u64) -> Self {
         // SAFETY: RK3566 zijn de blokken uit rk356x-base.dtsi; het board
         // mapt alles vanaf 0xC000_0000 als Device (board-rk3566 `mmu`), en
         // de keten is van het board, dat hem één keer start.
-        unsafe { Self::new(RK3566, clock) }
+        unsafe { Self::new(RK3566, now) }
     }
 
     /// Brengt de hele keten op: power-domein, VOP2-scanout, HDMI-TX.
@@ -386,8 +386,8 @@ impl Chain {
 }
 
 /// Brengt de beeldketen van de RK3566 op voor `fb` (zie [`Chain::start`]).
-pub fn start(fb: Desc, clock: fn() -> u64) -> Result<Status> {
-    Chain::rk3566(clock).start(&fb)
+pub fn start(fb: Desc, now: fn() -> u64) -> Result<Status> {
+    Chain::rk3566(now).start(&fb)
 }
 
 /// Toetst de framebuffer tegen de vaste laag, vóór er één register

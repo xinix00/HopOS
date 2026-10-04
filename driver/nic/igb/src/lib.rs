@@ -423,7 +423,7 @@ impl fmt::Display for IrqRegs {
 pub struct Igb {
     base: Pa,
     mac: Mac,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     rx_ring: Pa,
     tx_ring: Pa,
     rx_bufs: Pa,
@@ -443,7 +443,7 @@ pub struct Igb {
 
 impl Igb {
     /// Reset het device, leest het MAC, en zet de ringen klaar in `dma`
-    /// (RX en TX aan, interrupts dicht). `clock` geeft monotone
+    /// (RX en TX aan, interrupts dicht). `now` geeft monotone
     /// nanoseconden. De link komt daarna met [`link_up`](Self::link_up).
     ///
     /// # Safety
@@ -453,7 +453,7 @@ impl Igb {
     /// staan aan. `[dma, dma+dma_size)` is gemapt geheugen dat alleen deze
     /// driver en het device gebruiken, nu en zolang het programma draait, op
     /// een adres dat het device ziet zoals de CPU (geen IOMMU-vertaling).
-    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
+    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, now: fn() -> u64) -> Result<Self> {
         if dma_size < DMA_NEED {
             return Err(Error::DmaTooSmall {
                 need: DMA_NEED,
@@ -463,19 +463,19 @@ impl Igb {
         if !dma.is_aligned(BUF_OFF) {
             return Err(Error::DmaAlign(dma.0));
         }
-        let mut n = Self::at(base, dma, clock);
+        let mut n = Self::at(base, dma, now);
         n.reset()?;
         n.init()?;
         Ok(n)
     }
 
     /// De staat zonder één registertoegang (ook voor de tests).
-    fn at(base: Pa, dma: Pa, clock: fn() -> u64) -> Self {
+    fn at(base: Pa, dma: Pa, now: fn() -> u64) -> Self {
         let bufs = dma.add(BUF_OFF);
         Self {
             base,
             mac: Mac::default(),
-            clock,
+            now,
             rx_ring: dma.add(RX_RING_OFF),
             tx_ring: dma.add(TX_RING_OFF),
             rx_bufs: bufs,
@@ -574,8 +574,8 @@ impl Igb {
         r.tctl.write(TCTL_PSP);
         dev::mb();
         r.ctrl.update(|v| v | CTRL_RST);
-        dev::delay(self.clock, RESET_PAUSE_NS);
-        if !dev::poll_until(self.clock, RESET_NS, || r.ctrl.read() & CTRL_RST == 0) {
+        dev::delay(self.now, RESET_PAUSE_NS);
+        if !dev::poll_until(self.now, RESET_NS, || r.ctrl.read() & CTRL_RST == 0) {
             return Err(Error::ResetStuck {
                 ctrl: r.ctrl.read(),
             });
@@ -635,7 +635,7 @@ impl Igb {
     fn wait_queue(&self, tx: bool) -> Result {
         let r = self.regs();
         let q = if tx { &r.txdctl } else { &r.rxdctl };
-        if dev::poll_until(self.clock, QUEUE_NS, || q.read() & Q_ENABLE != 0) {
+        if dev::poll_until(self.now, QUEUE_NS, || q.read() & Q_ENABLE != 0) {
             Ok(())
         } else {
             Err(Error::QueueStuck { tx })
@@ -665,7 +665,7 @@ impl Igb {
     pub fn link_up(&mut self, timeout_ns: u64) -> Result<Link> {
         self.start_link()?;
         let r = self.regs();
-        let _ = dev::poll_until(self.clock, timeout_ns, || r.status.read() & STATUS_LU != 0);
+        let _ = dev::poll_until(self.now, timeout_ns, || r.status.read() & STATUS_LU != 0);
         self.link().ok_or(Error::NoLink {
             status: r.status.read(),
             ms: timeout_ns / 1_000_000,
@@ -675,7 +675,7 @@ impl Igb {
     fn mdic_wait(&self, phy: u8, reg: u8) -> mdio::Result<u32> {
         let mdic = &self.regs().mdic;
         let mut v = 0;
-        let _ = dev::poll_until(self.clock, MDIC_NS, || {
+        let _ = dev::poll_until(self.now, MDIC_NS, || {
             v = mdic.read();
             v & (MDIC_READY | MDIC_ERROR) != 0
         });

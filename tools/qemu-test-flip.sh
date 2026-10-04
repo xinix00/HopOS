@@ -38,6 +38,14 @@
 #               hopos.cfg op de ESP), de bundel een leeg venster: kern A
 #               geeft het zijne mee (HOPOS_FLIP_CFG vóór de sprong) en kern
 #               B leest het (HOPOS_CFG_WINDOW na de landing; ook koud);
+#   de groep    (virt, warm) kern A zet Hop in de sharegroup hop (een eigen
+#               app-core), de bundel draagt een eigen venster met
+#               hopos.hop.sharegroup=system (HOPOS_FLIP_CFG_OWN). Een warme
+#               flip verplaatst Hop niet: kern B zegt "Hop in the sharegroup
+#               hop (carried over the flip)" en in één regel dat de config
+#               pas bij een koude start geldt (HOPOS_HOP_GROUP_COLD), en de
+#               jobspec van daarna (met "sharegroup":"hop") landt op de core
+#               van Hop;
 #   hopfs       HOPOS_FS_FROZEN generation=N vóór de sprong, en na de landing
 #               HOPOS_FS_UP fresh=0 generation=N: dezelfde generatie, dus de
 #               staat van Hop overleeft via de schijf én (Hop draait door)
@@ -315,7 +323,16 @@ if [ "$BOARD" = uefi ]; then
 else
 	HOPOS_STAMP=A cargo build --quiet --release --target "$TARGET" -p hopos --features board-qemuvirt
 fi
-HOPOS_STAMP=B sh "$DIR/image/flip-bundle.sh" "$BOARD"
+# De groep over de flip (virt, warm): kern A zet Hop op een eigen app-core,
+# de bundel vraagt in zijn eigen venster de OS-core.
+GROUPFLIP=""
+[ "$BOARD:$MODE" = virt:warm ] && GROUPFLIP=1
+BCFG=""
+if [ -n "$GROUPFLIP" ]; then
+	printf 'hopos.hop.sharegroup=system\n' >"$ART/kern-b.cfg"
+	BCFG="$ART/kern-b.cfg"
+fi
+HOPOS_STAMP=B CFG="$BCFG" sh "$DIR/image/flip-bundle.sh" "$BOARD"
 BUNDLE="hopos-$BOARD.flip"
 cp "$DIR/target/$BUNDLE" "$ART/$BUNDLE"
 SHA="$(cat "$DIR/target/$BUNDLE.sha256")"
@@ -438,7 +455,11 @@ else
 	# 0xB010_0000 min 256 KiB) en HAND_MAGIC op de boot-scratch 0xB000_0000
 	# + 0x80 (board/qemuvirt/src/slots.rs, abi::layout), bij elke reset.
 	# Kern A met een config in zijn venster; de bundel heeft een leeg.
-	printf 'hopos.hop.sharegroup=system\n' >"$ART/kern-a.cfg"
+	if [ -n "$GROUPFLIP" ]; then
+		printf 'hopos.hop.sharegroup=hop\n' >"$ART/kern-a.cfg"
+	else
+		printf 'hopos.hop.sharegroup=system\n' >"$ART/kern-a.cfg"
+	fi
 	set -- -qmp "unix:$ART/q.sock,server=on,wait=off"
 	[ "$MODE" = warm ] && set -- "$@" \
 		-device loader,addr=0xb0000080,data=0xb00c0000,data-len=8 \
@@ -489,13 +510,20 @@ if [ "$BOARD" = uefi ] && [ "$MODE" != mismatch ]; then
 	FLIP_MARKS="$FLIP_MARKS|HOPOS_RNG_EFI_UP|HOPOS_FLIP_SEED|HOPOS_RNG_EFI_CARRIED"
 fi
 AFTER_MARKS="${AFTER_MARKS:-}"
-if [ "$MODE" != mismatch ]; then
+if [ -n "$GROUPFLIP" ]; then
+	# De bundel houdt zijn eigen venster; Hop blijft in zijn groep.
+	BASE_RED="$(printf '%s' "$BASE_RED" | sed 's/|HOPOS_FLIP_CFG_OWN//')"
+	RED="$(printf '%s' "$RED" | sed 's/|HOPOS_FLIP_CFG_OWN//')"
+	FLIP_MARKS="$FLIP_MARKS|flip: the bundle carries its own hopos.cfg in its window, ours stays behind HOPOS_FLIP_CFG_OWN"
+	AFTER_MARKS="${AFTER_MARKS:+$AFTER_MARKS|}cfg: hopos.cfg from the window in the kernel image, [0-9]+ bytes HOPOS_CFG_WINDOW|slots: Hop in the sharegroup hop \\(carried over the flip\\) HOPOS_HOP_GROUP|slots: the config puts Hop in the sharegroup system \\(hopos.hop.sharegroup\\) from the next cold start, .* HOPOS_HOP_GROUP_COLD"
+elif [ "$MODE" != mismatch ]; then
 	# De config over de flip: mee vóór de sprong, gelezen na de landing.
 	FLIP_MARKS="$FLIP_MARKS|flip: hopos.cfg carried into the new image HOPOS_FLIP_CFG"
 	AFTER_MARKS="${AFTER_MARKS:+$AFTER_MARKS|}cfg: hopos.cfg from the window in the kernel image, [0-9]+ bytes HOPOS_CFG_WINDOW"
 fi
 
 JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432}'
+[ -n "$GROUPFLIP" ] && JOB='{"name":"spike","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/appspike.elf"}],"memory_limit":33554432,"tags":{"sharegroup":"hop"}}'
 # De bewoner vóór de flip: FLIPCONN (warm) of een appspike die blijft (koud).
 PRE_JOB=""
 case "$MODE" in
@@ -711,6 +739,17 @@ if [ "$MODE" = warm ]; then
 	else
 		echo "   ROOD FLIPCONN: before/after '${FC:-?}', verbindingen bij de echo ${CONNS}, A=$(echoes A) B=$(echoes B)"
 		cat "$ART/echo.lines" 2>/dev/null | tail -5 | sed 's/^/        /'
+		fail=1
+	fi
+fi
+if [ -n "$GROUPFLIP" ]; then
+	# De jobspec met de tag hop landt op de core van de geadopteerde Hop.
+	HOPCORE="$(tr -d '\r' <"$LOG" | sed -n 's/.*Hop carried over the flip on core \([0-9]*\),.*/\1/p' | head -1)"
+	JOBCORE="$(tr -d '\r' <"$LOG" | awk '/HOPOS_FLIP_BOOT/ { f = 1 } f' | sed -n 's/.*HOPOS_SLOT_START slot=[2-9] core=\([0-9]*\) .*/\1/p' | head -1)"
+	if [ -n "$HOPCORE" ] && [ "$HOPCORE" != 0 ] && [ "$JOBCORE" = "$HOPCORE" ]; then
+		echo "   ok  de groep: Hop bleef op core $HOPCORE (sharegroup hop), de job met sharegroup hop landde ernaast"
+	else
+		echo "   ROOD de groep: Hop op core '${HOPCORE:-?}', de job met sharegroup hop op core '${JOBCORE:-?}'"
 		fail=1
 	fi
 fi

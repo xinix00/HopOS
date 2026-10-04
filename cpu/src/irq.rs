@@ -306,6 +306,13 @@ impl Dispatcher {
     /// naar 45 MB/s, en de O6N kreeg de schuld (bundels 47-55). Afbreken
     /// laat de pomp en de wachter aan de beurt; de device-ack houdt de lijn
     /// intussen laag.
+    ///
+    /// De console hoort het zoals bij Linux (`note_interrupt`: "nobody
+    /// cared", "Disabling IRQ"), en nooit per ronde: een lijn die uitgaat
+    /// altijd (`HOPOS_IRQ_STUCK`, één keer per lijn want hij is daarna uit),
+    /// de eerste storm die de lijn aan laat (`HOPOS_IRQ_STORM`; de rest telt
+    /// in [`Stats::stray_passes`]) en de eerste onbekende lijn (de rest telt
+    /// in [`Stats::unknown`]).
     pub fn dispatch(&self) -> Pass {
         let mut pass = Pass::default();
         let Some(ctrl) = self.ctrl.get() else {
@@ -318,7 +325,12 @@ impl Dispatcher {
             let Some((i, e)) = self.entry(l) else {
                 ctrl.disable(l);
                 ctrl.complete(l);
-                self.stats.unknown.fetch_add(1, Relaxed);
+                if self.stats.unknown.fetch_add(1, Relaxed) == 0 {
+                    crate::println!(
+                        "irq: INTID {} fired but nobody serves it (left enabled by the firmware?), line disabled",
+                        l.0
+                    );
+                }
                 pass.unknown = pass.unknown.saturating_add(1);
                 pass.disabled = Some(l);
                 continue;
@@ -336,12 +348,24 @@ impl Dispatcher {
             };
             *seen = (l.0, seen.1.saturating_add(1));
             if seen.1 > STRAY_LIMIT {
-                self.stats.stray_passes.fetch_add(1, Relaxed);
+                // De eerste storm die de lijn aan laat: alle eerdere waren
+                // lijnen die uitgingen.
+                let first =
+                    self.stats.stray_passes.fetch_add(1, Relaxed) == self.stats.stuck.load(Relaxed);
                 pass.stray = Some(l);
                 if e.trigger == Trigger::Level && e.ack.is_none() {
                     ctrl.disable(l);
                     self.stats.stuck.fetch_add(1, Relaxed);
                     pass.stuck = Some(l);
+                    crate::println!(
+                        "irq: INTID {} came back {STRAY_LIMIT} times in one pass, a level line without a device ack that nobody lowers: line disabled, its waiter polls HOPOS_IRQ_STUCK",
+                        l.0
+                    );
+                } else if first {
+                    crate::println!(
+                        "irq: INTID {} came back {STRAY_LIMIT} times in one pass, pass ended, line stays enabled HOPOS_IRQ_STORM",
+                        l.0
+                    );
                 }
                 break;
             }

@@ -291,7 +291,12 @@ pub(crate) fn start(
     hop_cfg: String,
 ) {
     let board = &crate::BOARD;
-    init_hop_group(&hop_cfg);
+    // FLIP: een geadopteerde Hop zit waar hij zat, met zijn groep en core.
+    let carried = adopt
+        .as_ref()
+        .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT));
+    init_hop_group(&hop_cfg, carried);
+    let hop_core = carried.map(|st| st.core);
     let plan = match os_plan() {
         Ok(p) => p,
         Err(e) => {
@@ -390,10 +395,6 @@ pub(crate) fn start(
         .capacity()
         .saturating_sub(crate::codec::planned_bytes());
     let cores = SlotCores::new(plan.clone());
-    // FLIP: de core van een geadopteerde Hop, als hij meeging.
-    let hop_core = adopt
-        .as_ref()
-        .and_then(|v| v.iter().find(|st| st.slot == HOP_SLOT).map(|st| st.core));
     // De actor buiten de future gebouwd (30-09): binnen `async move` stond
     // de verse `Lifecycle` als tijdelijke waarde in het frame van de
     // poll-functie, en dat frame (57 KB) reserveerde elke poll van de
@@ -809,10 +810,16 @@ fn hop_on_os() -> bool {
 /// met dezelfde tag delen. Zonder sleutel: `system` waar de kern zijn core
 /// deelt, anders `hop`. Vraagt de config `system` op een board dat niet
 /// deelt (Apple), dan `hop`, luid. Eén keer, vóór de pool en de plaatsing.
-fn init_hop_group(hop_cfg: &str) {
+///
+/// FLIP: een warme flip verplaatst Hop niet (`carried`, zijn staat uit het
+/// blob). Dan is zijn groep de waarheid: de bootregel zegt waar hij zit,
+/// jobs met zijn tag en een flipbundel komen naast hem, en de core-reclaim
+/// spaart hem. Vraagt de config iets anders, dan zegt één regel dat die
+/// pas bij een koude start geldt.
+fn init_hop_group(hop_cfg: &str, carried: Option<&kern::slots::SlotState>) {
     let cfg = kern::nodecfg::NodeCfg::parse(hop_cfg);
     let want = cfg.one("hopos.hop.sharegroup");
-    let (name, why): (&[u8], &str) = match want {
+    let (cfg_name, cfg_why): (&[u8], &str) = match want {
         "" if arch::SHARES_OS_CORE => (kern::pool::SYSTEM_GROUP, "default"),
         "" => (
             kern::pool::HOP_GROUP,
@@ -824,6 +831,9 @@ fn init_hop_group(hop_cfg: &str) {
         ),
         other => (other.as_bytes(), "hopos.hop.sharegroup"),
     };
+    let (name, why) = carried.map_or((cfg_name, cfg_why), |st| {
+        (st.share_group.as_slice(), "carried over the flip")
+    });
     match kern::pool::set_hop_group(name) {
         Ok(()) => println!(
             "slots: Hop in the sharegroup {} ({why}) HOPOS_HOP_GROUP",
@@ -832,6 +842,12 @@ fn init_hop_group(hop_cfg: &str) {
         Err(e) => {
             println!("slots: hopos.hop.sharegroup: {e}, Hop in the group hop HOPOS_HOP_GROUP")
         }
+    }
+    if name != cfg_name {
+        println!(
+            "slots: the config puts Hop in the sharegroup {} ({cfg_why}) from the next cold start, a warm flip does not move him HOPOS_HOP_GROUP_COLD",
+            core::str::from_utf8(cfg_name).unwrap_or("?")
+        );
     }
 }
 

@@ -114,7 +114,7 @@ pub(crate) fn with<R>(f: impl FnOnce(&mut Fake) -> R) -> R {
 }
 
 /// De klok van de test, en de hartslag van de coprocessor.
-pub(crate) fn clock() -> u64 {
+pub(crate) fn now() -> u64 {
     with(|f| {
         f.now += 1_000;
         f.tick();

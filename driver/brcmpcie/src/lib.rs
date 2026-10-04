@@ -254,7 +254,7 @@ fn reg(pa: Pa) -> &'static Reg<u32> {
 /// # Safety
 ///
 /// `base` is het gemapte RESCAL-blok (12 bytes).
-pub unsafe fn rescal(base: Pa, clock: fn() -> u64) -> bool {
+pub unsafe fn rescal(base: Pa, now: fn() -> u64) -> bool {
     let start = reg(base);
     start.update(|v| v | 1);
     if start.read() & 1 == 0 {
@@ -262,7 +262,7 @@ pub unsafe fn rescal(base: Pa, clock: fn() -> u64) -> bool {
     }
     let status = reg(base.add(8));
     // Ruim boven Linux' 1 ms.
-    let ok = dev::poll_until(clock, 2_000_000, || status.read() & 1 != 0);
+    let ok = dev::poll_until(now, 2_000_000, || status.read() & 1 != 0);
     start.update(|v| v & !1);
     ok
 }
@@ -347,7 +347,7 @@ pub struct Rc {
     speed: u32,
     out: OutWin,
     inb: [Option<InWin>; MAX_IN],
-    clock: fn() -> u64,
+    now: fn() -> u64,
 }
 
 impl Rc {
@@ -372,7 +372,7 @@ impl Rc {
         speed: u32,
         out: OutWin,
         inb: [Option<InWin>; MAX_IN],
-        clock: fn() -> u64,
+        now: fn() -> u64,
     ) -> Self {
         Self {
             soc,
@@ -382,7 +382,7 @@ impl Rc {
             speed,
             out,
             inb,
-            clock,
+            now,
         }
     }
 
@@ -441,11 +441,11 @@ impl Rc {
         if self.soc == Soc::Bcm2711 {
             self.perst(true);
         }
-        dev::delay(self.clock, 200_000);
+        dev::delay(self.now, 200_000);
         self.bridge_reset(false);
-        dev::delay(self.clock, 200_000);
+        dev::delay(self.now, 200_000);
         self.r(self.hard_debug()).update(|v| v & !HD_SERDES_IDDQ);
-        dev::delay(self.clock, 200_000);
+        dev::delay(self.now, 200_000);
 
         // SCB_ACCESS_EN | CFG_READ_UR_MODE (een config-read naar niets geeft
         // all-ones in plaats van een abort) | RCB_MPS | RCB_64B, en
@@ -524,7 +524,7 @@ impl Rc {
         ] {
             self.mdio_write(0, r, v);
         }
-        dev::delay(self.clock, 200_000);
+        dev::delay(self.now, 200_000);
         // PM-klokperiode 18,52 ns = 1/54 MHz.
         self.r(off::CFG_PHY_CTL15).update(|v| (v & !0xff) | 0x12);
         self.r(off::MISC_UBUS_CTRL)
@@ -574,8 +574,8 @@ impl Rc {
             v & !(HD_CLKREQ_DEBUG | HD_REFCLK_OVRD_EN | HD_REFCLK_OVRD_OUT | HD_L1SS_ENABLE)
         });
         self.perst(false);
-        dev::delay(self.clock, 100_000_000);
-        let _ = dev::poll_until(self.clock, 200_000_000, || {
+        dev::delay(self.now, 100_000_000);
+        let _ = dev::poll_until(self.now, 200_000_000, || {
             let l = self.link_status();
             l.0 && l.1
         });
@@ -664,7 +664,7 @@ impl Rc {
     /// `rescal_base` is 0 of het gemapte RESCAL-blok.
     pub unsafe fn bring_up_closed(&self, rescal_base: u64, want: u32, bars: &[EpBar]) -> Result {
         // SAFETY: de voorwaarde van deze functie.
-        if rescal_base != 0 && !unsafe { rescal(Pa(rescal_base), self.clock) } {
+        if rescal_base != 0 && !unsafe { rescal(Pa(rescal_base), self.now) } {
             return Err(Error::Rescal);
         }
         if !self.setup() {
@@ -707,7 +707,7 @@ impl Rc {
         let cmd = self.cfg_read32(1, 0, 0, off::CFG_COMMAND);
         self.cfg_write32(1, 0, 0, off::CFG_COMMAND, cmd & !CMD_BUS_MASTER);
         // Wat al onderweg was, komt nog aan; er vertrekt niets nieuws meer.
-        dev::delay(self.clock, 1_000_000);
+        dev::delay(self.now, 1_000_000);
         self.perst(true);
     }
 

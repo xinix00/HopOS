@@ -85,7 +85,7 @@ fn harness() -> H {
     let sw = Switch::new(
         Config {
             max_slots: SLOT_CAP,
-            clock: fake_now,
+            now: fake_now,
             log: no_log,
             slot_wake: record_wake,
             resident: slot_seven_is_resident,

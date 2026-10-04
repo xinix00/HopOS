@@ -261,7 +261,7 @@ pub struct Channel {
     /// interconnect-permissies zonder welke elke registerlees op die blokken
     /// een SError geeft.
     ring: Option<fn()>,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     token: u32,
 }
 
@@ -274,11 +274,11 @@ impl Channel {
     /// dat blijft bestaan, en niemand anders dan deze client en het platform
     /// schrijft erin.
     #[must_use]
-    pub unsafe fn new(base: Pa, clock: fn() -> u64) -> Self {
+    pub unsafe fn new(base: Pa, now: fn() -> u64) -> Self {
         Self {
             base,
             ring: None,
-            clock,
+            now,
             token: 0,
         }
     }
@@ -290,11 +290,11 @@ impl Channel {
     ///
     /// Als [`new`](Self::new); `ring` mag alleen de bel luiden.
     #[must_use]
-    pub unsafe fn with_ring(base: Pa, clock: fn() -> u64, ring: fn()) -> Self {
+    pub unsafe fn with_ring(base: Pa, now: fn() -> u64, ring: fn()) -> Self {
         Self {
             base,
             ring: Some(ring),
-            clock,
+            now,
             token: 0,
         }
     }
@@ -307,7 +307,7 @@ impl Channel {
     fn wait_free(&self) -> core::result::Result<(), u32> {
         let s = self.shm();
         let mut st = 0;
-        if dev::poll_until(self.clock, TIMEOUT_NS, || {
+        if dev::poll_until(self.now, TIMEOUT_NS, || {
             st = s.status.read();
             st & STATUS_FREE != 0
         }) {

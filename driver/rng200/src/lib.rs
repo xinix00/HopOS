@@ -143,18 +143,18 @@ pub type Result<T = (), E = Error> = core::result::Result<T, E>;
 /// Eén RNG200: de registers, de klok en of de warm-up al gedaan is.
 pub struct Rng200<R: Io> {
     regs: R,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     started: bool,
     last: Option<u32>,
 }
 
 impl<R: Io> Rng200<R> {
     /// Een RNG200 die nog niet gestart is; de eerste [`fill`](Self::fill)
-    /// start hem. `clock` geeft monotone nanoseconden.
-    pub const fn new(regs: R, clock: fn() -> u64) -> Self {
+    /// start hem. `now` geeft monotone nanoseconden.
+    pub const fn new(regs: R, now: fn() -> u64) -> Self {
         Self {
             regs,
-            clock,
+            now,
             started: false,
             last: None,
         }
@@ -207,7 +207,7 @@ impl<R: Io> Rng200<R> {
     /// of [`WORD_NS`], door de continue toets.
     fn word(&mut self, warmup: bool) -> Result<u32> {
         let budget = if warmup { WARMUP_NS } else { WORD_NS };
-        if !dev::poll_until(self.clock, budget, || {
+        if !dev::poll_until(self.now, budget, || {
             self.regs.read(RNG_FIFO_COUNT) & FIFO_COUNT_MASK != 0
         }) {
             return Err(Error::Timeout { warmup });

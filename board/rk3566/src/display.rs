@@ -73,12 +73,12 @@ const fn desc() -> Desc {
 
 /// De framebuffer; de eerste aanroep brengt de keten op. Altijd `Some`,
 /// ook als de keten faalt (zie de moduledoc).
-pub(crate) fn framebuffer(clock: fn() -> u64) -> Option<Desc> {
+pub(crate) fn framebuffer(now: fn() -> u64) -> Option<Desc> {
     let fb = desc();
     if !STARTED.swap(true, Relaxed) {
-        match gui_rkscan::start(fb, clock) {
+        match gui_rkscan::start(fb, now) {
             Ok(st) => report(&st),
-            Err(e) => fail(&e, clock),
+            Err(e) => fail(&e, now),
         }
     }
     Some(fb)
@@ -108,8 +108,8 @@ fn report(st: &Status) {
 /// De regel van een mislukte keten, met de registers van de laag die
 /// faalde. Alleen die laag: een blok in een dood domein lezen kan de bus
 /// vasthouden, en de laag die faalde heeft net bewezen dat hij antwoordt.
-fn fail(e: &Error, clock: fn() -> u64) {
-    let c = Chain::rk3566(clock);
+fn fail(e: &Error, now: fn() -> u64) {
+    let c = Chain::rk3566(now);
     match (e, e.layer()) {
         (Error::Geometry { .. }, _) => {
             cpu::println!("display: {e}, framebuffer stays network-only (/kvm) HOPOS_DISPLAY_FAIL")

@@ -528,9 +528,7 @@ impl Chain {
             (p.hpll_con2.read() & !0x00FF_FFFF) | HPLL_FRAC,
         );
         dev::mb();
-        if !dev::poll_until(self.clock, PLL_WAIT_NS, || {
-            p.hpll_con1.read() & PLL_LOCK != 0
-        }) {
+        if !dev::poll_until(self.now, PLL_WAIT_NS, || p.hpll_con1.read() & PLL_LOCK != 0) {
             return Err(Error::Settle {
                 step: Step::HpllLock,
                 off: offset_of!(PmuCru, hpll_con1) as u32,
@@ -714,7 +712,7 @@ impl Chain {
     /// het ook). `false` betekent dat de VP niet scant.
     pub fn vop_cfg_done_taken(&self) -> bool {
         let s = self.vop_sys();
-        dev::poll_until(self.clock, LATCH_WAIT_NS, || {
+        dev::poll_until(self.now, LATCH_WAIT_NS, || {
             s.cfg_done.read() & CFG_DONE_VP0 == 0
         })
     }

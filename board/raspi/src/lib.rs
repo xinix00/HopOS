@@ -92,7 +92,7 @@ pub struct NicCtx {
     /// Het MAC-adres: van de firmware (OTP), anders uit het serienummer.
     pub mac: [u8; 6],
     /// Monotone nanoseconden.
-    pub clock: fn() -> u64,
+    pub now: fn() -> u64,
 }
 
 /// Wat een SoC levert: de adressen, de nummering, de NIC en de tabellen.
@@ -583,7 +583,7 @@ impl<S: Soc> Board for Raspi<S> {
         let ctx = NicCtx {
             dma: map::NET_DMA,
             mac: cfg::mac_bytes(MAC.load(Relaxed), S::MAC_FALLBACK),
-            clock: cpu::idle::now,
+            now: cpu::idle::now,
         };
         let r = S::probe_nic(&ctx);
         if matches!(r, Ok(Some(_))) {

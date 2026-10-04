@@ -16,7 +16,7 @@ thread_local! {
 }
 
 /// Een klok die per lees een milliseconde verspringt.
-pub(crate) fn clock() -> u64 {
+pub(crate) fn now() -> u64 {
     NOW.with(|n| {
         n.set(n.get() + 1_000_000);
         n.get()
@@ -59,7 +59,7 @@ pub(crate) fn rig<O: Ops>() -> Rig<O> {
 /// Een `Probe` op een nep-registerblok.
 pub(crate) fn probe<O: Ops>(regs: &Mem) -> Probe<O> {
     // SAFETY: het nep-blok is groot genoeg en leeft de hele toets.
-    unsafe { Probe::new(regs.base, 0x5, clock) }
+    unsafe { Probe::new(regs.base, 0x5, now) }
 }
 
 // --- de nagebootste generatie ----------------------------------------------

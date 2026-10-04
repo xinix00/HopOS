@@ -78,7 +78,7 @@ const BUDGET_FLOOR_NS: u64 = 50_000_000;
 pub struct Smpro {
     ch: u32,
     pcc: Pcc,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     /// Het gedeelde geheugen is nog van de firmware: een vorig commando
     /// liep af zonder CMD_COMPLETE. Tot dat bit komt, schrijven wij er niet
     /// in.
@@ -94,11 +94,11 @@ impl Smpro {
     /// gemapt als Device en blijven bestaan; niemand anders dan deze driver
     /// en de SMpro gebruikt het kanaal.
     #[must_use]
-    pub unsafe fn new(ch: u32, pcc: Pcc, clock: fn() -> u64) -> Self {
+    pub unsafe fn new(ch: u32, pcc: Pcc, now: fn() -> u64) -> Self {
         Self {
             ch,
             pcc,
-            clock,
+            now,
             pending: false,
         }
     }
@@ -148,7 +148,7 @@ impl Smpro {
         // Linux budgetteert 500 maal de PCCT-latentie; hetzelfde, met een
         // vloer.
         let budget = (u64::from(self.pcc.latency_us) * 500_000).max(BUDGET_FLOOR_NS);
-        if !dev::poll_until(self.clock, budget, || s.cmd_status.read() & complete != 0) {
+        if !dev::poll_until(self.now, budget, || s.cmd_status.read() & complete != 0) {
             return None;
         }
         self.pending = false;
@@ -183,7 +183,7 @@ mod tests {
     }
 
     /// De klok is de SMpro: staat de bel, dan antwoordt hij.
-    fn clock() -> u64 {
+    fn now() -> u64 {
         HW.with(|h| {
             let (shm, db, temp, alive) = *h.borrow();
             if alive && shm.0 != 0 && dev::read32(db) & 1 != 0 {
@@ -220,7 +220,7 @@ mod tests {
             latency_us: 10,
         };
         // SAFETY: shmem en doorbell liggen in `mem`, dat de test overleeft.
-        (unsafe { Smpro::new(HWMON_CHANNEL, pcc, clock) }, mem)
+        (unsafe { Smpro::new(HWMON_CHANNEL, pcc, now) }, mem)
     }
 
     #[test]

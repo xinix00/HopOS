@@ -163,19 +163,19 @@ pub struct VirtioNet<T: Transport = Mmio> {
 impl VirtioNet<Mmio> {
     /// Zet het device op het virtio-mmio-slot `base` op: reset, VERSION_1
     /// onderhandelen, RX- en TX-queue in `dma`, de RX-buffers publiceren,
-    /// DRIVER_OK. `clock` geeft monotone nanoseconden, voor de reset.
+    /// DRIVER_OK. `now` geeft monotone nanoseconden, voor de reset.
     ///
     /// # Safety
     ///
     /// `base` is een gemapt virtio-mmio-blok dat voor altijd blijft, en
     /// `[dma, dma+dma_size)` is gemapt geheugen dat alleen deze driver en
     /// het device gebruiken, nu en zolang het programma draait.
-    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
+    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, now: fn() -> u64) -> Result<Self> {
         // SAFETY: de eerste helft van de voorwaarde van deze functie.
         let t = unsafe { Mmio::new(base) };
         t.check()?;
         // SAFETY: de tweede helft van de voorwaarde van deze functie.
-        unsafe { Self::with_transport(t, dma, dma_size, clock) }
+        unsafe { Self::with_transport(t, dma, dma_size, now) }
     }
 
     /// Het interrupt-pad, voor het board.
@@ -188,13 +188,13 @@ impl VirtioNet<Mmio> {
 impl<T: Transport> VirtioNet<T> {
     /// Zet het device achter transport `t` op: reset, VERSION_1
     /// onderhandelen, RX- en TX-queue in `dma`, de RX-buffers publiceren,
-    /// DRIVER_OK. `clock` geeft monotone nanoseconden, voor de reset.
+    /// DRIVER_OK. `now` geeft monotone nanoseconden, voor de reset.
     ///
     /// # Safety
     ///
     /// `[dma, dma+dma_size)` is gemapt geheugen dat alleen deze driver en
     /// het device gebruiken, nu en zolang het programma draait.
-    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
+    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, now: fn() -> u64) -> Result<Self> {
         let id = t.device_id();
         if id != DEVICE_NET {
             return Err(Error::WrongDevice {
@@ -216,7 +216,7 @@ impl<T: Transport> VirtioNet<T> {
         // Alleen VERSION_1. De device-features leest deze driver bewust
         // niet: QEMU levert een vaste, bekende set en wij onderhandelen
         // alleen VERSION_1.
-        n.t.negotiate(clock, |_| 0)?;
+        n.t.negotiate(now, |_| 0)?;
 
         let mut mac = [0u8; 6];
         for (i, b) in (0u32..).zip(mac.iter_mut()) {
@@ -407,7 +407,7 @@ mod tests {
     }
 
     /// De reset van de nep-transport is synchroon; de klok telt niet.
-    fn clock() -> u64 {
+    fn now() -> u64 {
         0
     }
 
@@ -633,9 +633,8 @@ mod tests {
         // Zes biedt het device: de driver neemt de macht van twee eronder.
         // SAFETY: `mem` leeft de hele test en is ruim genoeg voor twee
         // queues van vier.
-        let mut n =
-            unsafe { VirtioNet::with_transport(FakeT::new(1, 6), dma, 3 * 1024 * 64, clock) }
-                .unwrap();
+        let mut n = unsafe { VirtioNet::with_transport(FakeT::new(1, 6), dma, 3 * 1024 * 64, now) }
+            .unwrap();
         assert_eq!(n.queue_size(), 4);
         assert_eq!(n.mac(), Mac([0x52, 0x54, 0x00, 0xab, 0xcd, 0xef]));
         let t = n.transport();
@@ -679,15 +678,15 @@ mod tests {
         let mut mem = vec![0u64; 1024];
         let dma = pa(&mut mem);
         // SAFETY: `mem` leeft de hele test; er wordt niets in gezet.
-        let e = unsafe { VirtioNet::with_transport(FakeT::new(2, 4), dma, 8192, clock) }.err();
+        let e = unsafe { VirtioNet::with_transport(FakeT::new(2, 4), dma, 8192, now) }.err();
         assert_eq!(e, Some(Error::WrongDevice { want: 1, got: 2 }));
         let mut t = FakeT::new(1, 4);
         t.refuse = true;
         // SAFETY: zie boven.
-        let e = unsafe { VirtioNet::with_transport(t, dma, 8192, clock) }.err();
+        let e = unsafe { VirtioNet::with_transport(t, dma, 8192, now) }.err();
         assert_eq!(e, Some(Error::FeaturesRefused));
         // SAFETY: zie boven.
-        let e = unsafe { VirtioNet::with_transport(FakeT::new(1, 0), dma, 8192, clock) }.err();
+        let e = unsafe { VirtioNet::with_transport(FakeT::new(1, 0), dma, 8192, now) }.err();
         assert_eq!(
             e,
             Some(Error::NoQueue {

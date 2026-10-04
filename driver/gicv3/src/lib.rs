@@ -799,14 +799,29 @@ mod tests {
         assert!(icc.pending.borrow().is_empty());
     }
 
+    /// De console van de toetsen: alles wat `cpu::println!` schrijft.
+    static CONSOLE: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+
+    /// Hoeveel regels van de console `needle` bevatten.
+    fn console_lines(needle: &str) -> usize {
+        cpu::console::set_sink(|b| CONSOLE.lock().unwrap().extend_from_slice(b));
+        let out = CONSOLE.lock().unwrap();
+        String::from_utf8_lossy(&out)
+            .lines()
+            .filter(|l| l.contains(needle))
+            .count()
+    }
+
     // Een NIC onder last (een ack per claim) breekt de ronde af op
     // STRAY_LIMIT en blijft aan; een level-SPI zonder ack die blijft
     // terugkomen gaat uit in de distributor. Een LPI die niemand kent krijgt
     // zijn EOI, en de distributor blijft ongemoeid (een LPI woont in de
-    // tabel van zijn ITS).
+    // tabel van zijn ITS). De console krijgt per soort één regel, geen
+    // regel per ronde.
     #[test]
     fn a_storm_on_a_gicv3_ends_the_pass_and_a_stuck_spi_goes_off() {
         use cpu::irq::STRAY_LIMIT;
+        console_lines("");
         let (disp, icc, d, _r) = dispatcher();
         disp.enable(Line(64), Some(|| {}), None).unwrap();
         let n = STRAY_LIMIT as usize + 10;
@@ -818,6 +833,13 @@ mod tests {
         assert_eq!(icc.eoi.borrow().len(), STRAY_LIMIT as usize + 1);
         assert_eq!(icc.pending.borrow().len(), 9);
         assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 2)), 0);
+        // De tweede storm op dezelfde lijn telt, maar zegt niets meer.
+        icc.pending.borrow_mut().extend(std::iter::repeat_n(64, n));
+        assert_eq!(disp.dispatch().stray, Some(Line(64)));
+        assert_eq!(disp.stats.stray_passes.load(Relaxed), 2);
+        let storm = format!("INTID 64 came back {STRAY_LIMIT} times in one pass, pass ended");
+        assert_eq!(console_lines(&storm), 1);
+        assert_eq!(console_lines("line stays enabled HOPOS_IRQ_STORM"), 1);
 
         let (disp, icc, d, _r) = dispatcher();
         disp.enable(Line(65), None, None).unwrap();
@@ -825,6 +847,17 @@ mod tests {
         let pass = disp.dispatch();
         assert_eq!(pass.stuck, Some(Line(65)));
         assert_eq!(dev::read32(pa(d).add(0x180 + 4 * 2)), 1 << 1);
+        assert_eq!(console_lines("INTID 65 came back"), 1);
+        assert_eq!(
+            console_lines("line disabled, its waiter polls HOPOS_IRQ_STUCK"),
+            1
+        );
+        // Een storm die de lijn aan laat, ná een lijn die uitging: ook die
+        // eerste komt op de console.
+        disp.enable(Line(66), Some(|| {}), None).unwrap();
+        icc.pending.borrow_mut().extend(std::iter::repeat_n(66, n));
+        assert_eq!(disp.dispatch().stuck, None);
+        assert_eq!(console_lines("INTID 66 came back"), 1);
 
         let (disp, icc, d, _r) = dispatcher();
         icc.pending.borrow_mut().push(FIRST_LPI + 8);
@@ -832,6 +865,12 @@ mod tests {
         assert_eq!((pass.claimed, pass.unknown), (1, 1));
         assert_eq!(*icc.eoi.borrow(), vec![FIRST_LPI + 8]);
         assert!(d.iter().all(|&w| w == 0));
+        // Alleen de eerste verdwaalde lijn komt op de console.
+        icc.pending.borrow_mut().push(FIRST_LPI + 9);
+        assert_eq!(disp.dispatch().unknown, 1);
+        assert_eq!(disp.stats.unknown.load(Relaxed), 2);
+        assert_eq!(console_lines("INTID 8200 fired but nobody serves it"), 1);
+        assert_eq!(console_lines("INTID 8201"), 0);
     }
 
     #[test]

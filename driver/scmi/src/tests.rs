@@ -25,7 +25,7 @@ thread_local! {
     static SCP: RefCell<Scp> = RefCell::new(Scp::default());
 }
 
-fn clock() -> u64 {
+fn now() -> u64 {
     SCP.with(|s| {
         let mut s = s.borrow_mut();
         s.now += 1_000_000;
@@ -69,7 +69,7 @@ fn channel(answer: Answer) -> (Channel, Vec<u64>) {
         };
     });
     // SAFETY: de shmem ligt in `mem`, dat de test overleeft.
-    (unsafe { Channel::new(base, clock) }, mem)
+    (unsafe { Channel::new(base, now) }, mem)
 }
 
 fn seen() -> Vec<(u8, u8, Vec<u32>, u32)> {
@@ -200,12 +200,12 @@ fn the_tf_a_channel_rings_by_function_and_leaves_the_signature() {
             let b = s.borrow().shm;
             dev::write32(b.add(0x80), 1);
         });
-        clock();
+        now();
     }
     let (_c, _m) = channel(board_scp);
     let base = SCP.with(|s| s.borrow().shm);
     // SAFETY: de shmem ligt in `_m`.
-    let mut c = unsafe { Channel::with_ring(base, clock, ring) };
+    let mut c = unsafe { Channel::with_ring(base, now, ring) };
     c.power_set(2, POWER_OFF).unwrap();
     assert_eq!(seen()[0].3, 0, "no Cix signature on the TF-A channel");
 }

@@ -273,7 +273,7 @@ pub struct VirtioBlk<T: Transport = Mmio> {
     sectors: u64,
     flush: bool,
     read_only: bool,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     avail_idx: u16,
     last_used: u16,
     dead: bool,
@@ -288,7 +288,7 @@ pub struct VirtioBlk<T: Transport = Mmio> {
 impl VirtioBlk<Mmio> {
     /// Zet het device op het virtio-mmio-slot `base` op: reset, VERSION_1
     /// (plus FLUSH als het device hem biedt) onderhandelen, queue 0 in
-    /// `dma`, DRIVER_OK. `clock` geeft monotone nanoseconden, voor de
+    /// `dma`, DRIVER_OK. `now` geeft monotone nanoseconden, voor de
     /// time-out van een verzoek.
     ///
     /// # Safety
@@ -297,12 +297,12 @@ impl VirtioBlk<Mmio> {
     /// `[dma, dma+dma_size)` is gemapt, niet gecached geheugen dat alleen
     /// deze driver en het device gebruiken, nu en zolang het programma
     /// draait.
-    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
+    pub unsafe fn new(base: Pa, dma: Pa, dma_size: u64, now: fn() -> u64) -> Result<Self> {
         // SAFETY: de eerste helft van de voorwaarde van deze functie.
         let t = unsafe { Mmio::new(base) };
         t.check()?;
         // SAFETY: de tweede helft van de voorwaarde van deze functie.
-        unsafe { Self::with_transport(t, dma, dma_size, clock) }
+        unsafe { Self::with_transport(t, dma, dma_size, now) }
     }
 
     /// Het interrupt-pad, voor de dispatch van het board.
@@ -315,7 +315,7 @@ impl VirtioBlk<Mmio> {
 impl<T: Transport> VirtioBlk<T> {
     /// Zet het device achter transport `t` op: reset, VERSION_1 (plus
     /// FLUSH als het device hem biedt) onderhandelen, queue 0 in `dma`,
-    /// DRIVER_OK. `clock` geeft monotone nanoseconden, voor de time-out van
+    /// DRIVER_OK. `now` geeft monotone nanoseconden, voor de time-out van
     /// een verzoek.
     ///
     /// # Safety
@@ -323,7 +323,7 @@ impl<T: Transport> VirtioBlk<T> {
     /// `[dma, dma+dma_size)` is gemapt, niet gecached geheugen dat alleen
     /// deze driver en het device gebruiken, nu en zolang het programma
     /// draait.
-    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, clock: fn() -> u64) -> Result<Self> {
+    pub unsafe fn with_transport(t: T, dma: Pa, dma_size: u64, now: fn() -> u64) -> Result<Self> {
         if dma_size < DMA_NEED {
             return Err(driver_virtiopci::Error::DmaTooSmall {
                 need: DMA_NEED,
@@ -345,7 +345,7 @@ impl<T: Transport> VirtioBlk<T> {
             sectors: 0,
             flush: false,
             read_only: false,
-            clock,
+            now,
             avail_idx: 0,
             last_used: 0,
             dead: false,
@@ -356,7 +356,7 @@ impl<T: Transport> VirtioBlk<T> {
         };
         // VERSION_1, plus wat van FLUSH en RO geboden wordt.
         let lo =
-            d.t.negotiate(clock, |t| t.device_features(0) & (FEAT_FLUSH | FEAT_RO))?;
+            d.t.negotiate(now, |t| t.device_features(0) & (FEAT_FLUSH | FEAT_RO))?;
         d.flush = lo & FEAT_FLUSH != 0;
         d.read_only = lo & FEAT_RO != 0;
 
@@ -460,7 +460,7 @@ impl<T: Transport> VirtioBlk<T> {
             return Err(Error::Busy);
         }
         let noop = kind == T_FLUSH && !self.flush;
-        let t0 = (self.clock)();
+        let t0 = (self.now)();
         if !noop {
             self.submit(kind, sector, len as u32);
         }
@@ -486,7 +486,7 @@ impl<T: Transport> VirtioBlk<T> {
         }
         let used = self.dma.add(USED_OFF);
         if dev::read16(used.add(2)) == self.last_used {
-            if (self.clock)() >= p.t0.saturating_add(REQUEST_TIMEOUT_NS) {
+            if (self.now)() >= p.t0.saturating_add(REQUEST_TIMEOUT_NS) {
                 self.dead = true;
                 self.pending = None;
                 return Poll::Ready(Err(Error::Timeout { sector: p.sector }));
@@ -499,7 +499,7 @@ impl<T: Transport> VirtioBlk<T> {
         self.pending = None;
         self.last_used = self.last_used.wrapping_add(1);
         self.ack();
-        let dt = (self.clock)().saturating_sub(p.t0);
+        let dt = (self.now)().saturating_sub(p.t0);
         self.slowest_ns = self.slowest_ns.max(dt);
         self.requests += 1;
         Poll::Ready(match dev::read8(self.dma.add(STATUS_OFF)) {

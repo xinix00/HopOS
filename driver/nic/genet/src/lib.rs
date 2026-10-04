@@ -291,7 +291,7 @@ pub struct Genet {
     /// index % N_BD, en N_BD deelt 0x10000.
     rx_cons: u32,
     tx_prod: u32,
-    clock: fn() -> u64,
+    now: fn() -> u64,
 }
 
 impl Genet {
@@ -311,7 +311,7 @@ impl Genet {
         dma: Pa,
         dma_size: u64,
         mac: [u8; 6],
-        clock: fn() -> u64,
+        now: fn() -> u64,
     ) -> Self {
         Self {
             base,
@@ -321,7 +321,7 @@ impl Genet {
             dma_size,
             rx_cons: 0,
             tx_prod: 0,
-            clock,
+            now,
         }
     }
 
@@ -376,7 +376,7 @@ impl Genet {
         let u = self.umac();
         u.cmd.update(|c| c & !(1 << 1));
         self.stop_dma(true)?;
-        dev::delay(self.clock, 10_000_000);
+        dev::delay(self.now, 10_000_000);
         self.stop_dma(false)?;
         self.tx().ctrl.update(|c| c & !DMA_ENABLE_MASK);
         self.rx().ctrl.update(|c| c & !DMA_ENABLE_MASK);
@@ -384,15 +384,15 @@ impl Genet {
         let s = self.sys();
         let r = s.rbuf_flush_ctrl.read();
         s.rbuf_flush_ctrl.write(r | 2);
-        dev::delay(self.clock, 10_000);
+        dev::delay(self.now, 10_000);
         s.rbuf_flush_ctrl.write(r & !2);
-        dev::delay(self.clock, 10_000);
+        dev::delay(self.now, 10_000);
         s.rbuf_flush_ctrl.write(0);
-        dev::delay(self.clock, 10_000);
+        dev::delay(self.now, 10_000);
 
         u.cmd.write(0);
         u.cmd.write((1 << 13) | (1 << 15));
-        dev::delay(self.clock, 2_000);
+        dev::delay(self.now, 2_000);
         u.cmd.write(0);
 
         u.mib_ctrl.write(7);
@@ -421,7 +421,7 @@ impl Genet {
         };
         ctrl.update(|c| c & !1);
         let mut v = 0;
-        if dev::poll_until(self.clock, DMA_STOP_NS, || {
+        if dev::poll_until(self.now, DMA_STOP_NS, || {
             v = status.read();
             v & DMA_DISABLED != 0
         }) {
@@ -434,7 +434,7 @@ impl Genet {
     fn mdio_kick(&self) -> bool {
         let m = &self.umac().mdio_cmd;
         m.update(|v| v | (1 << 29));
-        dev::poll_until(self.clock, MDIO_NS, || m.read() & (1 << 29) == 0)
+        dev::poll_until(self.now, MDIO_NS, || m.read() & (1 << 29) == 0)
     }
 
     /// Zet MAC-adres en filters, ringen en DMA klaar en schakelt zender en
@@ -466,14 +466,14 @@ impl Genet {
 
         // Reset bevestigde de DMA-stop; eerst flushen, dan de ringen.
         u.tx_flush.write(1);
-        dev::delay(self.clock, 10_000);
+        dev::delay(self.now, 10_000);
         u.tx_flush.write(0);
         let s = self.sys();
         let r = s.rbuf_flush_ctrl.read();
         s.rbuf_flush_ctrl.write(r | 1);
-        dev::delay(self.clock, 10_000);
+        dev::delay(self.now, 10_000);
         s.rbuf_flush_ctrl.write(r);
-        dev::delay(self.clock, 10_000);
+        dev::delay(self.now, 10_000);
 
         // Geen regel van de buffers meer in de cache (een vorige kern kan er
         // een achtergelaten hebben): niets vuils dat later over een frame

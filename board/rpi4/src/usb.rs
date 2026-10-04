@@ -106,7 +106,7 @@ mod imp {
             );
             return out;
         }
-        let Some(rc) = up_with_firmware(ctx.clock) else {
+        let Some(rc) = up_with_firmware(ctx.now) else {
             // De endpoint blijft dicht (geen memory-decode): niemand leest
             // het xHCI-venster van een VL805 zonder firmware (de HCRST die
             // koud nooit klaarde).
@@ -142,8 +142,8 @@ mod imp {
     /// handshake, en pas met een draaiende firmware de endpoint open (de
     /// aanroeper). Lukt de handshake niet, dan de hele keten nog één keer
     /// vanaf PERST#. Geeft de RC met een VL805 die een versie meldt.
-    fn up_with_firmware(clock: fn() -> u64) -> Option<Rc> {
-        let rc = rc(clock);
+    fn up_with_firmware(now: fn() -> u64) -> Option<Rc> {
+        let rc = rc(now);
         let bars = [
             // BAR 0 laag: de xHCI-registers; hoog: 64-bit BAR, bovenhelft nul.
             EpBar {
@@ -162,7 +162,7 @@ mod imp {
                 return None;
             }
             serror_after(&mut seen, "the PCIe bring-up");
-            if firmware(&rc, clock, attempt, &mut seen) {
+            if firmware(&rc, now, attempt, &mut seen) {
                 return Some(rc);
             }
         }
@@ -174,17 +174,11 @@ mod imp {
 
     /// De handshake van één poging, met één regel over de uitkomst. Geeft
     /// of de firmware draait.
-    fn firmware(rc: &Rc, clock: fn() -> u64, attempt: u32, seen: &mut bool) -> bool {
+    fn firmware(rc: &Rc, now: fn() -> u64, attempt: u32, seen: &mut bool) -> bool {
         let mut version = || rc.cfg_read32(1, 0, 0, VL805_VERSION);
         let mut notify = || usb::notify_xhci_reset(usb::vl805_dev_addr(1, 0, 0));
         let mut after = |step| serror_after(seen, step);
-        match usb::vl805_handshake(
-            &mut version,
-            &mut notify,
-            &mut after,
-            clock,
-            usb::VL805_WAIT,
-        ) {
+        match usb::vl805_handshake(&mut version, &mut notify, &mut after, now, usb::VL805_WAIT) {
             Vl805::Running { version } => {
                 println!("usb: vl805 firmware {version:#x} already loaded (attempt {attempt})");
                 true
@@ -240,7 +234,7 @@ mod imp {
     /// `board_raspi::usb::USB_DMA`, en die ligt laag. Dat venster (en
     /// SCB0_SIZE ernaar, `driver-brcmpcie`) is ook de weg waarlangs de VL805
     /// zijn firmware haalt als de VideoCore hem laadt.
-    fn rc(clock: fn() -> u64) -> Rc {
+    fn rc(now: fn() -> u64) -> Rc {
         let inb = [
             Some(InWin {
                 pcie: 0,
@@ -272,7 +266,7 @@ mod imp {
                 2, // de VL805 is een gen2 x1-endpoint
                 out,
                 inb,
-                clock,
+                now,
             )
         }
     }

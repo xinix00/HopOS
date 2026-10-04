@@ -60,6 +60,10 @@ een A520; borden zonder klassen (de Pi's, de Radxa, de Altra, de LicheeRV)
 nemen de eerste vrije core, en op de OS-core (`system`) kiest
 `hopos.oscore` de core. Op de console: `HOPOS_HOP_GROUP`,
 `HOPOS_HOP_CLASS` en `class=` achteraan `HOPOS_HOP_START`.
+Een warme flip verplaatst Hop niet (`HOPOS_HOP_RESUMED`): de nieuwe kern
+neemt zijn groep en core over, de bootregel zegt `(carried over the flip)`,
+en vraagt de config van de nieuwe kern een andere groep, dan zegt
+`HOPOS_HOP_GROUP_COLD` dat die pas bij de volgende koude start geldt.
 
 Welke core een slot krijgt, kiest de kern (`kern/src/pool.rs`): zonder
 `sharegroup` een eigen core (of `cores` aaneengesloten), met een

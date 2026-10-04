@@ -20,7 +20,7 @@ struct Chip {
     /// De PHY-OCP-schrijven, in volgorde.
     phy_writes: Vec<(u16, u16)>,
     ephy_writes: Vec<(u16, u16)>,
-    /// Het laatste lees-antwoord (zie `clock`).
+    /// Het laatste lees-antwoord (zie `now`).
     gphy_answer: u32,
     ephy_answer: u32,
     /// De link komt op na een AN-herstart.
@@ -36,7 +36,7 @@ fn at(regs: Pa, off: u64) -> Pa {
     regs.add(off)
 }
 
-fn clock() -> u64 {
+fn now() -> u64 {
     CHIP.with(|c| {
         let mut c = c.borrow_mut();
         c.now += 10_000;
@@ -137,7 +137,7 @@ fn chip(xid: u32, link: bool) -> Mem {
 
 fn up(m: &Mem) -> Rtl8126 {
     // SAFETY: registers en DMA liggen in `m`, dat de test overleeft.
-    unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, clock) }.unwrap()
+    unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, now) }.unwrap()
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn new_brings_the_mac_up_with_the_rings_in_place() {
 #[test]
 fn refusals_are_named() {
     // SAFETY: de toets faalt vóór er een register wordt aangeraakt.
-    let e = unsafe { Rtl8126::new(Pa(0), Pa(0x1000), DMA_NEED, clock) }.err();
+    let e = unsafe { Rtl8126::new(Pa(0), Pa(0x1000), DMA_NEED, now) }.err();
     assert_eq!(
         e,
         Some(Error::Dma {
@@ -191,22 +191,22 @@ fn refusals_are_named() {
     );
     let m = chip(0x123, false);
     // SAFETY: registers en DMA liggen in `m`.
-    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::UnknownChip { xid: 0x103 }));
     let m = chip(0x649, false);
     dev::write32(at(m.base, 0x40), u32::MAX);
     // SAFETY: zie hierboven.
-    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::OffBus));
     let m = chip(0x649, false);
     dev::copy_in(at(m.base, 0x19e0), &[0; 6]);
     // SAFETY: zie hierboven.
-    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::NoMac));
     let m = chip(0x649, false);
     dev::write8(at(m.base, 0xd3), 0); // de FIFO's worden nooit leeg
     // SAFETY: zie hierboven.
-    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Rtl8126::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert!(
         matches!(
             e,
@@ -326,7 +326,7 @@ fn physr_decodes_every_speed() {
 
 /// Een driver zonder `new` op nep-geheugen, zoals de Go-test.
 fn fake(m: &Mem) -> Rtl8126 {
-    let n = Rtl8126::at(m.base, m.dma, clock, &variant::V8126A);
+    let n = Rtl8126::at(m.base, m.dma, now, &variant::V8126A);
     for i in 0..N_RX {
         n.arm_rx(i);
     }

@@ -31,7 +31,7 @@ const RP1_USB_SIZE: u64 = 0x10_0000;
 /// foutmelding, alleen stilte (Go, 06-08).
 pub(crate) fn hosts(ctx: &UsbCtx) -> UsbHosts {
     let mut out = UsbHosts::new();
-    let (phy, dl) = rc_bare(ctx.clock).link_status();
+    let (phy, dl) = rc_bare(ctx.now).link_status();
     if !(phy && dl) {
         cpu::println!(
             "usb: the RP1 link is down (phy {phy}, dl {dl}): the NIC probe trains it, no USB HOPOS_USB_NONE"
@@ -70,23 +70,23 @@ const HALT_NS: u64 = 20_000_000;
 /// (Linux' kexec-weg: `usb_hcd_platform_shutdown`), vóór de link eronder
 /// reset ([`crate::rp1_quiesce`]). Alleen met DL actief. Geeft hoeveel er
 /// stilstaan.
-pub(crate) fn halt_inherited(clock: fn() -> u64) -> usize {
+pub(crate) fn halt_inherited(now: fn() -> u64) -> usize {
     [RP1_USB0, RP1_USB1]
         .into_iter()
-        .filter(|&base| halt(base, clock))
+        .filter(|&base| halt(base, now))
         .count()
 }
 
 /// Run/Stop eraf en wachten op HCHalted, hoogstens [`HALT_NS`]. Een
 /// venster zonder controller (CAPLENGTH 0 of all-ones) telt niet.
-fn halt(base: Pa, clock: fn() -> u64) -> bool {
+fn halt(base: Pa, now: fn() -> u64) -> bool {
     let caplen = dev::read32(base) & 0xff;
     if caplen == 0 || caplen == 0xff {
         return false;
     }
     let op = base.add(u64::from(caplen));
     dev::write32(op, dev::read32(op) & !USBCMD_RS);
-    dev::poll_until(clock, HALT_NS, || dev::read32(op.add(4)) & USBSTS_HCH != 0)
+    dev::poll_until(now, HALT_NS, || dev::read32(op.add(4)) & USBSTS_HCH != 0)
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ fn desc(dma: Pa, i: u16) -> (u64, u32, u16, u16) {
 
 /// De klok: elke lees voert wat klaarstaat uit en schuift de tijd een
 /// milliseconde op.
-fn clock() -> u64 {
+fn now() -> u64 {
     DEV.with(|d| {
         let mut d = d.borrow_mut();
         let Some(d) = d.as_mut() else { return 0 };
@@ -120,7 +120,7 @@ fn fake(sectors: u64, flush: bool) -> (VirtioBlk, Vec<u64>, Vec<u64>) {
         sectors,
         flush,
         read_only: false,
-        clock,
+        now,
         avail_idx: 0,
         last_used: 0,
         dead: false,
@@ -281,7 +281,7 @@ fn an_abandoned_request_blocks_the_next_until_it_is_back() {
     );
     assert_eq!(b.start(Op::Flush), Err(blkdev::Error::Busy));
     DEV.with(|d| d.borrow_mut().as_mut().unwrap().mute = false);
-    clock(); // Het device haalt in.
+    now(); // Het device haalt in.
     // Nu komt het oude verzoek terug (en wordt weggegooid), dan het nieuwe.
     block_on(blk(&mut b).write(2, &[1; 512])).unwrap();
     assert_eq!(
@@ -379,8 +379,7 @@ fn init_over_any_transport_then_a_round_trip() {
     let dma = Pa(mem.as_mut_ptr() as usize as u64);
     install(dma, 64);
     // SAFETY: `mem` leeft de hele test en is `DMA_NEED` groot.
-    let mut b =
-        unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, DMA_NEED, clock) }.unwrap();
+    let mut b = unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, DMA_NEED, now) }.unwrap();
     assert_eq!((b.sectors(), b.can_flush()), (64, true));
     let t = &b.t;
     // Alleen FLUSH van wat geboden werd, en VERSION_1.
@@ -415,7 +414,7 @@ fn init_refuses_wrong_devices_small_queues_and_small_dma() {
     let mut mem = vec![0u64; DMA_NEED as usize / 8];
     let dma = Pa(mem.as_mut_ptr() as usize as u64);
     // SAFETY: `mem` leeft de hele test en is `DMA_NEED` groot.
-    let e = unsafe { VirtioBlk::with_transport(FakeT::new(1, 8), dma, DMA_NEED, clock) }.err();
+    let e = unsafe { VirtioBlk::with_transport(FakeT::new(1, 8), dma, DMA_NEED, now) }.err();
     assert_eq!(
         e,
         Some(Error::Setup(driver_virtiopci::Error::WrongDevice {
@@ -424,7 +423,7 @@ fn init_refuses_wrong_devices_small_queues_and_small_dma() {
         }))
     );
     // SAFETY: zie boven.
-    let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 2), dma, DMA_NEED, clock) }.err();
+    let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 2), dma, DMA_NEED, now) }.err();
     assert_eq!(
         e,
         Some(Error::Setup(driver_virtiopci::Error::NoQueue {
@@ -433,7 +432,7 @@ fn init_refuses_wrong_devices_small_queues_and_small_dma() {
         }))
     );
     // SAFETY: zie boven.
-    let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, 4096, clock) }.err();
+    let e = unsafe { VirtioBlk::with_transport(FakeT::new(2, 8), dma, 4096, now) }.err();
     assert_eq!(
         e,
         Some(Error::Setup(driver_virtiopci::Error::DmaTooSmall {

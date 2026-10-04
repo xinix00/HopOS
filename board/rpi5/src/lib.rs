@@ -157,16 +157,16 @@ impl Soc for Bcm2712 {
             cpu::println!("net: {GEM_COMPAT} disabled in the DTB, no NIC");
             return Ok(None);
         }
-        rp1_quiesce(ctx.clock);
-        let rc = rp1_link(ctx.clock)?;
+        rp1_quiesce(ctx.now);
+        let rc = rp1_link(ctx.now)?;
         LINK_OURS.store(true, Relaxed);
         // De ethernet-PHY (BCM54213PE) hangt in reset aan RP1-GPIO32
         // (actief laag, DT phy-reset-gpios; gemeten: zonder dit géén PHY op
         // MDIO).
         rp1_gpio_out(32, false);
-        dev::delay(ctx.clock, 10_000_000);
+        dev::delay(ctx.now, 10_000_000);
         rp1_gpio_out(32, true);
-        dev::delay(ctx.clock, 50_000_000);
+        dev::delay(ctx.now, 50_000_000);
 
         // SAFETY: RP1_ETH ligt achter de net getrainde link in het
         // outbound-window (Device-gigabyte 124); de NIC-regio is van deze
@@ -190,7 +190,7 @@ impl Soc for Bcm2712 {
             phy.id1,
             phy.id2
         );
-        let link = driver_mdio::autoneg(&mut nic, phy.addr, true, ctx.clock, 8_000_000_000)
+        let link = driver_mdio::autoneg(&mut nic, phy.addr, true, ctx.now, 8_000_000_000)
             .map_err(|_| Error::Nic("rp1: no link within 8 s"))?;
         nic.init(link)
             .map_err(|_| Error::Nic("gem: DMA region too small"))?;
@@ -211,7 +211,7 @@ static LINK_OURS: AtomicBool = AtomicBool::new(false);
 
 /// Een RC-handvat zonder windows, om te lezen wat er staat of een
 /// endpoint stil te leggen: er wordt niets opgezet.
-pub(crate) fn rc_bare(clock: fn() -> u64) -> Rc {
+pub(crate) fn rc_bare(now: fn() -> u64) -> Rc {
     let none = OutWin {
         cpu: 0,
         pcie: 0,
@@ -229,7 +229,7 @@ pub(crate) fn rc_bare(clock: fn() -> u64) -> Rc {
             0,
             none,
             [None; driver_brcmpcie::MAX_IN],
-            clock,
+            now,
         )
     }
 }
@@ -246,11 +246,11 @@ pub(crate) fn rc_bare(clock: fn() -> u64) -> Rc {
 /// de xHCI-halt), dan de bus-master-bit, dan PERST# (`brcm_pcie_turn_off`).
 /// De O6N kent dit niet: daar blijft de link van de firmware staan en
 /// stopt de CmdReset van de RTL zijn eigen DMA.
-fn rp1_quiesce(clock: fn() -> u64) {
+fn rp1_quiesce(now: fn() -> u64) {
     if LINK_OURS.load(Relaxed) {
         return;
     }
-    let rc = rc_bare(clock);
+    let rc = rc_bare(now);
     let (phy, dl) = rc.link_status();
     if !(phy && dl) {
         return;
@@ -265,7 +265,7 @@ fn rp1_quiesce(clock: fn() -> u64) {
     // SAFETY: RP1_ETH is het GEM-blok achter de link die DL actief meldt;
     // de vorige kern opende de BAR's, en niemand anders raakt de GEM nu.
     unsafe { driver_gem::stop(RP1_ETH) };
-    let halted = usb::halt_inherited(clock);
+    let halted = usb::halt_inherited(now);
     rc.turn_off();
     cpu::println!(
         "net: the RP1 link was up from the previous kernel: gem stopped, {halted} of 2 xHCIs halted, bus mastering off and PERST# held before the bring-up HOPOS_RP1_QUIESCE"
@@ -279,7 +279,7 @@ const RP1_ID: u32 = 0x0001_1de4;
 /// RESCAL, de pcie2-RC (54 MHz-PLL!), link-training (gen 2), de RP1
 /// (1de4:0001) en zijn BAR's. BAR1 MOET op PCIe 0: RP1's eigen DMA bereikt
 /// zijn peripherals via de loopback door het eerste inbound-window.
-fn rp1_link(clock: fn() -> u64) -> Result<Rc, Error> {
+fn rp1_link(now: fn() -> u64) -> Result<Rc, Error> {
     let inb = [
         // RP1-loopback (BAR1).
         Some(InWin {
@@ -319,7 +319,7 @@ fn rp1_link(clock: fn() -> u64) -> Result<Rc, Error> {
             2,
             out,
             inb,
-            clock,
+            now,
         )
     };
     // BAR-groottes gemeten met probe6: 16 KB / 4 MB / 64 KB.

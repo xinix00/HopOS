@@ -86,7 +86,7 @@ fn lo_hi(p: Pa) -> u64 {
 }
 
 /// De klok, en bij elke blik een ronde van de controller.
-pub(crate) fn clock() -> u64 {
+pub(crate) fn now() -> u64 {
     with(|c| {
         c.now += 1_000_000;
         tick(c);
@@ -320,7 +320,7 @@ fn sim<const L: bool>(lbads: u8, mdts: u8) -> (Mem, Nvme<Sim<L>>) {
         }
         (c.lbads, c.mdts) = (lbads, mdts);
     });
-    let mut n = Nvme::at(Sim::<L>, m.base, m.dma, DMA_NEED, clock).unwrap();
+    let mut n = Nvme::at(Sim::<L>, m.base, m.dma, DMA_NEED, now).unwrap();
     n.regs().cc.write(0);
     n.wait_ready(false).unwrap();
     n.enable(CC_EN | CC_IOSQES | CC_IOCQES).unwrap();
@@ -523,7 +523,7 @@ fn an_abandoned_command_blocks_the_next_until_it_is_back() {
     };
     assert_eq!(n.start(w), Err(blkdev::Error::Busy));
     with(|c| c.mute = false);
-    clock(); // De controller haalt in.
+    now(); // De controller haalt in.
     block_on(blk(&mut n).write(2, &[1; 512])).unwrap();
     let ops: Vec<u8> = io_log().iter().map(|e| e.0).collect();
     assert_eq!(ops, [IO_READ, IO_WRITE]);
@@ -577,7 +577,7 @@ fn the_dma_region_is_checked_before_one_access() {
         (0, DMA_NEED),
         (u64::MAX - PAGE + 1, DMA_NEED),
     ] {
-        let e = Nvme::at(Sim::<false>, Pa(0), Pa(dma), size, clock).err();
+        let e = Nvme::at(Sim::<false>, Pa(0), Pa(dma), size, now).err();
         assert_eq!(e, Some(Error::Dma { base: dma, size }));
     }
     let e: Error<u32> = Error::Dma { base: 1, size: 2 };

@@ -141,7 +141,7 @@ impl Soc for Bcm2711 {
         // NIC-regio is van deze driver alleen, met zijn buffers Normal-WB
         // (`arch`), en busadres = fysiek adres op de scb-bus.
         let mut nic =
-            unsafe { Genet::new(GENET, Pa(ctx.dma.base), ctx.dma.size, ctx.mac, ctx.clock) };
+            unsafe { Genet::new(GENET, Pa(ctx.dma.base), ctx.dma.size, ctx.mac, ctx.now) };
         nic.check_rev().map_err(|_| Error::Nic("genet: not a v5"))?;
         nic.reset()
             .map_err(|_| Error::Nic("genet: DMA did not stop"))?;
@@ -153,7 +153,7 @@ impl Soc for Bcm2711 {
             phy.id1,
             phy.id2
         );
-        let link = driver_mdio::autoneg(&mut nic, phy.addr, true, ctx.clock, 8_000_000_000)
+        let link = driver_mdio::autoneg(&mut nic, phy.addr, true, ctx.now, 8_000_000_000)
             .map_err(|_| Error::Nic("genet: no link within 8 s"))?;
         nic.init(link)
             .map_err(|_| Error::Nic("genet: DMA region too small"))?;

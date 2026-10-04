@@ -406,7 +406,7 @@ pub struct Config {
     /// Het hoogste slotnummer van dit board (≤ [`SLOT_CAP`]).
     pub max_slots: usize,
     /// Monotone nanoseconden.
-    pub clock: fn() -> u64,
+    pub now: fn() -> u64,
     /// De console.
     pub log: LogFn,
     /// De doelkick van slot `i` na een leeg→niet-leeg-overgang van zijn
@@ -555,7 +555,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
 
     /// Voert één commando uit.
     pub fn handle(&mut self, cmd: Command<'a, R, W>) {
-        let now = (self.core.cfg.clock)();
+        let now = (self.core.cfg.now)();
         match cmd {
             Command::Attach { slot, tx, rx, ack } => {
                 ack.complete(self.attach(slot, tx, rx).map(|()| 0))
@@ -627,7 +627,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     /// poort) en per frame op dst-MAC bezorgen, dan de uplink-ingress. `buf`
     /// is de ene hergebruikte framebuffer: geen allocatie per frame.
     pub fn switch_pass(&mut self, buf: &mut [u8]) -> bool {
-        let now = (self.core.cfg.clock)();
+        let now = (self.core.cfg.now)();
         let mut worked = !self.published.quiet(0) && self.drain_host();
         self.warn_corrupt(0);
         // Een stille coherente ring niet openen: het lezen van kop en staart
@@ -900,8 +900,8 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
     /// zoals daar beschreven. `false` = `attempt` gaf [`InPlace::Nothing`]:
     /// er is niets geschreven en niets geteld.
     fn write_rx_by(&mut self, i: usize, mut attempt: impl FnMut(&mut W) -> InPlace) -> bool {
-        let clock = self.cfg.clock;
-        let deadline = clock().saturating_add(TX_BACKPRESSURE);
+        let now = self.cfg.now;
+        let deadline = now().saturating_add(TX_BACKPRESSURE);
         let mut woken = false;
         loop {
             let Some(port) = self.port(i) else {
@@ -927,7 +927,7 @@ impl<R: Reader, W: Writer> Core<'_, R, W> {
                 woken = true;
                 self.wake(i);
             }
-            if i == 0 || (self.cfg.resident)(i) || clock() > deadline {
+            if i == 0 || (self.cfg.resident)(i) || now() > deadline {
                 if let Some(port) = self.port(i) {
                     port.rx_blocked = true;
                 }

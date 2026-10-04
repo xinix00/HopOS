@@ -4,7 +4,7 @@
 //! de vraag.
 
 use super::*;
-use fake::{Fake, clock, with};
+use fake::{Fake, now, with};
 use std::string::ToString;
 use std::vec;
 use std::vec::Vec;
@@ -65,7 +65,7 @@ fn machine(keys: &[(&str, Vec<u8>)]) -> (Mem, Rtkit) {
         f.keys = keys.iter().map(|(k, v)| (key(k).0, v.clone())).collect();
     });
     // SAFETY: blok en regio liggen in RAM dat de test overleeft.
-    let rt = unsafe { Rtkit::new(base, "smc", pool_pa, 0x1_0000, clock) }.unwrap();
+    let rt = unsafe { Rtkit::new(base, "smc", pool_pa, 0x1_0000, now) }.unwrap();
     (
         Mem {
             _pool: pool,

@@ -214,7 +214,7 @@ mod tests {
     }
 
     /// De klok: 1 ms per lezing, en de nep-teller loopt mee.
-    fn clock() -> u64 {
+    fn now() -> u64 {
         let wdog = Pa(BLOCK.with(Cell::get) as u64).add(WDOG);
         let v = dev::read32(wdog);
         dev::write32(wdog, v.saturating_sub(RATE.with(Cell::get)));
@@ -248,7 +248,7 @@ mod tests {
         // Een PM-blok dat ook na FULL_RESET niet telt: niet gewapend, en
         // WRCFG weer op clear (de stop van Linux), zodat er niets sluimert.
         let (b, pa) = block(0x102, 0);
-        assert!(arm_at(pa, 12_000, clock).is_err());
+        assert!(arm_at(pa, 12_000, now).is_err());
         assert_eq!(
             b[(RSTC / 4) as usize],
             PASSWORD | RSTC_STOP,
@@ -261,7 +261,7 @@ mod tests {
     fn a_running_counter_is_armed_with_full_reset() {
         // Op ijzer loopt de teller na FULL_RESET: 65 tikken per ms.
         let (b, pa) = block(0x5a00_0112, 65);
-        let d = arm_at(pa, 12_000, clock).unwrap();
+        let d = arm_at(pa, 12_000, now).unwrap();
         assert_eq!(d.ticks, 786_432);
         assert!(!d.inherited);
         // Het wachtwoord, de andere RSTC-bits bewaard, WRCFG = full reset.
@@ -273,7 +273,7 @@ mod tests {
     fn an_armed_watchdog_is_reloaded_without_the_probe() {
         let (b, pa) = block(0x122, 0);
         let t0 = NOW.with(Cell::get);
-        let d = arm_at(pa, 12_000, clock).unwrap();
+        let d = arm_at(pa, 12_000, now).unwrap();
         assert!(d.inherited);
         assert_eq!(NOW.with(Cell::get), t0, "no probe");
         assert_eq!(b[(WDOG / 4) as usize], PASSWORD | 786_432);

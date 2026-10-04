@@ -2,7 +2,7 @@
 //! klok van de test speelt de coprocessor (zie `fake.rs`).
 
 use super::*;
-use crate::fake::{self, clock, typed, with};
+use crate::fake::{self, now, typed, with};
 use std::string::ToString;
 use std::vec;
 use std::vec::Vec;
@@ -27,7 +27,7 @@ fn pool(size: u64) -> Pool {
 fn rtkit(p: &Pool) -> Rtkit {
     let base = fake::install(None);
     // SAFETY: het ASC-blok en de regio liggen in RAM dat de test overleeft.
-    unsafe { Rtkit::new(base, "test", p.pa, p.size, clock) }.unwrap()
+    unsafe { Rtkit::new(base, "test", p.pa, p.size, now) }.unwrap()
 }
 
 #[test]
@@ -139,7 +139,7 @@ fn buffers_run_out_loudly() {
 fn unaligned_pool_is_refused() {
     let base = fake::install(None);
     // SAFETY: het blok ligt in RAM; de regio wordt geweigerd voor gebruik.
-    let r = unsafe { Rtkit::new(base, "test", Pa(0x1000), 0x4000, clock) };
+    let r = unsafe { Rtkit::new(base, "test", Pa(0x1000), 0x4000, now) };
     assert!(matches!(r, Err(Error::Pool { base: 0x1000, .. })));
 }
 

@@ -76,7 +76,7 @@ mod tests {
     //! rest is de core (`tests.rs`), tegen dezelfde nep-controller.
 
     use super::*;
-    use crate::tests::{clock, machine, with};
+    use crate::tests::{machine, now, with};
     use crate::{ADM_CREATE_CQ, ADM_CREATE_SQ, ADM_IDENTIFY, DMA_NEED, MAX_TRANSFER, PAGE};
     use blkdev::{BlockIo, Paced, Spin, block_on};
     use std::vec;
@@ -87,7 +87,7 @@ mod tests {
         dev::write64(m.base, cap);
         with(|c| (c.disk, c.lbads) = (vec![0; 4096 << lbads], lbads));
         // SAFETY: registers en DMA liggen in `m`, dat de toets overleeft.
-        let n = unsafe { Nvme::<Pci>::new(m.base, m.dma, DMA_NEED, clock) };
+        let n = unsafe { Nvme::<Pci>::new(m.base, m.dma, DMA_NEED, now) };
         (m, n)
     }
 

@@ -53,7 +53,7 @@ fn at(base: Pa, off: u64) -> Pa {
     base.add(off)
 }
 
-fn clock() -> u64 {
+fn now() -> u64 {
     CHIP.with(|c| {
         let mut c = c.borrow_mut();
         c.now += 10_000;
@@ -173,12 +173,12 @@ fn chip(link: bool) -> Mem {
 fn up(m: &Mem) -> Tg3 {
     // SAFETY: registers, config-space en DMA liggen in `m`, dat de test
     // overleeft.
-    unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, clock) }.unwrap()
+    unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, now) }.unwrap()
 }
 
 /// De driver zonder bring-up, op een lege regio (zoals Go's receive-test).
 fn bare(m: &Mem) -> Tg3 {
-    Tg3::at(m.bar0, m.cfg, Mac(MAC), m.dma, clock)
+    Tg3::at(m.bar0, m.cfg, Mac(MAC), m.dma, now)
 }
 
 fn chip_state<T>(f: impl FnOnce(&Chip) -> T) -> T {
@@ -291,7 +291,7 @@ fn the_bar0_mirror_serves_as_config_space_without_ecam() {
     let m = chip(false);
     CHIP.with(|c| c.borrow_mut().cfg = m.bar0);
     // SAFETY: registers en DMA liggen in `m`.
-    let n = unsafe { Tg3::new(m.bar0, Pa(0), Mac(MAC), m.dma, DMA_NEED, clock) }.unwrap();
+    let n = unsafe { Tg3::new(m.bar0, Pa(0), Mac(MAC), m.dma, DMA_NEED, now) }.unwrap();
     assert_ne!(m.r(0x68) & MISC_INDIR_ACCESS, 0);
     assert_eq!(m.r(0x04), CMD);
     assert_eq!(m.c(0x68), MISC_AT_POWER_ON, "the ECAM copy was not touched");
@@ -302,7 +302,7 @@ fn the_bar0_mirror_serves_as_config_space_without_ecam() {
 fn refusals_are_named() {
     let m = chip(false);
     // SAFETY: de toets faalt vóór er een register wordt aangeraakt.
-    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED - 1, clock) }.err();
+    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED - 1, now) }.err();
     assert_eq!(
         e,
         Some(Error::Dma {
@@ -311,28 +311,28 @@ fn refusals_are_named() {
         })
     );
     // SAFETY: idem.
-    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma.add(8), DMA_NEED, clock) }.err();
+    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma.add(8), DMA_NEED, now) }.err();
     assert!(matches!(e, Some(Error::Dma { .. })));
 
     // Na de reset geen Broadcom-id: de chip antwoordt niet.
     let m = chip(false);
     dev::write32(at(m.bar0, 0), 0xffff_ffff);
     // SAFETY: alles ligt in `m`.
-    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::NoAnswer { id: u32::MAX }));
 
     // Niemand thuis op adres 1.
     let m = chip(false);
     CHIP.with(|c| c.borrow_mut().phy.clear());
     // SAFETY: alles ligt in `m`.
-    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::NoPhy { id: 0 }));
 
     // Een MDIO-master die nooit afrondt.
     let m = chip(false);
     CHIP.with(|c| c.borrow_mut().mdio_dead = true);
     // SAFETY: alles ligt in `m`.
-    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Tg3::new(m.bar0, m.cfg, Mac(MAC), m.dma, DMA_NEED, now) }.err();
     assert_eq!(
         e,
         Some(Error::Mdio {

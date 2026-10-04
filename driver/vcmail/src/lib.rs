@@ -263,7 +263,7 @@ pub struct Fb {
 pub struct Mbox {
     base: Pa,
     buf: Pa,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     /// Het adres van een verzoek dat nog geen antwoord kreeg; 0 = geen.
     /// Zolang dit staat, is de buffer van de firmware.
     pending: u32,
@@ -272,7 +272,7 @@ pub struct Mbox {
 impl Mbox {
     /// Een mailbox op `base` met de property-buffer op `buf`
     /// ([`BUFFER_BYTES`], 16-gealigneerd, onder 4 GB, ongecachet gemapt).
-    /// `clock` geeft monotone nanoseconden, voor de grenzen.
+    /// `now` geeft monotone nanoseconden, voor de grenzen.
     ///
     /// # Safety
     ///
@@ -280,11 +280,11 @@ impl Mbox {
     /// buffer die alleen deze mailbox gebruikt; beide blijven zolang het
     /// programma draait.
     #[must_use]
-    pub const unsafe fn new(base: Pa, buf: Pa, clock: fn() -> u64) -> Self {
+    pub const unsafe fn new(base: Pa, buf: Pa, now: fn() -> u64) -> Self {
         Self {
             base,
             buf,
-            clock,
+            now,
             pending: 0,
         }
     }
@@ -337,7 +337,7 @@ impl Mbox {
             }
             empty
         };
-        if dev::poll_until(self.clock, TIMEOUT_NS, empty) {
+        if dev::poll_until(self.now, TIMEOUT_NS, empty) {
             return Ok(());
         }
         Err(Error::Timeout { stage: "drain" })
@@ -348,9 +348,7 @@ impl Mbox {
         encode(&mut DevBuf(self.buf), tags)?;
         dev::mb();
         let r = self.regs();
-        if !dev::poll_until(self.clock, TIMEOUT_NS, || {
-            r.status1.read() & STATUS_FULL == 0
-        }) {
+        if !dev::poll_until(self.now, TIMEOUT_NS, || r.status1.read() & STATUS_FULL == 0) {
             return Err(Error::Timeout { stage: "full" });
         }
         // Past, want `buffer_ok` toetste de 32 bits.
@@ -364,7 +362,7 @@ impl Mbox {
     /// `pending` staan, zodat de volgende call de buffer niet overschrijft.
     fn wait_reply(&self, addr: u32) -> Result {
         let r = self.regs();
-        if dev::poll_until(self.clock, TIMEOUT_NS, || {
+        if dev::poll_until(self.now, TIMEOUT_NS, || {
             r.status0.read() & STATUS_EMPTY == 0 && r.read.read() == addr
         }) {
             return Ok(());

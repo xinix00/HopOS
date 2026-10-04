@@ -44,7 +44,7 @@ thread_local! {
 }
 
 /// Een klok die per lees een milliseconde verspringt.
-fn clock() -> u64 {
+fn now() -> u64 {
     NOW.with(|n| {
         n.set(n.get() + 1_000_000);
         n.get()
@@ -54,7 +54,7 @@ fn clock() -> u64 {
 #[test]
 fn autoneg_gigabit() {
     let mut p = linked(LPA_100_FD, GBSR_LP_1000_FD);
-    let l = autoneg(&mut p, 0, true, clock, 1_000_000_000).unwrap();
+    let l = autoneg(&mut p, 0, true, now, 1_000_000_000).unwrap();
     assert_eq!(
         l,
         Link {
@@ -73,7 +73,7 @@ fn autoneg_gigabit() {
 #[test]
 fn fast_phy_leaves_gigabit_registers_alone() {
     let mut p = linked(LPA_100_FD, GBSR_LP_1000_FD);
-    let l = autoneg(&mut p, 0, false, clock, 1_000_000_000).unwrap();
+    let l = autoneg(&mut p, 0, false, now, 1_000_000_000).unwrap();
     assert_eq!((l.mbps, l.full_duplex), (100, true));
     assert!(!p.written.contains(&reg::GBCR));
     assert!(!p.read.contains(&reg::GBSR));
@@ -88,7 +88,7 @@ fn speed_from_anlpar() {
         (0, 10, false),
     ] {
         let mut p = linked(lpa, 0);
-        let l = autoneg(&mut p, 0, false, clock, 1_000_000_000).unwrap();
+        let l = autoneg(&mut p, 0, false, now, 1_000_000_000).unwrap();
         assert_eq!((l.mbps, l.full_duplex), (mbps, fd), "lpa {lpa:#x}");
     }
 }
@@ -96,7 +96,7 @@ fn speed_from_anlpar() {
 #[test]
 fn no_link_is_an_error_with_the_bmsr() {
     let mut p = FakePhy::default();
-    let e = autoneg(&mut p, 0, false, clock, 10_000_000).unwrap_err();
+    let e = autoneg(&mut p, 0, false, now, 10_000_000).unwrap_err();
     assert_eq!(e, Error::NoLink { bmsr: 0, ms: 10 });
     // Om de 50 ms een kijkje, niet om de klokslag: bij een grens van 10 ms
     // hooguit twee.

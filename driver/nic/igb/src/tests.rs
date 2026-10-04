@@ -30,7 +30,7 @@ fn reg(off: usize) -> Pa {
     HW.with(|h| h.borrow().regs).add(off as u64)
 }
 
-fn clock() -> u64 {
+fn now() -> u64 {
     HW.with(|h| {
         let mut h = h.borrow_mut();
         h.now += 1_000_000;
@@ -102,7 +102,7 @@ fn new_resets_reads_the_mac_and_programs_the_rings() {
     let m = mem(hw());
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`, dat de test overleeft.
-    let n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.unwrap();
+    let n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
     assert_eq!(n.mac(), Mac([0x52, 0x12, 0x34, 0x56, 0x78, 0x00]));
     assert_eq!(dev::read32(reg(0x2800)), m.dma.0 as u32);
     assert_eq!(dev::read32(reg(0x2804)), (m.dma.0 >> 32) as u32);
@@ -131,7 +131,7 @@ fn new_resets_reads_the_mac_and_programs_the_rings() {
 fn a_bad_dma_region_is_refused_before_any_mmio() {
     // Basis 0 is ongemapt: een registertoegang zou de test laten crashen.
     // SAFETY: de toetsen falen vóór er een register wordt aangeraakt.
-    let e = unsafe { Igb::new(Pa(0), Pa(0), DMA_NEED - 1, clock) }.err();
+    let e = unsafe { Igb::new(Pa(0), Pa(0), DMA_NEED - 1, now) }.err();
     assert_eq!(
         e,
         Some(Error::DmaTooSmall {
@@ -140,7 +140,7 @@ fn a_bad_dma_region_is_refused_before_any_mmio() {
         })
     );
     // SAFETY: zie hierboven.
-    let e = unsafe { Igb::new(Pa(0), Pa(0x1000), DMA_NEED, clock) }.err();
+    let e = unsafe { Igb::new(Pa(0), Pa(0x1000), DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::DmaAlign(0x1000)));
 }
 
@@ -149,18 +149,18 @@ fn reset_failures_are_named() {
     let m = mem(Hw::default()); // RST wist zichzelf niet
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
-    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert!(matches!(e, Some(Error::ResetStuck { .. })), "{e:?}");
 
     let m = mem(hw()); // geen MAC
     // SAFETY: zie hierboven.
-    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::NoMac));
 
     let m = mem(hw());
     dev::write32(m.base.add(8), u32::MAX);
     // SAFETY: zie hierboven.
-    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::OffBus));
 }
 
@@ -175,7 +175,7 @@ fn rdt_waits_for_the_rx_queue_enable() {
     });
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
-    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.err();
+    let e = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.err();
     assert_eq!(e, Some(Error::QueueStuck { tx: false }));
     assert_eq!(dev::read32(reg(0x2818)), 0, "RDT untouched");
     assert_eq!(dev::read32(reg(0x0100)), 0, "RCTL untouched");
@@ -186,7 +186,7 @@ fn link_up_restarts_autoneg_through_the_mdic() {
     let m = mem(Hw { link: true, ..hw() });
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
-    let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.unwrap();
+    let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
     let l = n.link_up(1_000_000_000).unwrap();
     assert_eq!(
         l,
@@ -208,7 +208,7 @@ fn no_link_reports_the_status() {
     let m = mem(hw());
     with_mac(&m);
     // SAFETY: registers en DMA liggen in `m`.
-    let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, clock) }.unwrap();
+    let mut n = unsafe { Igb::new(m.base, m.dma, DMA_NEED, now) }.unwrap();
     assert_eq!(
         n.link_up(5_000_000),
         Err(Error::NoLink { status: 0, ms: 5 })
@@ -228,7 +228,7 @@ fn status_decodes_speed_and_duplex() {
 
 /// Een driver zonder `new` op nep-geheugen, zoals de Go-test.
 fn fake(m: &Mem) -> Igb {
-    Igb::at(m.base, m.dma, clock)
+    Igb::at(m.base, m.dma, now)
 }
 
 fn writeback(m: &Mem, i: u16, status: u32, len: u32) {

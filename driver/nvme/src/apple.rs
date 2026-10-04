@@ -538,7 +538,7 @@ mod tests {
     //! schijf is RAM met een GPT-header op blok 1.
 
     use super::*;
-    use crate::tests::{Ctl, Mem, clock, machine, with};
+    use crate::tests::{Ctl, Mem, machine, now, with};
     use crate::{ADM_IDENTIFY, DMA_NEED, IO_WRITE, SECTOR};
     use blkdev::{BlockIo, Paced, Spin, block_on};
     use std::cell::RefCell;
@@ -685,7 +685,7 @@ mod tests {
 
     fn ans_of(m: &Machine) -> Ans<Cop> {
         // SAFETY: vensters en DMA liggen in `m`, dat de toets overleeft.
-        unsafe { Ans::new(m.cfg, Cop, clock) }.unwrap()
+        unsafe { Ans::new(m.cfg, Cop, now) }.unwrap()
     }
 
     fn up(m: &Machine) -> Ans<Cop> {
@@ -732,7 +732,7 @@ mod tests {
         let mut cfg = m.cfg;
         cfg.dma = cfg.dma.add(0x1000);
         // SAFETY: wordt geweigerd vóór één toegang.
-        let r = unsafe { Ans::new(cfg, Cop, clock) };
+        let r = unsafe { Ans::new(cfg, Cop, now) };
         assert!(matches!(r, Err(Error::Dma { .. })));
     }
 

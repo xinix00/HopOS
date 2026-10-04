@@ -390,7 +390,7 @@ enum Wake {
 pub struct Net {
     stack: RefCell<Stack>,
     exec: &'static Exec,
-    clock: fn() -> u64,
+    now: fn() -> u64,
     ip: [u8; 4],
     frame_len: usize,
     dns: Option<[u8; 4]>,
@@ -436,8 +436,8 @@ pub struct Drain {
 
 impl Net {
     /// Een stack met config `cfg` en zaad `seed`, met zijn timers op `exec`
-    /// en zijn tijd uit `clock` (dezelfde klok als die van `exec`).
-    pub fn new(cfg: Config, seed: u32, exec: &'static Exec, clock: fn() -> u64) -> Result<Self> {
+    /// en zijn tijd uit `now` (dezelfde klok als die van `exec`).
+    pub fn new(cfg: Config, seed: u32, exec: &'static Exec, now: fn() -> u64) -> Result<Self> {
         let stack = Stack::new(cfg, seed)?;
         let slots = open_slots_for(cfg.budget);
         let mut open = Vec::new();
@@ -451,7 +451,7 @@ impl Net {
             frame_len: stack.frame_len(),
             stack: RefCell::new(stack),
             exec,
-            clock,
+            now,
             dns: None,
             dns_seq: Cell::new(0),
             open: RefCell::new(open),
@@ -493,7 +493,7 @@ impl Net {
 
     /// Nu, in nanoseconden op de klok van de stack.
     fn now(&self) -> u64 {
-        (self.clock)()
+        (self.now)()
     }
 
     /// Leent de stack voor één synchrone op. De lening eindigt in deze
@@ -655,7 +655,7 @@ impl Net {
                         return;
                     };
                     if let Some(frame) = buf.get(..n) {
-                        let _ = nic.transmit_wait(frame, self.clock).await;
+                        let _ = nic.transmit_wait(frame, self.now).await;
                     }
                 }
             }
