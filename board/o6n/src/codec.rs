@@ -166,6 +166,34 @@ pub fn needs_recovery(pgctrl: u32, terminate: [u32; 4]) -> bool {
     pgctrl & VPU_POWER_GATES != VPU_POWER_GATES || terminate.iter().any(|&t| t != 0)
 }
 
+/// Hoeveel stroomcycli de start hoogstens probeert. Op 27-09 was één genoeg;
+/// op 04-10 (3.0.11) kwam het blok na één cyclus als UP door zonder ooit een
+/// event te geven, en zat daarna slot 0 vast ("will not terminate").
+pub const RECOVER_CYCLES: u32 = 3;
+/// Rust na een cyclus vóór de registers opnieuw gelezen worden.
+const RECOVER_SETTLE_NS: u64 = 10_000_000;
+
+/// Herstelt tot `read` een gezond blok geeft: hoogstens [`RECOVER_CYCLES`]
+/// keer `cycle`, met na elke cyclus een nieuwe blik. Geeft het aantal
+/// cycli, of [`PowerError::Stuck`] met de laatste waarden. Zonder deze blik
+/// meldde de kern de codec als UP terwijl het blok niet opkwam.
+pub fn recover(
+    mut read: impl FnMut() -> (u32, [u32; 4]),
+    mut cycle: impl FnMut(u32, u32, [u32; 4]) -> Result<(), PowerError>,
+) -> Result<u32, PowerError> {
+    let (mut pgctrl, mut terminate) = read();
+    let mut n = 0;
+    while needs_recovery(pgctrl, terminate) {
+        if n == RECOVER_CYCLES {
+            return Err(PowerError::Stuck { pgctrl, terminate });
+        }
+        n += 1;
+        cycle(n, pgctrl, terminate)?;
+        (pgctrl, terminate) = read();
+    }
+    Ok(n)
+}
+
 /// De stroomcyclus: VPU-domeinen 15..11 uit, dan 11..15 aan. De gedeelde
 /// hub (4 en 5) nooit: daar hangt meer aan. Stopt bij de eerste fout. Alleen
 /// vóór de engine geregistreerd is, als deze kern geen sessies heeft.
@@ -223,6 +251,13 @@ pub enum PowerError {
         /// Het domein.
         domain: u32,
     },
+    /// Na [`RECOVER_CYCLES`] stroomcycli zit het blok nog vast.
+    Stuck {
+        /// PGCTRL na de laatste cyclus.
+        pgctrl: u32,
+        /// TERMINATE per LSID na de laatste cyclus.
+        terminate: [u32; 4],
+    },
 }
 
 impl core::fmt::Display for PowerError {
@@ -234,6 +269,10 @@ impl core::fmt::Display for PowerError {
             PowerError::Uncached => f.write_str("vpu: cannot make the arena uncached"),
             PowerError::Scmi => f.write_str("vpu: TF-A SCMI power protocol not answering"),
             PowerError::Domain { domain } => write!(f, "vpu: power domain {domain} not on"),
+            PowerError::Stuck { pgctrl, terminate } => write!(
+                f,
+                "vpu: still stuck after {RECOVER_CYCLES} power cycles, pgctrl={pgctrl:#x} terminate={terminate:?}"
+            ),
         }
     }
 }
@@ -279,18 +318,29 @@ pub fn power_vpu(arena: u64, size: u64) -> Result<VpuWindows, PowerError> {
     clocks();
     perf();
     unreset()?;
-    let term =
-        core::array::from_fn(|i| dev::read32(Pa(w.base + LSID_TERMINATE + i as u64 * LSID_STRIDE)));
-    let pgctrl = dev::read32(Pa(w.rcsu + RCSU_PGCTRL));
-    if needs_recovery(pgctrl, term) {
+    let read = || {
+        let term: [u32; 4] = core::array::from_fn(|i| {
+            dev::read32(Pa(w.base + LSID_TERMINATE + i as u64 * LSID_STRIDE))
+        });
+        (dev::read32(Pa(w.rcsu + RCSU_PGCTRL)), term)
+    };
+    let cycles = recover(read, |n, pgctrl, term| {
         println!(
-            "vpu: incomplete power state pgctrl={pgctrl:#x} terminate={term:?}; cycling VPU domains HOPOS_VPU_RECOVER"
+            "vpu: incomplete power state pgctrl={pgctrl:#x} terminate={term:?}; cycling VPU domains ({n} of {RECOVER_CYCLES}) HOPOS_VPU_RECOVER"
         );
         cycle_domains(|d, s| ch.power_set(d, s))
             .map_err(|(domain, _)| PowerError::Domain { domain })?;
         clocks();
         perf();
         unreset()?;
+        dev::delay(cpu::idle::now, RECOVER_SETTLE_NS);
+        Ok(())
+    })?;
+    if cycles > 0 {
+        let (pgctrl, term) = read();
+        println!(
+            "vpu: recovered after {cycles} power cycle(s), pgctrl={pgctrl:#x} terminate={term:?} HOPOS_VPU_RECOVERED"
+        );
     }
     println!(
         "vpu: id {:#x} rcsu {:#x} (windows {:#x}/{:#x}, intid {}, cca {:?})",
@@ -415,6 +465,44 @@ mod tests {
             t[i] = 1;
             assert!(needs_recovery(0x07ce_fffc, t), "vast slot {i} gemist");
         }
+    }
+
+    /// Eén cyclus die helpt, een blok dat pas na de tweede opkomt, en een
+    /// blok dat blijft hangen: dat laatste is een fout, geen UP.
+    #[test]
+    fn vpu_recover_checks_after_every_cycle() {
+        let healthy = (0x07ce_fffc, [0; 4]);
+        let stuck = (0x07ce_f000, [0; 4]);
+        assert_eq!(recover(|| healthy, |_, _, _| unreachable!()), Ok(0));
+        for after in 1..=RECOVER_CYCLES {
+            let mut cycles = 0;
+            let r = recover(
+                || if cycles >= after { healthy } else { stuck },
+                |_, _, _| {
+                    cycles += 1;
+                    Ok(())
+                },
+            );
+            assert_eq!(r, Ok(after), "gezond na {after} cycli");
+        }
+        let mut cycles = 0;
+        let r = recover(
+            || (0x07ce_fffc, [1, 0, 0, 0]),
+            |_, _, _| {
+                cycles += 1;
+                Ok(())
+            },
+        );
+        assert_eq!(
+            r,
+            Err(PowerError::Stuck {
+                pgctrl: 0x07ce_fffc,
+                terminate: [1, 0, 0, 0]
+            })
+        );
+        assert_eq!(cycles, RECOVER_CYCLES);
+        let r = recover(|| stuck, |_, _, _| Err(PowerError::Domain { domain: 13 }));
+        assert_eq!(r, Err(PowerError::Domain { domain: 13 }));
     }
 
     #[test]
