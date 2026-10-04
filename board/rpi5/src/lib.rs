@@ -162,8 +162,9 @@ impl Soc for Bcm2712 {
 
         // SAFETY: RP1_ETH ligt achter de net getrainde link in het
         // outbound-window (Device-gigabyte 124); de NIC-regio is van deze
-        // driver alleen, Normal non-cacheable, en de RP1 bereikt hem via het
-        // inbound-window op fysiek + RP1_BUS_OFF.
+        // driver alleen, Normal-NC met zijn bufferstuk Normal-WB (`arch`),
+        // en de RP1 bereikt hem via het inbound-window op fysiek +
+        // RP1_BUS_OFF.
         let mut nic = unsafe {
             Gem::new(
                 RP1_ETH,
@@ -171,7 +172,6 @@ impl Soc for Bcm2712 {
                 Pa(ctx.dma.base),
                 ctx.dma.size,
                 ctx.mac,
-                ctx.clock,
             )
         };
         nic.mdio_enable();
@@ -573,8 +573,19 @@ mod arch {
     //!   SoC-peripherals op 0x10_0000_0000: PCIe, MIP, GIC, UART, mailbox)
     //!   en 124 (het RP1-venster op 0x1f_0000_0000) als Device-blokken; de
     //!   rest leeg tot `discover` er DRAM bij zet;
-    //! - gigabyte 0: als de Pi 4 (`board_raspi::map`).
+    //! - gigabyte 0: als de Pi 4 (`board_raspi::map`), op het bufferstuk
+    //!   van de GEM na: zijn framebuffers (`driver_gem::BUF_OFF`, 0x1420_0000
+    //!   tot 0x1460_0000) zijn Normal-WB en XN, de driver veegt ze; de
+    //!   descriptors eronder en de rest van de DMA-regio blijven NC.
+    use board_raspi::map::{DMA, MB2, NET_DMA};
     use dev::Pa;
+
+    /// De NC-blokken van de DMA-regio vóór het bufferstuk van de GEM.
+    pub(super) const NC_LO: u64 = (NET_DMA.base + driver_gem::BUF_OFF - DMA.base) / MB2;
+    /// Het bufferstuk van de GEM, Normal-WB.
+    pub(super) const BUF_BLOCKS: u64 = driver_gem::BUF_BLOCK / MB2;
+    /// De NC-blokken erna: de rest van de NIC-helft, mailbox en USB.
+    pub(super) const NC_HI: u64 = DMA.size / MB2 - NC_LO - BUF_BLOCKS;
 
     #[cfg(all(target_arch = "aarch64", target_os = "none"))]
     core::arch::global_asm!(
@@ -603,7 +614,15 @@ __pi_l2_gb0:
     .quad {dev} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
-    .rept 8
+    .rept {nc_lo}
+    .quad {nc} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
+    .rept {buf_blocks}
+    .quad {wb_xn} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
+    .rept {nc_hi}
     .quad {nc} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
@@ -612,6 +631,10 @@ __pi_l2_gb0:
         nrm = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL),
         dev = const cpu::boot::block(0, cpu::boot::ATTR_DEVICE),
         nc = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL_NC),
+        wb_xn = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL) | cpu::boot::xn(false),
+        nc_lo = const NC_LO,
+        buf_blocks = const BUF_BLOCKS,
+        nc_hi = const NC_HI,
         d64 = const cpu::boot::block(64 << 30, cpu::boot::ATTR_DEVICE),
         d65 = const cpu::boot::block(65 << 30, cpu::boot::ATTR_DEVICE),
         d124 = const cpu::boot::block(124 << 30, cpu::boot::ATTR_DEVICE),
@@ -619,10 +642,16 @@ __pi_l2_gb0:
 
     // De tellingen hierboven tegen het plan en de adressen.
     const _: () = {
-        use board_raspi::map::{DEVICE_WINDOW, DMA, FIXED_END, LOADER, MB2};
+        use board_raspi::map::{DEVICE_WINDOW, FIXED_END, LOADER};
         assert!(LOADER.base + LOADER.size == 128 * MB2);
         assert!(DEVICE_WINDOW.size == 32 * MB2);
         assert!(DMA.size == 8 * MB2);
+        // Het bufferstuk: hele blokken, binnen de NIC-helft, boven de
+        // descriptors.
+        assert!(driver_gem::BUF_OFF.is_multiple_of(MB2));
+        assert!(driver_gem::BUF_BLOCK.is_multiple_of(MB2));
+        assert!(driver_gem::BUF_OFF + driver_gem::BUF_BLOCK <= NET_DMA.size);
+        assert!(NET_DMA.base >= DMA.base && NC_LO + BUF_BLOCKS + NC_HI == 8);
         assert!(FIXED_END == 168 * MB2);
         assert!(super::PCIE2.0 >> 30 == 64 && super::MIP.0 >> 30 == 64);
         assert!(super::UART10.0 >> 30 == 65 && super::GIC.0 >> 30 == 65);
@@ -651,6 +680,18 @@ __pi_l2_gb0:
 mod tests {
     use super::*;
     use board::Board;
+
+    /// Blok 161 en 162 (0x1420_0000 tot 0x1460_0000) zijn de framebuffers
+    /// van de GEM (Normal-WB), 160 de descriptors en 163 tot 167 de rest
+    /// van de DMA-regio (NC).
+    #[test]
+    fn the_gem_buffers_are_blocks_161_and_162() {
+        assert_eq!((arch::NC_LO, arch::BUF_BLOCKS, arch::NC_HI), (1, 2, 5));
+        assert_eq!(
+            (board_raspi::map::NET_DMA.base + driver_gem::BUF_OFF) / board_raspi::map::MB2,
+            128 + 32 + arch::NC_LO
+        );
+    }
 
     #[test]
     fn a76_numbers_cores_in_aff1() {

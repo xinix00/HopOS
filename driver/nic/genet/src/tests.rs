@@ -183,6 +183,38 @@ fn receive_strips_the_pad_skips_bad_frames_and_returns_buffers() {
     assert_eq!(n.receive(&mut buf), None);
 }
 
+/// De kopie in en uit de buffers is `memcpy` met een veeg (zie de
+/// crate-doc): byte voor byte het frame, ook achter de 2 pad-bytes van RX en
+/// met een staart die niet op 8 of 16 valt, en niets ernaast.
+#[test]
+fn frames_cross_the_wb_buffers_byte_for_byte() {
+    let pattern = |n: usize| (0..n).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>();
+    for size in [17, 61, 1514] {
+        let mut f = Fake::new();
+        let b = f.base();
+        let d = f.dma();
+        let mut n = f.nic();
+        let frame = pattern(size);
+        n.transmit(&frame).unwrap();
+        let mut sent = vec![0u8; BUF_SIZE];
+        dev::copy_out(&mut sent, d.add(DMA_NEED / 2));
+        assert_eq!(&sent[..size], &frame[..], "tx {size}");
+        assert!(sent[size..].iter().all(|&b| b == 0), "tx {size}: beyond");
+
+        dev::write32(
+            b.add(RX_BD),
+            (((size + 2) as u32) << 16) | DMA_SOP | DMA_EOP,
+        );
+        dev::copy_in(d, &[0xee, 0xee]);
+        dev::copy_in(d.add(2), &pattern(BUF_SIZE - 2));
+        dev::write32(b.add(RX_DMA + 0x08), 1);
+        let mut out = vec![0xccu8; 2048];
+        assert_eq!(n.receive(&mut out), Some(size), "rx {size}");
+        assert_eq!(&out[..size], &frame[..], "rx {size}");
+        assert!(out[size..].iter().all(|&b| b == 0xcc), "rx {size}: beyond");
+    }
+}
+
 #[test]
 fn mdio_reports_a_stuck_bus_and_read_fail() {
     let mut f = Fake::new();

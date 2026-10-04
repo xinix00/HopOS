@@ -33,7 +33,7 @@ per stap wat de console moet tonen en wat een afwijking betekent.
 | 0x0008_0000 tot 0x0800_0000 | kern-RAM: image, stack, heap | Normal WB |
 | 0x0800_0000 tot 0x1000_0000 | laadvenster: DTB 0x0F00_0000, boot-scratch 0x0F10_0000, rolwoord +0x100, staging 0x0F20_0000 (14 MB) | Normal WB |
 | 0x1000_0000 tot 0x1400_0000 | control-pages en kooi-regio | Device |
-| 0x1400_0000 tot 0x1500_0000 | DMA: NIC 8 MB, mailbox-buffer 0x1480_0000 | Normal-NC |
+| 0x1400_0000 tot 0x1500_0000 | DMA: NIC 8 MB, mailbox-buffer 0x1480_0000 | Normal-NC, op de framebuffers van de NIC na: Normal-WB en XN, de driver veegt ze (Pi 4 0x1400_0000 tot 0x1420_0000, de GENET; Pi 5 0x1420_0000 tot 0x1460_0000, de GEM; de descriptors van de GEM eronder blijven NC) |
 | vanaf 0x1500_0000 | de pool: DTB `/memory` min `/memreserve/`, runtime gemapt | Normal WB |
 
 ## Bouwen en flashen

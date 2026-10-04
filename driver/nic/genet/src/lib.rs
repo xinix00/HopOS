@@ -18,9 +18,15 @@
 //! 0x10000) náást de descriptor-pointer (mod 256).
 //!
 //! Eigendom: de driver is van de RX-pomp (één eigenaar, `&mut self`); de
-//! DMA-regio die het board geeft is van hem alleen. De regio is Normal
-//! non-cacheable gemapt, dus er is geen cache-onderhoud; de barrières staan
-//! waar het protocol ze eist.
+//! DMA-regio die het board geeft is van hem alleen. Daar liggen alleen de
+//! framebuffers (de descriptors zijn registers), en het board mapt hem
+//! Normal-WB en XN: de driver veegt zelf, `dev::pull` vóór elke RX-kopie,
+//! `dev::push` na elke TX-kopie en één `pull` over alles in `init`, en
+//! kopieert met `memcpy` (Linux' streaming-DMA in bcmgenet.c, en de
+//! dwmac4 en de GEM). Uit NC met vluchtige woorden kostte een frame van
+//! 1514 bytes op de A76 van de Pi 5 8,4 µs, uit WB na de veeg 0,7
+//! (driver-gem); op de Pi 4 ontving de GENET 52 tot 72 MB/s tegen 112 uit.
+//! De barrières staan waar het protocol ze eist.
 
 #![cfg_attr(not(test), no_std)]
 #![cfg_attr(
@@ -294,9 +300,10 @@ impl Genet {
     /// # Safety
     ///
     /// `base` is het gemapte GENET-blok ([`MMIO_SIZE`]); de DMA-regio is
-    /// van deze driver alleen, busadres = fysiek adres, en coherent gemapt
-    /// (Normal non-cacheable of Device). Beide blijven zolang de driver
-    /// leeft.
+    /// van deze driver alleen, busadres = fysiek adres, en Normal gemapt
+    /// (non-cacheable, of write-back: de driver veegt), nooit Device: de
+    /// frames gaan er met `memcpy` in en uit. Beide blijven zolang de
+    /// driver leeft.
     #[must_use]
     pub const unsafe fn new(
         base: Pa,
@@ -467,6 +474,10 @@ impl Genet {
         s.rbuf_flush_ctrl.write(r);
         dev::delay(self.clock, 10_000);
 
+        // Geen regel van de buffers meer in de cache (een vorige kern kan er
+        // een achtergelaten hebben): niets vuils dat later over een frame
+        // van de DMA heen valt. De DMA staat stil.
+        dev::pull(self.rx_bufs, DMA_NEED as usize);
         self.init_rx();
         self.init_tx();
 
@@ -589,7 +600,8 @@ impl netdev::Device for Genet {
         }
         let i = (self.tx_prod as usize) % N_BD;
         let dst = self.tx_bufs.add((i * BUF_SIZE) as u64);
-        dev::copy_in(dst, frame);
+        dev::copy_in_normal(dst, frame);
+        dev::push(dst, frame.len());
         let d = self.tx_bd(i);
         d.addr_lo.write(dst.0 as u32);
         d.addr_hi.write((dst.0 >> 32) as u32);
@@ -619,7 +631,9 @@ impl netdev::Device for Genet {
             if let Some(n) = got
                 && let Some(dst) = buf.get_mut(..n)
             {
-                dev::copy_out(dst, self.rx_bufs.add((i * BUF_SIZE + 2) as u64));
+                let src = self.rx_bufs.add((i * BUF_SIZE + 2) as u64);
+                dev::pull(src, n);
+                dev::copy_out_normal(dst, src);
             }
             // Klaar met lezen vóór de buffer terug naar de DMA gaat.
             dev::mb();

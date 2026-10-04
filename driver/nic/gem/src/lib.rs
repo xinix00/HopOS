@@ -11,11 +11,24 @@
 //! DRAM 0 (Linux' conventie; het board zet dat window).
 //!
 //! Eigendom: de driver is van de RX-pomp (`&mut self`); de DMA-regio is van
-//! hem alleen en Normal non-cacheable gemapt. De Go-kern mapte de
-//! zendbuffers gecached (GEMETEN 21-09: zenden 50 tegen 43-47 MB/s,
-//! ontvangen juist het snelst ongecached, 58-62 MB/s); hier is de hele
-//! regio ongecachet, dus geen cache-onderhoud. De indeling houdt de
-//! 2 MB-blokken van toen aan, zodat die knop later zonder herindeling kan.
+//! hem alleen.
+//!
+//! CACHE-COHERENTIE: de RP1 snoopt niet. De descriptors liggen onderin de
+//! regio, Normal-NC, zonder onderhoud. De framebuffers liggen in hun eigen
+//! twee blokken van 2 MB ([`BUF_OFF`], [`BUF_BLOCK`]) die het board
+//! Normal-WB en XN mapt, en de driver veegt zelf: `dev::push` na elke
+//! TX-kopie, `dev::pull` vóór elke RX-kopie, en één `pull` over alle
+//! buffers in [`Gem::init`] (een vorige kern kan er regels achtergelaten
+//! hebben); Linux' `dma_sync_single_for_device`/`_for_cpu`, en de net-wb
+//! van de O6N, de Altra en de dwmac4 op de Radxa. De kopieën zijn `memcpy`.
+//! GEMETEN 04-10 op de Pi 5 (een app die 20000 keer 1514 bytes kopieert,
+//! 1500 MHz): lezen uit NC met vluchtige woorden van 8 bytes (zoals
+//! `dev::copy_out`) 8,4 µs per frame, uit NC met `memcpy` 1,0, uit WB na
+//! `dc civac` 0,68; schrijven naar NC met woorden 0,77, met `memcpy` 0,16,
+//! naar WB met `dc cvac` 0,38. Bij 111 MB/s in (77k frames per seconde)
+//! kostte het lezen uit NC 0,64 s per seconde van de OS-core. Het zenden
+//! (55 MB/s) zat niet in de kopie maar in het wachten per frame
+//! (`Gem::tx_restart`).
 //!
 //! De interrupt: [`ack_irq`] (masker dicht, latch gewist) is de device-ack
 //! van de dispatcher; de RX-pomp heropent hem als hij de ring leeg vindt
@@ -141,6 +154,8 @@ const TX_WRAP: u32 = 1 << 30;
 const TX_LAST: u32 = 1 << 15;
 /// TXSTATUS: de zender is bezig (TGO).
 const TX_GO: u32 = 1 << 3;
+/// NWCTRL met TSTART: RX, TX en MDIO blijven aan.
+const TX_KICK: u32 = CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN | CTRL_TX_START;
 
 const MAN_CLAUSE22: u32 = 1 << 30;
 const MAN_READ: u32 = 0b10 << 28;
@@ -167,12 +182,19 @@ const OFF_RX_BUFS: u64 = 0x20_0000;
 const OFF_TX_BUFS: u64 = 0x40_0000;
 /// Wat deze driver aan DMA-geheugen vraagt.
 pub const DMA_NEED: u64 = OFF_TX_BUFS + 0x20_0000;
+/// Waar de framebuffers beginnen: vanaf hier mapt het board de regio
+/// Normal-WB (de driver veegt), eronder liggen de descriptors NC.
+pub const BUF_OFF: u64 = OFF_RX_BUFS;
+/// De maat van het bufferstuk: de twee blokken van RX en TX.
+pub const BUF_BLOCK: u64 = DMA_NEED - BUF_OFF;
 
 const _: () = {
     assert!((N_RX + N_TX) * 16 <= OFF_RX_BUFS as usize);
     assert!(N_RX * BUF <= (OFF_TX_BUFS - OFF_RX_BUFS) as usize);
     assert!(N_TX * BUF <= (DMA_NEED - OFF_TX_BUFS) as usize);
-    assert!(BUF.is_multiple_of(64));
+    // Elke buffer op eigen cachelijnen: een veeg van de ene raakt de
+    // andere niet.
+    assert!((BUF as u64).is_multiple_of(dev::LINE));
 };
 
 /// De MDIO-pollgrens: enkele µs typisch, ruim begrensd.
@@ -312,7 +334,6 @@ pub struct Gem {
     dma_size: u64,
     rx_head: usize,
     tx_head: usize,
-    clock: fn() -> u64,
     irq: Option<&'static Signal>,
     /// De board-kant van de rearm (RP1: de MSI-X IACK).
     rearm: Option<fn()>,
@@ -326,18 +347,13 @@ impl Gem {
     /// # Safety
     ///
     /// `base` is het gemapte GEM-blok; de DMA-regio is van deze driver
-    /// alleen, coherent gemapt (Normal non-cacheable of Device), en de
-    /// GEM bereikt hem op fysiek + `bus_off`. Beide blijven zolang de
+    /// alleen en de GEM bereikt hem op fysiek + `bus_off`. De descriptors
+    /// (`[dma, dma + BUF_OFF)`) zijn Normal-NC gemapt, het bufferstuk erna
+    /// Normal-NC of Normal-WB (de driver veegt het), nooit Device: de
+    /// frames gaan er met `memcpy` in en uit. Beide blijven zolang de
     /// driver leeft.
     #[must_use]
-    pub const unsafe fn new(
-        base: Pa,
-        bus_off: u64,
-        dma: Pa,
-        dma_size: u64,
-        mac: [u8; 6],
-        clock: fn() -> u64,
-    ) -> Self {
+    pub const unsafe fn new(base: Pa, bus_off: u64, dma: Pa, dma_size: u64, mac: [u8; 6]) -> Self {
         Self {
             base,
             bus_off,
@@ -349,7 +365,6 @@ impl Gem {
             dma_size,
             rx_head: 0,
             tx_head: 0,
-            clock,
             irq: None,
             rearm: None,
         }
@@ -386,6 +401,11 @@ impl Gem {
         unsafe { stop(self.base) };
         let r = self.r();
 
+        // Eerst geen regel van de buffers meer in de cache (een vorige kern
+        // kan er een achtergelaten hebben): niets vuils dat later over een
+        // frame van de DMA heen valt. De GEM staat stil.
+        dev::pull(self.rx_bufs, N_RX * BUF);
+        dev::pull(self.tx_bufs, N_TX * BUF);
         // RX-ring: elke descriptor wijst naar zijn eigen buffer; de DMA is
         // eigenaar.
         for i in 0..N_RX {
@@ -464,6 +484,26 @@ impl Gem {
         board();
         r.ier.write(INT_RCOMP);
     }
+
+    /// Linux' `macb_tx_restart`: staat de zender stil (TGO laag) terwijl de
+    /// laatst gegeven descriptor nog van de hardware is, dan opnieuw
+    /// TSTART. RP1-eigenaardigheid (macb_main.c, "TSTART write might get
+    /// dropped"): over de PCIe-backed AXI kan de TSTART-schrijf verloren
+    /// gaan terwijl de DMA net stopt. Linux doet dit op de TXUBR-interrupt;
+    /// hier bij een volle ring en bij elke lege RX-ronde van de pomp (de
+    /// vangrail van 10 ms is dus de langste stilstand). Elke volgende
+    /// TSTART haalt ook alles mee wat ervoor bleef liggen.
+    ///
+    /// Tot 04-10 wachtte `transmit` hier per frame tot de descriptor terug
+    /// was, in stappen van 10 µs: één frame tegelijk op de draad, 55 MB/s uit
+    /// tegen 111 in op de Pi 5.
+    fn tx_restart(&self) {
+        let last = (self.tx_head + N_TX - 1) % N_TX;
+        let d = self.tx_ring.add((last * 16) as u64);
+        if dev::read32(d.add(4)) & TX_USED == 0 && self.r().txstatus.read() & TX_GO == 0 {
+            self.r().nwctrl.write(TX_KICK);
+        }
+    }
 }
 
 /// NWCFG voor een link, met de busbreedte uit DCFG1.DBWDEF (4 = 128,
@@ -524,18 +564,20 @@ impl Mdio for Gem {
 }
 
 impl netdev::Device for Gem {
-    /// Eén frame, synchroon gestart. Een descriptor die de DMA nog heeft is
-    /// een volle ring, geen wachtlus.
+    /// Eén frame op de ring en TSTART, zonder op de draad te wachten. Een
+    /// descriptor die de DMA nog heeft is een volle ring, geen wachtlus.
     fn transmit(&mut self, frame: &[u8]) -> core::result::Result<(), TxError> {
         if frame.is_empty() || frame.len() > BUF {
             return Err(TxError::Size(frame.len()));
         }
         let d = self.tx_ring.add((self.tx_head * 16) as u64);
         if dev::read32(d.add(4)) & TX_USED == 0 {
+            self.tx_restart();
             return Err(TxError::Full);
         }
         let dst = self.tx_bufs.add((self.tx_head * BUF) as u64);
-        dev::copy_in(dst, frame);
+        dev::copy_in_normal(dst, frame);
+        dev::push(dst, frame.len());
         let bus = dst.0 + self.bus_off;
         dev::write32(d, bus as u32);
         dev::write32(d.add(8), (bus >> 32) as u32);
@@ -546,22 +588,7 @@ impl netdev::Device for Gem {
         dev::mb();
         dev::write32(d.add(4), w1);
         dev::mb();
-        let r = self.r();
-        let start = CTRL_MGMT_EN | CTRL_TX_EN | CTRL_RX_EN | CTRL_TX_START;
-        r.nwctrl.write(start);
-        // RP1-eigenaardigheid (macb_main.c, "TSTART write might get
-        // dropped"): over de PCIe-backed AXI kan de TSTART-schrijf verloren
-        // gaan terwijl de DMA net stopt. Kort kijken en herhalen zolang de
-        // descriptor van de hardware blijft én de zender stilstaat.
-        for _ in 0..100 {
-            if dev::read32(d.add(4)) & TX_USED != 0 {
-                break;
-            }
-            if r.txstatus.read() & TX_GO == 0 {
-                r.nwctrl.write(start);
-            }
-            dev::delay(self.clock, 10_000);
-        }
+        self.r().nwctrl.write(TX_KICK);
         self.tx_head = (self.tx_head + 1) % N_TX;
         Ok(())
     }
@@ -574,6 +601,7 @@ impl netdev::Device for Gem {
             let d = self.rx_ring.add((self.rx_head * 16) as u64);
             let w0 = dev::read32(d);
             if w0 & RX_OWNED == 0 {
+                self.tx_restart();
                 self.rearm_irq();
                 return None;
             }
@@ -583,7 +611,9 @@ impl netdev::Device for Gem {
             if let Some(n) = got
                 && let Some(dst) = buf.get_mut(..n)
             {
-                dev::copy_out(dst, self.rx_bufs.add((self.rx_head * BUF) as u64));
+                let src = self.rx_bufs.add((self.rx_head * BUF) as u64);
+                dev::pull(src, n);
+                dev::copy_out_normal(dst, src);
             }
             // Terug aan de DMA: het adres blijft, alleen OWNED eraf.
             dev::write32(d.add(4), 0);

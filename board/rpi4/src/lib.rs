@@ -139,8 +139,8 @@ impl Soc for Bcm2711 {
             return Ok(None);
         }
         // SAFETY: GENET is het blok van de BCM2711 (Device-venster); de
-        // NIC-regio is van deze driver alleen, Normal non-cacheable, en
-        // busadres = fysiek adres op de scb-bus.
+        // NIC-regio is van deze driver alleen, met zijn buffers Normal-WB
+        // (`arch`), en busadres = fysiek adres op de scb-bus.
         let mut nic =
             unsafe { Genet::new(GENET, Pa(ctx.dma.base), ctx.dma.size, ctx.mac, ctx.clock) };
         nic.check_rev().map_err(|_| Error::Nic("genet: not a v5"))?;
@@ -189,7 +189,9 @@ mod arch {
     //! - niveau 1: gigabyte 0 en 3 via een eigen niveau-2-tabel, de rest
     //!   leeg tot `discover` er DRAM bij zet;
     //! - gigabyte 0: kern-RAM en laadvenster Normal WB, het kooi-venster
-    //!   Device, de DMA-regio Normal-NC (`board_raspi::map`);
+    //!   Device, de DMA-regio Normal-NC (`board_raspi::map`), op het eerste
+    //!   blok na (0x1400_0000): de buffers van de GENET, Normal-WB en XN,
+    //!   de driver veegt ze;
     //! - gigabyte 3: de peripherals (0xFC00_0000 tot 4 GB) Device; het RAM
     //!   eronder (op een 4 en 8 GB-Pi) zet `discover` erbij.
     use dev::Pa;
@@ -219,7 +221,11 @@ __pi_l2_gb0:
     .quad {dev} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
-    .rept 8
+    .rept {buf_blocks}
+    .quad {wb_xn} + (blk * 0x200000)
+    .set blk, blk + 1
+    .endr
+    .rept {nc_blocks}
     .quad {nc} + (blk * 0x200000)
     .set blk, blk + 1
     .endr
@@ -238,13 +244,22 @@ __pi_l2_gb3:
         nrm = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL),
         dev = const cpu::boot::block(0, cpu::boot::ATTR_DEVICE),
         nc = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL_NC),
+        wb_xn = const cpu::boot::block(0, cpu::boot::ATTR_NORMAL) | cpu::boot::xn(false),
+        buf_blocks = const BUF_BLOCKS,
+        nc_blocks = const 8 - BUF_BLOCKS,
         dev3 = const cpu::boot::block(0xC000_0000, cpu::boot::ATTR_DEVICE),
     );
 
+    /// De buffers van de GENET onderin de DMA-regio, Normal-WB.
+    pub(super) const BUF_BLOCKS: u64 = driver_genet::DMA_NEED.div_ceil(board_raspi::map::MB2);
+
     // De `.rept`-tellingen hierboven tegen het plan.
     const _: () = {
-        use board_raspi::map::{DEVICE_WINDOW, DMA, FIXED_END, LOADER, MB2};
+        use board_raspi::map::{DEVICE_WINDOW, DMA, FIXED_END, LOADER, MB2, NET_DMA};
         assert!(LOADER.base + LOADER.size == 128 * MB2);
+        // De NIC-regio begint de DMA-regio, en de buffers vullen hele
+        // blokken binnen de NIC-helft (de mailbox en de USB blijven NC).
+        assert!(NET_DMA.base == DMA.base && BUF_BLOCKS * MB2 <= NET_DMA.size);
         assert!(DEVICE_WINDOW.size == 32 * MB2);
         assert!(DMA.size == 8 * MB2);
         assert!(FIXED_END == 168 * MB2);
@@ -279,6 +294,17 @@ __pi_l2_gb3:
 mod tests {
     use super::*;
     use board::Board;
+
+    /// Blok 160 (0x1400_0000) draagt de buffers van de GENET (Normal-WB);
+    /// 161 tot 167 blijven NC.
+    #[test]
+    fn the_genet_buffers_are_block_160() {
+        assert_eq!(arch::BUF_BLOCKS, 1);
+        assert_eq!(
+            board_raspi::map::NET_DMA.base / board_raspi::map::MB2,
+            128 + 32
+        );
+    }
 
     #[test]
     fn a72_numbers_cores_in_aff0() {

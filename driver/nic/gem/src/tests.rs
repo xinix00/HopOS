@@ -2,13 +2,7 @@
 
 use super::*;
 use netdev::Device;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::SeqCst};
-
-static NOW: AtomicU64 = AtomicU64::new(0);
-
-fn ticking() -> u64 {
-    NOW.fetch_add(1_000, SeqCst)
-}
+use std::sync::atomic::{AtomicU32, Ordering::SeqCst};
 
 const BUS_OFF: u64 = 0x10_0000_0000;
 
@@ -33,16 +27,7 @@ impl Fake {
     fn nic(&mut self) -> Gem {
         let (b, d) = (self.base(), self.dma());
         // SAFETY: de vectoren leven langer dan de driver in elke test.
-        unsafe {
-            Gem::new(
-                b,
-                BUS_OFF,
-                d,
-                DMA_NEED,
-                [0x2c, 0xcf, 0x67, 1, 2, 3],
-                ticking,
-            )
-        }
+        unsafe { Gem::new(b, BUS_OFF, d, DMA_NEED, [0x2c, 0xcf, 0x67, 1, 2, 3]) }
     }
 }
 
@@ -87,7 +72,7 @@ fn a_small_region_is_refused() {
     let mut f = Fake::new();
     let (b, d) = (f.base(), f.dma());
     // SAFETY: de vectoren leven de hele test.
-    let mut n = unsafe { Gem::new(b, 0, d, DMA_NEED - 1, [0; 6], ticking) };
+    let mut n = unsafe { Gem::new(b, 0, d, DMA_NEED - 1, [0; 6]) };
     assert!(matches!(n.init(LINK_1G), Err(Error::Dma { .. })));
 }
 
@@ -98,9 +83,8 @@ fn transmit_hands_the_descriptor_over_and_a_busy_one_is_full() {
     let d = f.dma();
     let mut n = f.nic();
     n.init(LINK_1G).unwrap();
-    // De nep-GEM geeft hem meteen terug: TGO laag, USED blijft 0 (de
-    // retry-lus loopt af), dan is dezelfde descriptor bij de wrap nog van
-    // de hardware.
+    // De nep-GEM zendt nooit: USED blijft 0, dus dezelfde descriptor is bij
+    // de wrap nog van de hardware.
     n.transmit(&[0x77; 100]).unwrap();
     let t0 = d.add((N_RX * 16) as u64);
     assert_eq!(dev::read32(t0.add(4)), 100 | TX_LAST);
@@ -112,6 +96,50 @@ fn transmit_hands_the_descriptor_over_and_a_busy_one_is_full() {
     n.tx_head = 0;
     assert_eq!(n.transmit(&[1; 60]), Err(TxError::Full));
     assert_eq!(n.transmit(&[]), Err(TxError::Size(0)));
+}
+
+/// Een TSTART die over de PCIe verloren ging (de zender staat stil, de
+/// laatste descriptor is nog van de hardware) komt opnieuw bij een volle
+/// ring en bij een lege RX-ronde; een zender die nog loopt of niets heeft,
+/// krijgt er geen.
+#[test]
+fn a_dropped_tstart_is_given_again() {
+    let mut f = Fake::new();
+    let b = f.base();
+    let mut n = f.nic();
+    n.init(LINK_1G).unwrap();
+    let mut buf = [0u8; 2048];
+    let tstart = |b: Pa| dev::read32(b) & CTRL_TX_START != 0;
+    // Niets gegeven: geen TSTART.
+    assert_eq!(n.receive(&mut buf), None);
+    assert!(!tstart(b));
+    n.transmit(&[1; 60]).unwrap();
+    assert!(tstart(b));
+    // De zender loopt (TGO): geen tweede.
+    dev::write32(b, 0);
+    dev::write32(b.add(0x014), TX_GO);
+    assert_eq!(n.receive(&mut buf), None);
+    assert!(!tstart(b));
+    // Hij staat stil met de descriptor nog bij de hardware: wel.
+    dev::write32(b.add(0x014), 0);
+    assert_eq!(n.receive(&mut buf), None);
+    assert!(tstart(b));
+    // Een volle ring met een stille zender ook.
+    for _ in 1..N_TX {
+        n.transmit(&[2; 60]).unwrap();
+    }
+    dev::write32(b, 0);
+    assert_eq!(n.transmit(&[3; 60]), Err(TxError::Full));
+    assert!(tstart(b));
+    // Alles terug van de hardware: geen TSTART meer.
+    let t0 = f.dma().add((N_RX * 16) as u64);
+    for i in 0..N_TX as u64 {
+        let w1 = t0.add(i * 16 + 4);
+        dev::write32(w1, dev::read32(w1) | TX_USED);
+    }
+    dev::write32(b, 0);
+    assert_eq!(n.receive(&mut buf), None);
+    assert!(!tstart(b));
 }
 
 #[test]
@@ -142,6 +170,37 @@ fn receive_takes_complete_frames_returns_the_rest_and_rearms() {
     assert_eq!(n.receive(&mut buf), None);
     assert_eq!(REARMS.load(SeqCst), 1, "an empty ring rearms");
     assert!(n.irq().is_some());
+}
+
+/// De buffers in hun eigen blokken (het board mapt ze Normal-WB), de
+/// descriptors eronder (NC); de kopie in en uit is `memcpy` met een veeg:
+/// byte voor byte het frame, met een staart die niet op 8 of 16 valt, en
+/// niets ernaast.
+#[test]
+fn frames_cross_the_wb_buffers_byte_for_byte() {
+    assert!(((N_RX + N_TX) * 16) as u64 <= BUF_OFF);
+    assert_eq!((BUF_OFF, BUF_OFF + BUF_BLOCK), (OFF_RX_BUFS, DMA_NEED));
+    let pattern = |n: usize| (0..n).map(|i| (i * 7 + 3) as u8).collect::<Vec<u8>>();
+    for size in [17, 61, 1514] {
+        let mut f = Fake::new();
+        let d = f.dma();
+        let mut n = f.nic();
+        n.init(LINK_1G).unwrap();
+        let frame = pattern(size);
+        n.transmit(&frame).unwrap();
+        let mut sent = vec![0u8; BUF];
+        dev::copy_out(&mut sent, d.add(OFF_TX_BUFS));
+        assert_eq!(&sent[..size], &frame[..], "tx {size}");
+        assert!(sent[size..].iter().all(|&b| b == 0), "tx {size}: beyond");
+
+        dev::write32(d, dev::read32(d) | RX_OWNED);
+        dev::write32(d.add(4), RX_SOF | RX_EOF | size as u32);
+        dev::copy_in(d.add(OFF_RX_BUFS), &pattern(BUF));
+        let mut out = vec![0xccu8; 2048];
+        assert_eq!(n.receive(&mut out), Some(size), "rx {size}");
+        assert_eq!(&out[..size], &frame[..], "rx {size}");
+        assert!(out[size..].iter().all(|&b| b == 0xcc), "rx {size}: beyond");
+    }
 }
 
 #[test]
