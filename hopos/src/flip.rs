@@ -463,27 +463,46 @@ mod facts {
     }
 }
 
+/// Kwam deze kern uit een sprong? Op arm64 zegt de ingang het
+/// (`cpu::boot::FLIP_ENTERED`: x3 van de trampoline, op UEFI de
+/// flip-ingang). Op riscv64 is er geen merkteken (de trampoline geeft a0 = 0,
+/// en de firmware a0 = het hart, op hart 0 ook 0): daar blijft het paar het
+/// bewijs, en het wissen ervan. Daar bestaat ook alleen de koude flip, en een
+/// oud koud blob boot hoe dan ook koud.
+fn jumped() -> bool {
+    cfg!(target_arch = "riscv64") || cpu::boot::FLIP_ENTERED.load(Relaxed)
+}
+
 /// De landing, als eerste na de heap: een overdracht is er, of niet.
 ///
-/// Een onbruikbaar blob met een geldig paar is GEEN koude boot: er leven
-/// misschien bewoners, en een koude boot zou hun regio's vrij noemen. Op
-/// ijzer wacht de kern dan op de watchdog; QEMU heeft er geen, dus een
-/// PSCI-reset: de machine komt koud terug, zoals de watchdog dat ook deed.
+/// Alleen na een sprong ([`jumped`]): een firmware-boot die nog een paar
+/// vindt, wist het en boot koud (`HOPOS_FLIP_STALE`). Na een harde reset
+/// draaien de bewoners niet meer, en het blob is van een kern die al landde
+/// of al dood is.
+///
+/// Een onbruikbaar blob met een geldig paar ná een sprong is GEEN koude
+/// boot: er leven misschien bewoners, en een koude boot zou hun regio's vrij
+/// noemen. Op ijzer wacht de kern dan op de watchdog; QEMU heeft er geen,
+/// dus een PSCI-reset: de machine komt koud terug, zoals de watchdog dat
+/// ook deed.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn land(x0: u64) -> Option<Handoff> {
     FIRMWARE_X0.store(x0, Relaxed);
     let (mut mem, p) = (DevMem, plan());
-    kernflip::mark_early_boot(&mut mem, &p);
+    let jumped = jumped();
+    if jumped {
+        kernflip::mark_early_boot(&mut mem, &p);
+    }
     // De kale vector van de trampoline: een fault tijdens de kopie of in de
     // eerste stappen van de nieuwe kern (Go 01-09). Na de reset komt de
-    // oude kern koud terug, of adopteert hij het blob dat de sprong
-    // achterliet; in beide gevallen zegt hij het hier.
+    // oude kern koud terug (het blob dat de sprong achterliet is dan oud);
+    // hij zegt het hier.
     if let Some((esr, elr, far)) = chain::take_trap(Pa(FLIP_TRAMP_PA)) {
         println!(
             "flip: the jump faulted before the new kernel had vectors: ESR {esr:#x} ELR {elr:#x} FAR {far:#x} HOPOS_FLIP_TRAP"
         );
     }
-    match kernflip::adopted(&mut mem, &p) {
+    match kernflip::adopted(&mut mem, &p, jumped) {
         Ok(Boot::Adopted(h)) if h.cold => {
             GENERATION.store(h.generation, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
@@ -523,7 +542,12 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
             LANDED_NAT.set(Some(core::mem::take(&mut h.nat)));
             Some(h)
         }
-        Ok(Boot::Cold) => {
+        Ok(b @ (Boot::Cold | Boot::Stale)) => {
+            if b == Boot::Stale {
+                println!(
+                    "flip: a handoff lay in memory, but this kernel came from the firmware, not from a jump: wiped, not adopted, cold boot HOPOS_FLIP_STALE"
+                );
+            }
             report_cold(&mut mem, &p);
             // Pas na het lezen: anders drukt een koude kern zijn eigen
             // regels af als die van een dode.

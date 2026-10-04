@@ -58,6 +58,17 @@
 #               HOPOS_APPSPIKE_DONE van kern B erin, en HOPOS_FLIP_BLACKBOX_END.
 #               De rest van de toets kijkt alleen naar de console van vóór
 #               de reset.
+#   eenmalig    (virt, warm) de reset van de O6N (04-10): daar bleef het
+#               pointer/magic-paar van de overdracht na de landing in DRAM
+#               staan (het wissen zat in de cache), en de stickkern
+#               adopteerde de bewoners van een flip die al geland was. QEMU
+#               heeft geen cache, dus zet een loader het paar bij ELKE reset
+#               terug op de boot-scratch (ook bij de eerste boot), naast het
+#               echte blob van de sprong. Groen alleen als kern A beide keren
+#               koud boot met HOPOS_FLIP_STALE (geen merkteken van de
+#               trampoline, dus geen sprong), na de reset geen
+#               HOPOS_FLIP_BOOT, HOPOS_FLIP_ADOPT, HOPOS_HOP_RESUMED of
+#               HOPOS_HOP_EXIT zegt, en Hop weer opkomt (HOP_UP).
 #
 # Rood is ook: HOPOS_PANIC, HOPOS_EXCEPTION, een fout van Hop, en elke
 # flip-weigering (HOPOS_FLIP_REFUSED, _FAIL, _BLOB_BAD, _GUARD,
@@ -419,11 +430,18 @@ if [ "$BOARD" = uefi ]; then
 		</dev/null >"$LOG" 2>&1 &
 else
 	# QMP voor de reset van de zwarte doos (hieronder); qemu-run.sh geeft
-	# zijn argumenten door aan QEMU.
+	# zijn argumenten door aan QEMU. Warm ook het oude paar ("eenmalig"
+	# hierboven): de pointer naar het blob (flip_handoff_pa: de staging-kop
+	# 0xB010_0000 min 256 KiB) en HAND_MAGIC op de boot-scratch 0xB000_0000
+	# + 0x80 (board/qemuvirt/src/slots.rs, abi::layout), bij elke reset.
 	# Kern A met een config in zijn venster; de bundel heeft een leeg.
 	printf 'hopos.hop.sharegroup=system\n' >"$ART/kern-a.cfg"
+	set -- -qmp "unix:$ART/q.sock,server=on,wait=off"
+	[ "$MODE" = warm ] && set -- "$@" \
+		-device loader,addr=0xb0000080,data=0xb00c0000,data-len=8 \
+		-device loader,addr=0xb0000088,data=0x31444e4148504f48,data-len=8
 	HOPOS_STAMP=A SYSPORT="$SYSPORT" AGENTPORT="$AGENTPORT" LEADERPORT="$LEADERPORT" HOP_DIR="$HOP_DIR" APP="$HOP_ELF" ROLE=1 DISK="$DISK" CFG="$ART/kern-a.cfg" \
-		sh "$DIR/image/qemu-run.sh" -qmp "unix:$ART/q.sock,server=on,wait=off" </dev/null >"$LOG" 2>&1 &
+		sh "$DIR/image/qemu-run.sh" "$@" </dev/null >"$LOG" 2>&1 &
 fi
 QPID=$!
 
@@ -441,6 +459,7 @@ echoes() {
 }
 
 A_MARKS="HOPOS_BOOT gen=1 stamp=A|HOPOS_HOP_START slot=1|uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_UP"
+[ "$BOARD:$MODE" = virt:warm ] && A_MARKS="HOPOS_FLIP_STALE|$A_MARKS"
 WORK_MARKS="slot 1: .*HOP_JOB_PLACED slot=[2-9]|HOPOS_SLOT_START slot=[2-9]|slot [0-9]+: HOPOS_APPSPIKE_DONE pass=9 fail=0"
 BASE_RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_FLIP_BLOB_BAD|HOPOS_FLIP_GUARD|HOPOS_FS_FREEZE_FAIL|HOPOS_CAGE_FAIL|HOPOS_CFG_BAD|HOPOS_FLIP_CFG_NONE|HOPOS_FLIP_CFG_OWN"
 case "$MODE" in
@@ -612,9 +631,10 @@ for cmd in ("qmp_capabilities", "system_reset"):
 print(json.dumps(r))
 QMP
 )" || RESET="ROOD qmp: $RESET"
+	# Tot Hop weer op is (of iets roods), hoogstens een minuut.
 	n=0
-	while [ "$n" -lt 150 ] && kill -0 "$QPID" 2>/dev/null; do
-		tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' | grep -q -E 'HOPOS_FLIP_BLACKBOX_(END|EMPTY|NONE)' && break
+	while [ "$n" -lt 300 ] && kill -0 "$QPID" 2>/dev/null; do
+		tail -c +"$((CUT + 1))" "$LOG" | tr -d '\r' | grep -v '^  | ' | grep -q -E "slot 1: .*HOP_UP|$RED" && break
 		sleep 0.2
 		n=$((n + 1))
 	done
@@ -760,7 +780,7 @@ if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
 	*'"return"'*) echo "   ok  system_reset over QMP na de flip" ;;
 	*) echo "   ROOD system_reset over QMP: ${RESET:-niet gedaan (de flip was niet groen)}"; fail=1 ;;
 	esac
-	for m in "HOPOS_BOOT gen=1 stamp=A" "the console of the dead kernel \(generation 2\), last [0-9]+ bytes HOPOS_FLIP_BLACKBOX$" "HOPOS_FLIP_BLACKBOX_END"; do
+	for m in "HOPOS_BOOT gen=1 stamp=A" "HOPOS_FLIP_STALE" "the console of the dead kernel \(generation 2\), last [0-9]+ bytes HOPOS_FLIP_BLACKBOX$" "HOPOS_FLIP_BLACKBOX_END" "slot 1: .*HOP_UP"; do
 		if grep -q -E "$m" "$R" 2>/dev/null; then
 			echo "   ok  na de reset: $(grep -m1 -E "$m" "$R")"
 		else
@@ -768,6 +788,13 @@ if [ "$BOARD" = virt ] && [ "$MODE" = warm ]; then
 			fail=1
 		fi
 	done
+	# Eenmalig: de overdracht van de sprong is na de reset van niemand.
+	if grep -v '^  | ' "$R" 2>/dev/null | grep -q -E 'HOPOS_FLIP_BOOT|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED'; then
+		echo "   ROOD na de reset een landing: $(grep -v '^  | ' "$R" | grep -m1 -E 'HOPOS_FLIP_BOOT|HOPOS_FLIP_ADOPT|HOPOS_HOP_RESUMED')"
+		fail=1
+	else
+		echo "   ok  na de reset koud: geen HOPOS_FLIP_BOOT, HOPOS_FLIP_ADOPT of HOPOS_HOP_RESUMED"
+	fi
 	if box '^  \| .*HOPOS_APPSPIKE_DONE pass=9'; then
 		echo "   ok  in de doos: $(awk '/HOPOS_FLIP_BLACKBOX$/ { f = 1; next } /HOPOS_FLIP_BLACKBOX_END/ { f = 0 } f' "$R" | grep -m1 -E 'HOPOS_APPSPIKE_DONE')"
 	else

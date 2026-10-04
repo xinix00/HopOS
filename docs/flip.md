@@ -176,6 +176,7 @@ houdt hun volumes).
 | Marker | Wat er gebeurt |
 | --- | --- |
 | `HOPOS_FLIP_BLOB_BAD` | het paar was geldig maar het blob niet: er leven misschien bewoners, dus geen koude boot eroverheen maar een PSCI-reset (op ijzer: de watchdog) |
+| `HOPOS_FLIP_STALE` | een firmware-boot (geen merkteken van de trampoline: x3 = `FLIP_ENTRY`, op UEFI de flip-ingang met x1 = 0; `cpu::boot::FLIP_ENTERED`) vond nog een geldig paar: de overdracht van een sprong die al landde of na de sprong stierf. Gewist en niet gelezen, de boot is koud (met `HOPOS_FLIP_LAST` en de doos). De overdracht is eenmalig: de landende kern wist het paar en veegt de nul meteen naar DRAM. Tot 04-10 bleef die nul in de cache, overleefde het paar de watchdog-reset, en adopteerde de stickkern van de O6N (v3.0.5) de bewoners van een flip die al geland was: `HOPOS_FLIP_ADOPT`, Hop dood, pas na de guard koud (2,5 minuut in plaats van 50 s). riscv64 heeft geen merkteken; daar is het wissen de bescherming, en een koud blob boot daar hoe dan ook koud |
 | `HOPOS_FLIP_ADOPT_FAIL` | de nieuwe kern weigert de adoptie (switch-code, partities, cores); de guard reset na de gratie |
 | `HOPOS_FLIP_NAT_FAIL` | de conntrack kwam niet terug; de bewoners draaien, verbindingen door de masquerade breken |
 | `HOPOS_FLIP_GUARD` | geen adoptie of geen net binnen 120 s: PSCI-reset |

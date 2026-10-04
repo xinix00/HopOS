@@ -48,6 +48,8 @@
 //! De MMU-attributen staan hier vast, zodat elk board dezelfde indexen
 //! gebruikt: [`ATTR_DEVICE`], [`ATTR_NORMAL`], [`ATTR_NORMAL_NC`].
 
+use core::sync::atomic::AtomicBool;
+
 /// MAIR-index 0: Device-nGnRnE (MMIO).
 pub const ATTR_DEVICE: u64 = 0;
 /// MAIR-index 1: Normal, write-back, read/write-allocate (de kern-RAM).
@@ -146,6 +148,19 @@ pub unsafe fn guard_page(l2_entry: dev::Pa, l3: dev::Pa, guard: u64) -> bool {
 /// switch-code in de plan-regio en raken het beeld nooit.
 pub const FLIP_ENTRY: u64 = 0x4550_494C_4650_4F48;
 
+/// Kwam deze kern binnen met [`FLIP_ENTRY`] in x3, dus uit de trampoline van
+/// een flip en niet uit de firmware? De ingang zet het na het wissen van de
+/// BSS (`_start` hieronder en `_start_apple`; op UEFI de flip-ingang, x1 = 0).
+///
+/// Waarom: een overdracht in het geheugen hoort alleen bij de sprong die
+/// deze kern bracht. Na een harde reset (de watchdog) ligt het blob van een
+/// eerdere sprong er nog, maar de firmware zet geen merkteken; die boot is
+/// koud, en adopteert niemand (gezien 04-10 op de O6N: de stickkern adopteerde
+/// de overdracht van een flip die al geland was). Zo doet Linux het ook: de
+/// kexec'ende kern geeft de kdump-kern `elfcorehdr=` mee, een herstart via de
+/// firmware krijgt dat niet, wat er ook nog in het geheugen staat.
+pub static FLIP_ENTERED: AtomicBool = AtomicBool::new(false);
+
 /// De poort van `_start`, als Rust: gaat een core met MPIDR-affiniteit
 /// `aff` en `x3` bij de ingang door naar `kmain`? De assembly hieronder is
 /// dezelfde beslissing in vier instructies; deze vorm is er voor de
@@ -216,7 +231,8 @@ mod arch {
 
 // De stub. Registers: x19 = MPIDR-affiniteit, x20 = DTB (x0 van de
 // firmware), x21 = het EL. x3 = [`FLIP_ENTRY`] laat elke core door
-// ([`admits`]): een geflipte kern komt op de OS-core binnen.
+// ([`admits`]): een geflipte kern komt op de OS-core binnen; na de BSS gaat
+// het merkteken in [`FLIP_ENTERED`].
 //
 // TCR_EL2 (niet-VHE): T0SZ = 25 (39-bit VA, start op niveau 1), IRGN0 en
 // ORGN0 = WB-WA, SH0 = inner, TG0 = 4 KB, PS uit ID_AA64MMFR0_EL1.PARange,
@@ -259,6 +275,12 @@ _start:
     str xzr, [x1], #8
     b 1b
 2:
+    // x3 is nog die van de ingang: het merkteken in FLIP_ENTERED.
+    ldr x9, ={flip}
+    cmp x3, x9
+    cset x9, eq
+    adrp x10, {entered}
+    strb w9, [x10, :lo12:{entered}]
     cmp x21, #2
     b.ne 3f
 
@@ -339,6 +361,7 @@ _start:
 "#,
     mair = const MAIR,
     flip = const FLIP_ENTRY,
+    entered = sym FLIP_ENTERED,
 );
 
 // De niveau-3-tabel van de wachtpagina: 4 KB in de BSS, gevuld door de stub

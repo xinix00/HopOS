@@ -402,18 +402,31 @@ pub fn stage_slot(stage: u64, max: u64, flat: u64, hop: Option<(u64, u64)>) -> O
 pub enum Boot {
     /// Een gewone (koude) boot, of het paar was al geconsumeerd.
     Cold,
+    /// Een koude boot die een geldig paar vond: de overdracht van een sprong
+    /// die niet de onze is (een firmware-boot na een harde reset). Gewist,
+    /// niet gelezen.
+    Stale,
     /// Een flip-boot met deze overdracht.
     Adopted(Handoff),
 }
 
 /// Consumeert het pointer/magic-paar (vóór het vertrouwen, ook als het niet
 /// klopt: half garbage mag geen tweede boot besmetten) en leest het blob.
+/// Eenmalig, zoals de kdump-overdracht van Linux: de lezer wist het paar, en
+/// het wissen gaat meteen naar DRAM. Zonder die veeg bleef de nul in de
+/// cache, overleefde het paar een watchdog-reset, en adopteerde de kern van
+/// de stick een overdracht die al geland was (O6N, 04-10).
 ///
-/// Een kapot blob met een geldig paar is GEEN koude boot: er is echt geflipt
-/// en er kunnen bewoners leven, en een koude boot veegt juist hun regio. De
-/// fout gaat naar de aanroeper, die blijft staan tot de watchdog komt
-/// (`HOPOS_FLIP_BLOB_BAD`).
-pub fn adopted(mem: &mut impl PhysMem, plan: &FlipPlan) -> Result<Boot> {
+/// `jumped`: deze kern kwam uit de trampoline van een sprong
+/// (`cpu::boot::FLIP_ENTERED`). Zonder sprong is elk paar oud
+/// ([`Boot::Stale`]): een firmware-boot adopteert nooit, wat er ook in het
+/// geheugen ligt, want na een reset draaien de bewoners niet meer.
+///
+/// Een kapot blob met een geldig paar ná een sprong is GEEN koude boot: er
+/// is echt geflipt en er kunnen bewoners leven, en een koude boot veegt
+/// juist hun regio. De fout gaat naar de aanroeper, die blijft staan tot de
+/// watchdog komt (`HOPOS_FLIP_BLOB_BAD`).
+pub fn adopted(mem: &mut impl PhysMem, plan: &FlipPlan, jumped: bool) -> Result<Boot> {
     let ptr = mem.read64(plan.handoff_ptr_pa);
     let magic = mem.read64(plan.handoff_ptr_pa + 8);
     if ptr == 0 && magic == 0 {
@@ -421,8 +434,12 @@ pub fn adopted(mem: &mut impl PhysMem, plan: &FlipPlan) -> Result<Boot> {
     }
     mem.write64(plan.handoff_ptr_pa, 0);
     mem.write64(plan.handoff_ptr_pa + 8, 0);
+    mem.clean_inv(plan.handoff_ptr_pa, 16);
     if magic != HAND_MAGIC {
         return Ok(Boot::Cold); // Een verdwaalde pointer.
+    }
+    if !jumped {
+        return Ok(Boot::Stale);
     }
     // De pointer wijst exact op het einde van de eigen RAM-declaratie: een
     // eigenschap van de constructie, en de hele klasse "lees op een adres
@@ -1227,11 +1244,11 @@ mod tests {
     #[test]
     fn adopted_consumes_the_pair_before_trusting_it() {
         let mut mem = SparseMem::default();
-        assert_eq!(adopted(&mut mem, &PLAN), Ok(Boot::Cold));
+        assert_eq!(adopted(&mut mem, &PLAN, true), Ok(Boot::Cold));
         // Een verdwaalde pointer: geconsumeerd, koude boot.
         mem.write64(PLAN.handoff_ptr_pa, 0x10_0000);
         mem.write64(PLAN.handoff_ptr_pa + 8, 0xdead);
-        assert_eq!(adopted(&mut mem, &PLAN), Ok(Boot::Cold));
+        assert_eq!(adopted(&mut mem, &PLAN, true), Ok(Boot::Cold));
         // Een geldige overdracht.
         let h = Handoff {
             generation: 3,
@@ -1242,7 +1259,7 @@ mod tests {
         mem.copy_in(PLAN.own_ram_end, &b);
         mem.write64(PLAN.handoff_ptr_pa, PLAN.own_ram_end);
         mem.write64(PLAN.handoff_ptr_pa + 8, HAND_MAGIC);
-        assert_eq!(adopted(&mut mem, &PLAN), Ok(Boot::Adopted(h)));
+        assert_eq!(adopted(&mut mem, &PLAN, true), Ok(Boot::Adopted(h)));
         assert_eq!(mem.read64(PLAN.handoff_ptr_pa), 0, "pair not consumed");
         assert_eq!(
             stage_of(mem.read64(PLAN.stage_pa)),
@@ -1250,10 +1267,106 @@ mod tests {
             "landed without the generation"
         );
         assert_eq!(
-            adopted(&mut mem, &PLAN),
+            adopted(&mut mem, &PLAN, true),
             Ok(Boot::Cold),
             "blob adopted twice"
         );
+    }
+
+    /// DRAM met een write-back-cache ervoor: een schrijf zonder veeg staat
+    /// alleen in de cache, en een reset ([`CachedMem::reset`]) gooit hem weg,
+    /// zoals de watchdog op ijzer. QEMU heeft geen cache; hier wel.
+    #[derive(Default)]
+    struct CachedMem {
+        dram: SparseMem,
+        dirty: std::collections::HashMap<u64, u64>,
+    }
+
+    impl CachedMem {
+        fn reset(&mut self) {
+            self.dirty.clear();
+        }
+    }
+
+    impl PhysMem for CachedMem {
+        fn read64(&self, pa: u64) -> u64 {
+            match self.dirty.get(&pa) {
+                Some(v) => *v,
+                None => self.dram.read64(pa),
+            }
+        }
+        fn write64(&mut self, pa: u64, v: u64) {
+            self.dirty.insert(pa, v);
+        }
+        fn clean_inv(&mut self, pa: u64, len: u64) {
+            let lines: Vec<u64> = self
+                .dirty
+                .keys()
+                .copied()
+                .filter(|a| (pa..pa + len).contains(a))
+                .collect();
+            for a in lines {
+                if let Some(v) = self.dirty.remove(&a) {
+                    self.dram.write64(a, v);
+                }
+            }
+        }
+    }
+
+    /// Legt een overdracht van generatie `generation` neer zoals de sprong
+    /// dat doet: blob en paar, naar DRAM geveegd.
+    fn jump(mem: &mut impl PhysMem, generation: u64) -> Handoff {
+        let h = Handoff {
+            generation,
+            slots: vec![st(2, 0x9000_0000, 32, 2)],
+            ..Handoff::default()
+        };
+        let b = encode(&h, HANDOFF_TAIL).unwrap();
+        mem.copy_in(PLAN.own_ram_end, &b);
+        mem.write64(PLAN.handoff_ptr_pa, PLAN.own_ram_end);
+        mem.write64(PLAN.handoff_ptr_pa + 8, HAND_MAGIC);
+        mem.clean_inv(PLAN.own_ram_end, HANDOFF_TAIL as u64);
+        mem.clean_inv(PLAN.handoff_ptr_pa, 16);
+        h
+    }
+
+    #[test]
+    fn a_landed_handoff_does_not_survive_a_reset() {
+        // De O6N (04-10): de sprong landt, de kern leeft een minuut en de
+        // watchdog reset hem. De kern van de stick mag de overdracht niet
+        // nog eens vinden, ook niet als hij zelf geen merkteken toetst.
+        let mut mem = CachedMem::default();
+        let h = jump(&mut mem, 4);
+        assert_eq!(adopted(&mut mem, &PLAN, true), Ok(Boot::Adopted(h)));
+        mem.reset();
+        assert_eq!(
+            mem.read64(PLAN.handoff_ptr_pa + 8),
+            0,
+            "the wipe stayed in the cache"
+        );
+        assert_eq!(adopted(&mut mem, &PLAN, true), Ok(Boot::Cold));
+    }
+
+    #[test]
+    fn a_firmware_boot_never_adopts() {
+        // Een paar dat er nog ligt (een oudere kern landde en veegde niet,
+        // of de sprong stierf vóór de landing): zonder merkteken van de
+        // trampoline is het oud. Gewist, niet gelezen, geen landing.
+        let mut mem = SparseMem::default();
+        jump(&mut mem, 4);
+        assert_eq!(adopted(&mut mem, &PLAN, false), Ok(Boot::Stale));
+        assert_eq!(
+            mem.read64(PLAN.handoff_ptr_pa + 8),
+            0,
+            "stale pair not wiped"
+        );
+        assert_eq!(mem.read64(PLAN.stage_pa), 0, "a stale pair is no landing");
+        assert_eq!(adopted(&mut mem, &PLAN, false), Ok(Boot::Cold));
+        // Ook een blob dat niet decodeert: geen BLOB_BAD en geen reset-lus.
+        mem.write64(PLAN.handoff_ptr_pa, PLAN.own_ram_end);
+        mem.write64(PLAN.handoff_ptr_pa + 8, HAND_MAGIC);
+        mem.clear(PLAN.own_ram_end, HANDOFF_TAIL as u64);
+        assert_eq!(adopted(&mut mem, &PLAN, false), Ok(Boot::Stale));
     }
 
     #[test]
@@ -1262,13 +1375,13 @@ mod tests {
         mem.write64(PLAN.handoff_ptr_pa, 0x20_0000);
         mem.write64(PLAN.handoff_ptr_pa + 8, HAND_MAGIC);
         assert!(
-            adopted(&mut mem, &PLAN).is_err(),
+            adopted(&mut mem, &PLAN, true).is_err(),
             "read a blob somebody else placed"
         );
         mem.write64(PLAN.handoff_ptr_pa, PLAN.own_ram_end);
         mem.write64(PLAN.handoff_ptr_pa + 8, HAND_MAGIC);
         assert!(
-            adopted(&mut mem, &PLAN).is_err(),
+            adopted(&mut mem, &PLAN, true).is_err(),
             "garbage blob became a cold boot"
         );
         assert_eq!(

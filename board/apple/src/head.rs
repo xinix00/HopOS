@@ -187,6 +187,8 @@ __apple_head:
 _start_apple:
     msr daifset, #0xf
     mov x20, x0
+    // x3: het merkteken van een flip (cpu::boot::FLIP_ENTERED), na de BSS.
+    mov x22, x3
     mrs x21, CurrentEL
     lsr x21, x21, #2
     and x21, x21, #3
@@ -218,6 +220,11 @@ _start_apple:
     str xzr, [x3], #8
     b 2b
 3:
+    ldr x9, ={flip}
+    cmp x22, x9
+    cset x9, eq
+    adrp x10, {entered}
+    strb w9, [x10, :lo12:{entered}]
     cmp x21, #2
     b.ne 5f
 
@@ -284,6 +291,8 @@ __apple_tables:
     early = sym apple_early,
     magic = const STUB_MAGIC,
     mair = const cpu::boot::MAIR,
+    flip = const cpu::boot::FLIP_ENTRY,
+    entered = sym cpu::boot::FLIP_ENTERED,
     tcr_base = const crate::mmu::tcr(0),
     sctlr = const crate::mmu::SCTLR,
     tables = const crate::mmu::TABLES,

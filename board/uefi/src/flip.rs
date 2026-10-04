@@ -172,8 +172,12 @@ fn take_seed() {
 
 /// De flip-ingang, met de MMU van de pagina aan en vóór `kmain`: de feiten
 /// terug in de statics van DEZE kern. De assembly toetste de magic al.
+///
+/// Alleen een sprong komt hier (x1 = 0, geen SystemTable): dit is het
+/// merkteken van een flip op UEFI (`cpu::boot::FLIP_ENTERED`).
 #[unsafe(no_mangle)]
 extern "C" fn hopos_efi_flip_facts(pa: u64) {
+    cpu::boot::FLIP_ENTERED.store(true, Relaxed);
     if pa != FLIP_FACTS_PA || dev::read64(at(W_VERSION)) != FACTS_VERSION {
         return;
     }
