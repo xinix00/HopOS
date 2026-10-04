@@ -18,7 +18,7 @@ bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
 | Wat | Hoe |
 | --- | --- |
 | De bewoners (Hop en elke app) | Hun kooien, partities en cores blijven staan; het handoff-blob draagt de boekhouding en de nieuwe kern adopteert ze (`HOPOS_FLIP_ADOPT`). Hop wordt niet herstart. |
-| De gepubliceerde poorten | De nieuwe kern publiceert ze opnieuw (`HOPOS_HOP_PUBLISH`, `republish`); een TCP-verbinding naar een gepubliceerde poort overleeft de sprong (DNAT is stateloos). |
+| De gepubliceerde poorten | De nieuwe kern publiceert ze opnieuw (`republish`, ook die van Hop: `slot 1: 2 port(s) published ... HOPOS_SLOT_PUBLISH`); een TCP-verbinding naar een gepubliceerde poort overleeft de sprong (DNAT is stateloos). |
 | De NAT-flows (conntrack) | De switch-actor geeft een snapshot als waarde (`Command::SnapshotNat`) en zet daarmee de masquerade dicht; na de landing houdt de nieuwe switch de node-poorten vast vóór zijn eerste ronde, en na de adoptie komen de flows terug (`RestoreNat`). Een UITGAANDE TCP-verbinding van een app loopt zo door, over de slirp van QEMU heen: de toets FLIPCONN (hieronder). |
 | De volumes (hopfs) | Vóór de sprong legt de actor de boom vast en neemt hij niets meer aan (`HOPOS_FS_FROZEN generation=N`); de nieuwe kern mount precies die generatie (`HOPOS_FS_UP fresh=0 generation=N`). |
 | De switch-code van de app-cores | Blijft staan; de nieuwe kern adopteert haar alleen bij een gelijke som, en die som toetst de oude kern al vóór de sprong. |

@@ -2,12 +2,12 @@
 //! dat de driver op de used-ring wacht, leest de klok de keten die de driver
 //! klaarzette en voert hem uit op een schijf in RAM, zoals QEMU dat doet.
 //!
-//! Alles gaat over het ene blokcontract: `start` en `poll_done`, met
-//! `Paced` en een pollende `Pace` afgedraaid door `block_on`, zoals de
-//! meetbank vóór de executor.
+//! Alles gaat over het ene blokcontract: `start_tag` en `poll_tag` (ticket
+//! 0), achter de `Queue` met een pollende `Pace` afgedraaid door `block_on`,
+//! zoals de meetbank vóór de executor.
 
 use super::*;
-use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
+use blkdev::{AsyncBlockDevice, BlockIo, Queue, Spin, block_on};
 use driver_virtiopci::{FEAT_VERSION_1_HI, status};
 use std::cell::{Cell, RefCell};
 use std::vec;
@@ -132,9 +132,25 @@ fn fake(sectors: u64, flush: bool) -> (VirtioBlk, Vec<u64>, Vec<u64>) {
     (b, regs, mem)
 }
 
-/// De driver zoals hopfs hem ziet, met een `Pace` die pollt.
-fn blk<T: Transport>(b: &mut VirtioBlk<T>) -> Paced<&mut VirtioBlk<T>, Spin> {
-    Paced::new(b, Spin)
+/// `read` zoals hopfs hem doet: door de wachtrij, met een `Pace` die pollt.
+fn rd<T: Transport>(b: &mut VirtioBlk<T>, lba: u64, buf: &mut [u8]) -> blkdev::Result {
+    let q = Queue::new(b, Spin);
+    let mut io = &q;
+    block_on(io.read(lba, buf))
+}
+
+/// `write` door de wachtrij.
+fn wr<T: Transport>(b: &mut VirtioBlk<T>, lba: u64, buf: &[u8]) -> blkdev::Result {
+    let q = Queue::new(b, Spin);
+    let mut io = &q;
+    block_on(io.write(lba, buf))
+}
+
+/// `flush` door de wachtrij.
+fn fl<T: Transport>(b: &mut VirtioBlk<T>) -> blkdev::Result {
+    let q = Queue::new(b, Spin);
+    let mut io = &q;
+    block_on(io.flush())
 }
 
 fn seen() -> Vec<(u32, u64, u32, u16)> {
@@ -145,11 +161,11 @@ fn seen() -> Vec<(u32, u64, u32, u16)> {
 fn write_then_read_round_trips_through_the_chain() {
     let (mut b, _r, _m) = fake(64, true);
     let data: Vec<u8> = (0..4096u32).map(|i| (i * 7) as u8).collect();
-    block_on(blk(&mut b).write(8, &data)).unwrap();
+    wr(&mut b, 8, &data).unwrap();
     let mut got = vec![0u8; 4096];
-    block_on(blk(&mut b).read(8, &mut got)).unwrap();
+    rd(&mut b, 8, &mut got).unwrap();
     assert!(got == data, "read back differs");
-    block_on(blk(&mut b).flush()).unwrap();
+    fl(&mut b).unwrap();
     assert_eq!(
         seen(),
         vec![
@@ -169,7 +185,7 @@ fn large_transfers_split_at_the_dma_buffer() {
     let sectors = (3 * MAX_TRANSFER as u64) / SECTOR;
     let (mut b, _r, _m) = fake(sectors, false);
     let data = vec![0x5au8; 2 * MAX_TRANSFER + 512];
-    block_on(blk(&mut b).write(0, &data)).unwrap();
+    wr(&mut b, 0, &data).unwrap();
     let per = MAX_TRANSFER as u64 / SECTOR;
     let log: Vec<(u64, u32)> = seen().iter().map(|e| (e.1, e.2)).collect();
     assert_eq!(
@@ -181,7 +197,7 @@ fn large_transfers_split_at_the_dma_buffer() {
         ]
     );
     // Zonder FLUSH-feature is een flush niets.
-    block_on(blk(&mut b).flush()).unwrap();
+    fl(&mut b).unwrap();
     assert_eq!(seen().len(), 3);
 }
 
@@ -189,15 +205,15 @@ fn large_transfers_split_at_the_dma_buffer() {
 fn out_of_range_and_unaligned_requests_never_reach_the_device() {
     let (mut b, _r, _m) = fake(16, true);
     assert_eq!(
-        block_on(blk(&mut b).write(15, &[0; 1024])),
+        wr(&mut b, 15, &[0; 1024]),
         Err(blkdev::Error::OutOfRange { lba: 15, len: 1024 })
     );
     assert_eq!(
-        block_on(blk(&mut b).read(0, &mut [0; 100])),
+        rd(&mut b, 0, &mut [0; 100]),
         Err(blkdev::Error::OutOfRange { lba: 0, len: 100 })
     );
     assert_eq!(
-        b.start(Op::Read {
+        b.start_tag(Op::Read {
             lba: u64::MAX,
             len: 512
         }),
@@ -207,7 +223,7 @@ fn out_of_range_and_unaligned_requests_never_reach_the_device() {
         })
     );
     assert_eq!(
-        b.start(Op::Read {
+        b.start_tag(Op::Read {
             lba: 0,
             len: MAX_TRANSFER + 512
         }),
@@ -231,26 +247,19 @@ fn a_silent_device_kills_the_driver_loudly() {
     );
     DEV.with(|d| d.borrow_mut().as_mut().unwrap().mute = false);
     // Het verzoek kan nog lopen: niets gaat meer naar het device.
-    assert_eq!(
-        block_on(blk(&mut b).read(2, &mut [0; 512])),
-        Err(blkdev::Error::Dead)
-    );
-    assert_eq!(
-        block_on(blk(&mut b).write(3, &[0; 512])),
-        Err(blkdev::Error::Dead)
-    );
+    assert_eq!(rd(&mut b, 2, &mut [0; 512]), Err(blkdev::Error::Dead));
+    assert_eq!(wr(&mut b, 3, &[0; 512]), Err(blkdev::Error::Dead));
 }
 
 #[test]
 fn a_request_submits_then_completes_and_copies_a_read_out() {
-    let (b, _r, _m) = fake(64, true);
-    let mut p = Paced::new(b, Spin);
+    let (mut b, _r, _m) = fake(64, true);
     let data: Vec<u8> = (0..8192u32).map(|i| (i * 13) as u8).collect();
-    block_on(p.write(16, &data)).unwrap();
+    wr(&mut b, 16, &data).unwrap();
     let mut got = vec![0u8; 8192];
-    block_on(p.read(16, &mut got)).unwrap();
+    rd(&mut b, 16, &mut got).unwrap();
     assert!(got == data, "read back differs");
-    block_on(p.flush()).unwrap();
+    fl(&mut b).unwrap();
     assert_eq!(
         seen(),
         vec![
@@ -260,30 +269,29 @@ fn a_request_submits_then_completes_and_copies_a_read_out() {
         ]
     );
     // Eén keer kijken is niet genoeg: het device (de klok) moet eerst lopen.
-    let b = p.dev_mut();
-    b.start(Op::Flush).unwrap();
-    assert!(b.poll_done(&mut []).is_pending());
-    assert_eq!(b.poll_done(&mut []), Poll::Ready(Ok(())));
+    assert_eq!(b.start_tag(Op::Flush), Ok(0));
+    assert!(b.poll_tag(0, &mut []).is_pending());
+    assert_eq!(b.poll_tag(0, &mut []), Poll::Ready(Ok(())));
 }
 
 #[test]
 fn an_abandoned_request_blocks_the_next_until_it_is_back() {
     let (mut b, _r, _m) = fake(16, true);
     DEV.with(|d| d.borrow_mut().as_mut().unwrap().mute = true);
-    b.start(Op::Read { lba: 1, len: 512 }).unwrap();
+    b.start_tag(Op::Read { lba: 1, len: 512 }).unwrap();
     // De wachter ging weg; het device antwoordt niet: niets nieuws erbij.
     assert_eq!(
-        b.start(Op::Write {
+        b.start_tag(Op::Write {
             lba: 2,
             data: &[1; 512]
         }),
         Err(blkdev::Error::Busy)
     );
-    assert_eq!(b.start(Op::Flush), Err(blkdev::Error::Busy));
+    assert_eq!(b.start_tag(Op::Flush), Err(blkdev::Error::Busy));
     DEV.with(|d| d.borrow_mut().as_mut().unwrap().mute = false);
     now(); // Het device haalt in.
     // Nu komt het oude verzoek terug (en wordt weggegooid), dan het nieuwe.
-    block_on(blk(&mut b).write(2, &[1; 512])).unwrap();
+    wr(&mut b, 2, &[1; 512]).unwrap();
     assert_eq!(
         seen().iter().map(|e| e.0).collect::<Vec<_>>(),
         [T_IN, T_OUT]
@@ -400,9 +408,9 @@ fn init_over_any_transport_then_a_round_trip() {
     assert_eq!(t.status.get() & status::DRIVER_OK, status::DRIVER_OK);
 
     let data = vec![0xa5u8; 1024];
-    block_on(blk(&mut b).write(4, &data)).unwrap();
+    wr(&mut b, 4, &data).unwrap();
     let mut got = vec![0u8; 1024];
-    block_on(blk(&mut b).read(4, &mut got)).unwrap();
+    rd(&mut b, 4, &mut got).unwrap();
     assert!(got == data, "read back differs");
     assert_eq!(b.t.notified.get(), 2, "one doorbell per request");
     assert_eq!(seen().len(), 2);

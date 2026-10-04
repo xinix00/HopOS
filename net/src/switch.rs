@@ -31,7 +31,7 @@ use core::time::Duration;
 use executor::{Executor, Sleeper};
 use sync::mpsc::Mailbox;
 use sync::spsc::{Receiver, Sender};
-use sync::{Either, Signal, select, yield_now};
+use sync::{Either, Oneshot, Signal, select, yield_now};
 
 /// Het aantal frames per poort per switch-ronde, zodat één drukke poort de
 /// rest niet verhongert.
@@ -63,97 +63,18 @@ pub const COMMANDS: usize = 16;
 /// De brievenbus van de switch.
 pub type Commands<'a, R, W> = Mailbox<Command<'a, R, W>, COMMANDS>;
 
-/// De bevestiging van een [`Command`]: de actor zet het resultaat en luidt
-/// de bel. Eén `Ack` per aanroeper, herbruikbaar.
-pub struct Ack {
-    done: Signal,
-    result: Mailbox<Result<u32>, 1>,
-}
+/// De bevestiging van een [`Command`]: de actor legt het resultaat erin,
+/// de aanroeper wacht erop (`ack.recv().await`). Eén `Ack` per aanroeper,
+/// herbruikbaar. Bij `Detach` betekent het antwoord: de switch raakt de
+/// ringen gegarandeerd niet meer aan (ze zijn gedropt), dus een ring-herinit
+/// mag.
+pub type Ack = Oneshot<Result<u32>>;
 
-impl Ack {
-    /// Een lege bevestiging.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            done: Signal::new(),
-            result: Mailbox::new(),
-        }
-    }
-
-    fn complete(&self, r: Result<u32>) {
-        // De plaats is leeg: één commando per `Ack` tegelijk. Een aanroeper
-        // die dat breekt, krijgt het eerste resultaat.
-        let _ = self.result.try_send(r);
-        self.done.set();
-    }
-
-    /// Wacht tot de actor het commando heeft uitgevoerd. Bij `Detach`
-    /// betekent terugkeer: de switch raakt de ringen gegarandeerd niet meer
-    /// aan (ze zijn gedropt), dus een ring-herinit mag.
-    pub async fn wait(&self) -> Result<u32> {
-        loop {
-            self.done.wait().await;
-            if let Some(r) = self.result.try_recv() {
-                return r;
-            }
-        }
-    }
-
-    /// Het resultaat als het er al is, zonder te wachten.
-    pub fn try_take(&self) -> Option<Result<u32>> {
-        let r = self.result.try_recv()?;
-        self.done.take();
-        Some(r)
-    }
-}
-
-impl Default for Ack {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// De antwoordplek van [`Command::SnapshotNat`]: de actor legt de snapshot
-/// erin en luidt de bel. Eén aanroeper tegelijk (de flip-taak).
-pub struct NatReply {
-    done: Signal,
-    /// De conntrack zoals de kern-flip hem meeneemt: de flows in de buffer
-    /// die de aanroeper meegaf (verplaatst, niet gedeeld, ingekort).
-    snap: Mailbox<NatState<Vec<FlowState>>, 1>,
-}
-
-impl NatReply {
-    /// Een lege antwoordplek.
-    #[must_use]
-    pub const fn new() -> Self {
-        Self {
-            done: Signal::new(),
-            snap: Mailbox::new(),
-        }
-    }
-
-    fn complete(&self, s: NatState<Vec<FlowState>>) {
-        let _ = self.snap.try_send(s);
-        self.done.set();
-    }
-
-    /// Wacht op de snapshot. Er leeft geen lening over de `.await`: de
-    /// snapshot komt als waarde terug.
-    pub async fn wait(&self) -> NatState<Vec<FlowState>> {
-        loop {
-            self.done.wait().await;
-            if let Some(s) = self.snap.try_recv() {
-                return s;
-            }
-        }
-    }
-}
-
-impl Default for NatReply {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// De antwoordplek van [`Command::SnapshotNat`]: de conntrack zoals de
+/// kern-flip hem meeneemt, in de buffer die de aanroeper meegaf
+/// (verplaatst, niet gedeeld, ingekort). Eén aanroeper tegelijk (de
+/// flip-taak).
+pub type NatReply = Oneshot<NatState<Vec<FlowState>>>;
 
 /// Een bericht aan de switch-actor.
 pub enum Command<'a, R, W> {
@@ -557,10 +478,8 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
     pub fn handle(&mut self, cmd: Command<'a, R, W>) {
         let now = (self.core.cfg.now)();
         match cmd {
-            Command::Attach { slot, tx, rx, ack } => {
-                ack.complete(self.attach(slot, tx, rx).map(|()| 0))
-            }
-            Command::Detach { slot, ack } => ack.complete(self.detach(slot).map(|()| 0)),
+            Command::Attach { slot, tx, rx, ack } => ack.put(self.attach(slot, tx, rx).map(|()| 0)),
+            Command::Detach { slot, ack } => ack.put(self.detach(slot).map(|()| 0)),
             Command::Publish {
                 proto,
                 node_port,
@@ -569,7 +488,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 ack,
             } => {
                 let max = self.core.cfg.max_slots;
-                ack.complete(
+                ack.put(
                     self.nat
                         .publish(proto, node_port, slot, slot_port, max)
                         .map(|()| 0),
@@ -577,25 +496,25 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             }
             Command::UnpublishSlot { slot, ack } => {
                 self.nat.unpublish_slot(slot);
-                ack.complete(Ok(0));
+                ack.put(Ok(0));
             }
             Command::SetUplink { uplink, ack } => {
                 self.nat.set_uplink(uplink);
-                ack.complete(Ok(0));
+                ack.put(Ok(0));
             }
             Command::HoldAdoption { ports, ack } => {
-                ack.complete(self.nat.hold_adoption(ports).map(|()| 0))
+                ack.put(self.nat.hold_adoption(ports).map(|()| 0))
             }
             Command::FinishAdoption { ack } => {
                 self.nat.finish_adoption();
-                ack.complete(Ok(0));
+                ack.put(Ok(0));
             }
             Command::RestoreNat { state, ack } => {
                 let ports = &self.core.ports;
                 let n =
                     self.nat
                         .restore(&state, |s| ports.get(s).is_some_and(Option::is_some), now);
-                ack.complete(Ok(u32::try_from(n).unwrap_or(u32::MAX)));
+                ack.put(Ok(u32::try_from(n).unwrap_or(u32::MAX)));
             }
             Command::SnapshotNat { mut buf, reply } => {
                 // Eerst dicht, dan lezen: zo staat er na de snapshot geen
@@ -605,7 +524,7 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
                 let st = self.nat.snapshot(now, &mut buf);
                 let (n, masq_next) = (st.flows.len(), st.masq_next);
                 buf.truncate(n);
-                reply.complete(NatState {
+                reply.put(NatState {
                     flows: buf,
                     masq_next,
                 });

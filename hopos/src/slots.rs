@@ -30,11 +30,12 @@
 //! als de bevoorrechte bewoner (PORT.md beslissing 1 en 2): `Placement::hop`
 //! (sharegroup `hop`, die de OS-core met de kern deelt: Hop draait in de
 //! idle van de kern, `cpu::el2::OsCore`), 64 MiB, de env met de `HOPOS_*`-keuzes,
-//! en het `Privilege`-token hoort bij slot 1 vanaf de boot (`main`). Daarna
-//! zet de switch de uplink-poorten van Hop door (8080 agent, 9080 leader)
-//! en bewaakt een taak de bewoner: elke wissel één regel, een fault of exit
-//! luid, zonder stop (wie Hop herstart is een volgende stap). Appspike
-//! plaatst de kern dan niet meer: dat doet Hop zelf, via de system-API.
+//! en het `Privilege`-token hoort bij slot 1 vanaf de boot (`main`). Zijn
+//! start draagt de uplink-poorten (8080 agent, 9080 leader), die de
+//! lifecycle doorzet zoals die van een jobspec, en daarna bewaakt een taak
+//! de bewoner: elke wissel één regel, een fault of exit luid, zonder stop
+//! (wie Hop herstart is een volgende stap). Appspike plaatst de kern dan
+//! niet meer: dat doet Hop zelf, via de system-API.
 
 extern crate alloc;
 
@@ -190,7 +191,7 @@ use alloc::vec::Vec;
 use board::Board;
 use board::stage::StagedRole;
 use cage::SlotCores;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
 use cpu::println;
@@ -252,8 +253,15 @@ const HOP_MEM: u64 = <crate::Machine as board::Board>::HOP_MEM;
 const HOP_VOLUME: (&[u8], &[u8]) = (b"/hop", b"/volumes/hop");
 
 /// De agent-poort van Hop; de leader luistert op poort + 1000 (zoals Go).
-/// Beide worden op de uplink doorgezet.
+/// Beide worden op de uplink doorgezet ([`HOP_PORTS`]).
 pub(crate) const HOP_PORT: u16 = 8080;
+
+/// De poorten van Hop op de uplink: de poorten van zijn start, zoals die
+/// van een jobspec (`StartSpec::ports`). De lifecycle zet ze door
+/// (`Cage::publish`, tcp en udp), draagt ze over een flip en zet ze daarna
+/// opnieuw door (`Lifecycle::republish`). Tot 04-10 zette de kern ze
+/// buiten de lifecycle door, alleen tcp, met twee eigen lussen.
+const HOP_PORTS: [u16; 2] = [HOP_PORT, HOP_PORT + 1000];
 
 /// Hoe lang de plaatsing van Hop op de DHCP-lease wacht voor
 /// `HOPOS_NODE_IP`. QEMU's user-net antwoordt binnen een milliseconde; zonder
@@ -318,6 +326,10 @@ pub(crate) fn start(
             return;
         }
     };
+    let mut adopt = adopt;
+    if let Some(states) = adopt.as_mut() {
+        carry_hop_ports(states);
+    }
     if let Some(states) = &adopt {
         for st in states {
             let r = Slot::new(st.slot).map_or(Err(kern::cage::CageError { code: 0 }), |s| {
@@ -425,7 +437,10 @@ pub(crate) fn start(
                         states.len()
                     );
                     crate::flip::adopted_ok();
-                    // De poorten van de jobspecs: de NAT van deze kern is leeg.
+                    // De poorten van Hop en de jobspecs: de NAT van deze kern
+                    // is leeg. Zonder switch (een NIC die pas met een retry
+                    // opkomt) gaat dat mis; dan later, zie [`republish`].
+                    REPUBLISH.store(!crate::net::switch_up(), Relaxed);
                     lc.republish().await;
                 }
                 Err(e) => println!("slots: adoption refused: {e} HOPOS_FLIP_ADOPT_FAIL"),
@@ -465,6 +480,52 @@ pub(crate) fn start(
     };
     if let Err(e) = spawned {
         println!("slots: first placement not spawned: {e:?} HOPOS_SLOT_SPAWN");
+    }
+}
+
+/// FLIP: een Hop van een kern van vóór 04-10 komt zonder poorten over (die
+/// kern zette ze buiten de lifecycle door). Hij krijgt ze hier, zodat de
+/// her-publicatie ze opent zoals elke andere; slot [`HOP_SLOT`] is Hop,
+/// zoals bij `resume_hop`.
+fn carry_hop_ports(states: &mut [kern::slots::SlotState]) {
+    for st in states
+        .iter_mut()
+        .filter(|st| st.slot == HOP_SLOT && st.ports.is_empty())
+    {
+        st.ports = hop_ports();
+    }
+}
+
+/// [`HOP_PORTS`] als lijst; leeg als de heap op is (dan opent er niets, en
+/// zegt de ontbrekende `HOPOS_SLOT_PUBLISH` het).
+fn hop_ports() -> Vec<u16> {
+    let mut v = Vec::new();
+    if v.try_reserve_exact(HOP_PORTS.len()).is_ok() {
+        v.extend_from_slice(&HOP_PORTS);
+    }
+    v
+}
+
+/// FLIP: de her-publicatie na de adoptie liep zonder switch (de NIC kwam
+/// niet op bij de boot van deze kern): elke poort werd geweigerd en niets
+/// staat open. [`republish`] doet hem over zodra de switch er is.
+static REPUBLISH: AtomicBool = AtomicBool::new(false);
+
+/// Zet de poorten van de geadopteerde bewoners alsnog door, als de
+/// her-publicatie na de adoptie zonder switch liep (`main::nic_retry`, na
+/// de NIC). Eén keer; daarna staat de NAT van deze kern zoals na een flip
+/// met net.
+pub(crate) fn republish(exec: &'static Executor) {
+    if !REPUBLISH.swap(false, Relaxed) {
+        return;
+    }
+    let ask_once = async {
+        if let Err(e) = ask(Request::Republish).await {
+            println!("slots: ports after the late NIC: {e} HOPOS_SLOT_PUBLISH_FAIL");
+        }
+    };
+    if exec.spawn(ask_once).is_err() {
+        println!("slots: late republish not spawned HOPOS_SLOT_SPAWN");
     }
 }
 
@@ -671,10 +732,17 @@ async fn place_hop(
             return;
         }
     };
+    // Zonder switch (geen NIC) is er niets door te zetten, en zou de start
+    // op zijn poorten falen.
+    let ports = if crate::net::switch_up() {
+        hop_ports()
+    } else {
+        Vec::new()
+    };
     // Vóór de plaatsing: zodra de poort aan de switch hangt, mag hij niet
     // meer op Hop's ring wachten. Na de plaatsing volgt de echte core.
     set_resident(slot.get(), hop_on_os());
-    let entry = match place(slot, img, HOP_MEM, at, env.as_bytes(), volume).await {
+    let entry = match place(slot, img, HOP_MEM, at, env.as_bytes(), volume, ports).await {
         Ok(e) => e,
         Err(e) => {
             println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL");
@@ -694,34 +762,18 @@ async fn place_hop(
         env.len(),
         crate::BOARD.core_class(cpu)
     );
-    for port in [HOP_PORT, HOP_PORT.saturating_add(1000)] {
-        match crate::net::publish(slot.get(), port).await {
-            Ok(()) => println!("net: uplink tcp :{port} -> slot {slot} :{port} HOPOS_HOP_PUBLISH"),
-            Err(e) => println!(
-                "net: uplink tcp :{port} not published to slot {slot}: {e} HOPOS_HOP_PUBLISH_FAIL"
-            ),
-        }
-    }
     watch_hop(exec, &plan, slot, core).await;
 }
 
-/// FLIP: Hop kwam mee over een kern-flip. Zijn kooi, ringen en servicer
-/// zijn al terug (`start`); de uplink-poorten zijn van de switch van déze
-/// kern en gaan opnieuw open, en de bewaking loopt verder.
+/// FLIP: Hop kwam mee over een kern-flip. Zijn kooi, ringen, servicer en
+/// poorten zijn al terug (`start`, de adoptie en `Lifecycle::republish`);
+/// de bewaking loopt verder.
 async fn resume_hop(exec: &'static Executor, plan: abi::layout::Plan, core: usize) {
     let Some(slot) = Slot::new(HOP_SLOT) else {
         return;
     };
     set_resident(slot.get(), core == 0);
     let _ = wait_uplink(exec).await;
-    for port in [HOP_PORT, HOP_PORT.saturating_add(1000)] {
-        match crate::net::publish(slot.get(), port).await {
-            Ok(()) => println!("net: uplink tcp :{port} -> slot {slot} :{port} HOPOS_HOP_PUBLISH"),
-            Err(e) => println!(
-                "net: uplink tcp :{port} not published to slot {slot}: {e} HOPOS_HOP_PUBLISH_FAIL"
-            ),
-        }
-    }
     println!(
         "slot {slot}: Hop carried over the flip on core {core}, not restarted HOPOS_HOP_RESUMED"
     );
@@ -959,7 +1011,7 @@ async fn run_once(
         cores: 1,
         ..Placement::default()
     };
-    let entry = match place(slot, img, FIRST_MEM, at, env, Vec::new()).await {
+    let entry = match place(slot, img, FIRST_MEM, at, env, Vec::new(), Vec::new()).await {
         Ok(e) => e,
         Err(e) => {
             println!("slot {slot}: not started: {e} HOPOS_SLOT_FAIL");
@@ -1010,9 +1062,11 @@ async fn place(
     at: Placement,
     env: &[u8],
     mounts: Vec<Mount>,
+    ports: Vec<u16>,
 ) -> Result<u64, Fail> {
     let mut spec = StartSpec::new(slot, mem, at);
     spec.mounts = mounts;
+    spec.ports = ports;
     kern::system::place(INBOX, &BOOT_REPLY, &mut DevMem, spec, img, env).await
 }
 

@@ -611,9 +611,6 @@ pub struct Nvme<T: Transport> {
     free: [u64; PAGES / 64],
     /// Per ticket zijn pagina's, in volgorde.
     pages: [[u16; TAG_PAGES]; DEPTH],
-    /// Het ticket van de ene opdracht van
-    /// [`blkdev::AsyncBlockDevice::start`] (de meetbank, de tests).
-    single: Option<usize>,
     /// Het blok waar de laatste lees van de eigenaar eindigde: begint de
     /// volgende daar, dan leest hij sequentieel en komt er een read-ahead.
     seq_end: u64,
@@ -665,7 +662,6 @@ impl<T: Transport> Nvme<T> {
             owner: [0; Q_ENTRIES as usize],
             free: [u64::MAX; PAGES / 64],
             pages: [[0; TAG_PAGES]; DEPTH],
-            single: None,
             seq_end: u64::MAX,
             ahead_hits: 0,
             ahead_waste: 0,
@@ -1564,10 +1560,6 @@ impl<T: Transport> Nvme<T> {
 /// aanroeper (hopfs: één call per app tegelijk, een flush pas na de
 /// schrijfs die hij moet dekken); de controller mag ze in elke volgorde
 /// afronden.
-///
-/// Daarnaast de ene opdracht van [`start`](blkdev::AsyncBlockDevice::start)
-/// en [`poll_done`](blkdev::AsyncBlockDevice::poll_done) (de meetbank, via
-/// `blkdev::Paced`): dat is gewoon een ticket dat de driver zelf onthoudt.
 impl<T: Transport> blkdev::Disk for Nvme<T> {
     fn sectors(&self) -> u64 {
         Nvme::sectors(self)
@@ -1618,35 +1610,6 @@ impl<T: Transport> blkdev::AsyncBlockDevice for Nvme<T> {
             self.free_pages()
         )?;
         Ok(self.commands)
-    }
-
-    fn start(&mut self, op: Op<'_>) -> blkdev::Result {
-        if let Some(i) = self.single {
-            // De wachter van de vorige ging weg (een gedropte `Done`): pas
-            // als dat ticket terug is, zijn zijn pagina's weer van ons.
-            self.reap_io().map_err(|e| blk_err(&e, 0, 0))?;
-            if self.poll_ticket(i, &mut []).is_pending() {
-                return Err(blkdev::Error::Busy);
-            }
-            self.single = None;
-        }
-        self.single = Some(self.start_op(op)?);
-        Ok(())
-    }
-
-    fn poll_done(&mut self, into: &mut [u8]) -> Poll<blkdev::Result> {
-        let Some(i) = self.single else {
-            return Poll::Ready(Err(blkdev::Error::Io { lba: 0 }));
-        };
-        let lba = self.lba_of(i);
-        let r = match self.reap_io() {
-            Err(e) => Poll::Ready(Err(e)),
-            Ok(_) => self.poll_ticket(i, into),
-        };
-        if r.is_ready() {
-            self.single = None;
-        }
-        r.map_err(|e| blk_err(&e, lba, 0))
     }
 }
 

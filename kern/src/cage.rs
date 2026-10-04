@@ -268,6 +268,16 @@ pub trait Cage {
     fn unpublish(&mut self, slot: Slot) {
         let _ = slot;
     }
+    /// Haalt de frame-ringen van `slot` van de switch (die [`Cage::build`]
+    /// eraan hing) en wacht tot de switch ze losliet: daarna raakt de switch
+    /// de staart van de partitie niet meer aan. De lifecycle roept dit bij
+    /// elke stop vóór de kill-vlag, en na een start die na de bouw toch
+    /// niet doorging, dus altijd vóór de partitie terug kan. Zonder netwerk
+    /// is er niets los te halen.
+    fn detach(&mut self, slot: Slot) -> impl Future<Output = ()> {
+        let _ = slot;
+        core::future::ready(())
+    }
 }
 
 /// De console van de kern: markerregels en de logregels van apps.

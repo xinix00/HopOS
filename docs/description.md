@@ -293,12 +293,12 @@ procedure).
 | --- | --- | --- |
 | `dev` (0,9k) | MMIO-lezen en -schrijven, `Reg<T>`, kopieën, barrières, `push`/`pull` (cache), `poll_until`, `delay`, de memcpy-lussen. Op de host no-ops. | ± 50 crates |
 | `bounded` (0,3k) | `BoundedVec<T, N>` en `Full<T>`. Geen map, set of ringbuffer. | 35 bestanden |
-| `sync` (1,5k) | `Signal`, `Stop`, `AtomicWaker`, `WakerSet`, `spsc::Channel`, `mpsc::Mailbox`, `Local`/`LocalCell`, `select`, `Pool` (futures zonder heap), `yield_now`. Geen mutex, geen oneshot. | overal |
+| `sync` (1,5k) | `Signal`, `Stop`, `AtomicWaker`, `WakerSet`, `spsc::Channel`, `mpsc::Mailbox`, `Local`/`LocalCell`, `select`, `Pool` (futures zonder heap), `yield_now`, `Oneshot` met `oneshot::call` (verzoek en antwoord). Geen mutex. | overal |
 | `heap` (1,2k) | De allocator van kern en apps: vrije lijsten met grenslabels, klassen per 16 bytes tot 1 KiB, `HeapLock` (spinslot met core-id). | `board/src/heap.rs`, `applib/src/heap.rs` |
 | `executor` (0,8k) | Eén per core: taken in een box, timerwiel, ready-bits, `Sleeper`-trait, uitstelbare timers. | hopos, applib, net |
 | `abi` (7k) | Zie §4.5. `forbid(unsafe)`. | kern, net, cpu, boards, applib, hopos, gui |
 | `netdev` (0,1k) | Het NIC-contract: `transmit`, `receive`, `flush`, `mac`, `irq`. | 7 NIC-drivers, net, applib |
-| `blkdev` (1,3k) | Het blokcontract: `AsyncBlockDevice` (één opdracht of tickets), `Pace`, `Paced`, `Queue`, `BlockIo` voor hopfs. | nvme, virtioblk, hopos |
+| `blkdev` (1,3k) | Het blokcontract: `AsyncBlockDevice` (tickets; zonder tags één, ticket 0), `Pace`, `Queue` als enige voorkant, `BlockIo` voor hopfs. | nvme, virtioblk, hopos |
 
 ### 5.2 cpu en fw
 

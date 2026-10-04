@@ -9,7 +9,7 @@
 //! (`pci`, `apple`) gebruiken dezelfde controller voor hun eigen toetsen.
 
 use super::*;
-use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
+use blkdev::{AsyncBlockDevice, BlockIo, Spin, block_on};
 use std::cell::RefCell;
 use std::vec;
 use std::vec::Vec;
@@ -332,9 +332,31 @@ fn sim<const L: bool>(lbads: u8, mdts: u8) -> (Mem, Nvme<Sim<L>>) {
     (m, n)
 }
 
-/// De driver zoals hopfs hem ziet, met een `Pace` die pollt.
-fn blk<T: Transport>(n: &mut Nvme<T>) -> Paced<&mut Nvme<T>, Spin> {
-    Paced::new(n, Spin)
+/// De driver zoals hopfs hem ziet: achter de wachtrij, met een `Pace` die
+/// pollt.
+fn blk<T: Transport>(n: &mut Nvme<T>) -> blkdev::Queue<&mut Nvme<T>, Spin> {
+    blkdev::Queue::new(n, Spin)
+}
+
+/// `read` door de wachtrij, afgedraaid.
+fn rd<T: Transport>(n: &mut Nvme<T>, lba: u64, b: &mut [u8]) -> blkdev::Result {
+    let q = blk(n);
+    let mut io = &q;
+    block_on(io.read(lba, b))
+}
+
+/// `write` door de wachtrij, afgedraaid.
+fn wr<T: Transport>(n: &mut Nvme<T>, lba: u64, b: &[u8]) -> blkdev::Result {
+    let q = blk(n);
+    let mut io = &q;
+    block_on(io.write(lba, b))
+}
+
+/// `flush` door de wachtrij, afgedraaid.
+fn fl<T: Transport>(n: &mut Nvme<T>) -> blkdev::Result {
+    let q = blk(n);
+    let mut io = &q;
+    block_on(io.flush())
 }
 
 /// De I/O-opdrachten die de controller uitvoerde: (opcode, LBA, blokken).
@@ -348,20 +370,12 @@ fn io_log() -> Vec<(u8, u64, u32)> {
     })
 }
 
-/// Pollt de ene opdracht van de eigenaar een paar keer (de klok loopt mee).
-fn poll<T: Transport>(n: &mut Nvme<T>, into: &mut [u8]) -> Poll<blkdev::Result> {
-    for _ in 0..3 {
-        if let Poll::Ready(r) = n.poll_done(into) {
-            return Poll::Ready(r);
-        }
-    }
-    Poll::Pending
-}
-
-/// Wacht op ticket `i` zoals de wachtrij het doet: ophalen, dan kijken.
+/// Wacht op ticket `t` zoals de wachtrij het doet: ophalen, dan kijken (de
+/// klok loopt mee). Een fout bij het ophalen is een dood device: dan geeft
+/// `poll_tag` de fout.
 fn wait_tag<T: Transport>(n: &mut Nvme<T>, t: usize, into: &mut [u8]) -> Poll<blkdev::Result> {
     for _ in 0..3 {
-        n.reap().unwrap();
+        let _ = n.reap();
         if let Poll::Ready(r) = n.poll_tag(t, into) {
             return Poll::Ready(r);
         }
@@ -382,12 +396,12 @@ fn every_size_round_trips_over_the_prp_lists() {
         let (m, mut n) = sim::<false>(lbads, mdts);
         for len in [1 << lbads, 4096, 8192, 12288, 40960, n.step()] {
             let data: Vec<u8> = (0..len).map(|i| (i * 13 + len) as u8).collect();
-            block_on(blk(&mut n).write(16, &data)).unwrap();
+            wr(&mut n, 16, &data).unwrap();
             let mut got = vec![0u8; len];
-            block_on(blk(&mut n).read(16, &mut got)).unwrap();
+            rd(&mut n, 16, &mut got).unwrap();
             assert!(got == data, "{len} bytes differ on 2^{lbads}");
         }
-        block_on(blk(&mut n).flush()).unwrap();
+        fl(&mut n).unwrap();
         assert_eq!(io_log().last(), Some(&(IO_FLUSH, 0, 1)));
         assert_eq!(n.free_pages(), PAGES, "every page back");
         if lbads == 9 {
@@ -414,12 +428,13 @@ fn a_ticket_above_the_mdts_is_several_commands() {
         assert_eq!(AsyncBlockDevice::max_transfer(&n), 16 * 16384);
         let data: Vec<u8> = (0..40960u32).map(|i| (i * 7) as u8).collect();
         with(|c| c.hold = true);
-        n.start(Op::Write {
-            lba: 24,
-            data: &data,
-        })
-        .unwrap();
-        assert!(poll(&mut n, &mut []).is_pending());
+        let t = n
+            .start_tag(Op::Write {
+                lba: 24,
+                data: &data,
+            })
+            .unwrap();
+        assert!(wait_tag(&mut n, t, &mut []).is_pending());
         assert_eq!(
             io_log(),
             [(IO_WRITE, 3, 4), (IO_WRITE, 7, 4), (IO_WRITE, 11, 2)]
@@ -436,18 +451,21 @@ fn a_ticket_above_the_mdts_is_several_commands() {
         assert_eq!(cids, [0, 1, 2]);
         release(2);
         release(0);
-        assert!(poll(&mut n, &mut []).is_pending(), "one command still out");
+        assert!(
+            wait_tag(&mut n, t, &mut []).is_pending(),
+            "one command still out"
+        );
         release(1);
-        assert_eq!(poll(&mut n, &mut []), Poll::Ready(Ok(())));
+        assert_eq!(wait_tag(&mut n, t, &mut []), Poll::Ready(Ok(())));
         with(|c| c.hold = false);
         let mut got = vec![0u8; data.len()];
-        block_on(blk(&mut n).read(24, &mut got)).unwrap();
+        rd(&mut n, 24, &mut got).unwrap();
         assert!(got == data);
         // Het contract rekent in 512 bytes: een LBA die niet op een blok
         // valt, gaat niet naar de controller.
         assert_eq!(n.sectors(), NBLOCKS * 8);
         assert_eq!(
-            block_on(blk(&mut n).read(25, &mut [0; 4096])),
+            rd(&mut n, 25, &mut [0; 4096]),
             Err(blkdev::Error::OutOfRange { lba: 25, len: 4096 })
         );
     }
@@ -473,9 +491,9 @@ fn a_failed_command_fails_its_ticket_not_the_driver() {
         })
     );
     assert_eq!(io_log().len(), 3);
-    let r = block_on(blk(&mut n).read(32, &mut b));
+    let r = rd(&mut n, 32, &mut b);
     assert_eq!(r, Err(blkdev::Error::Io { lba: 32 }));
-    block_on(blk(&mut n).read(0, &mut b[..4096])).unwrap();
+    rd(&mut n, 0, &mut b[..4096]).unwrap();
     assert!(is_blocks(&b[..4096], 0));
     assert_eq!(n.free_pages(), PAGES);
 }
@@ -493,7 +511,7 @@ fn invalid_transfers_never_reach_the_controller() {
         (0, big),
     ] {
         assert_eq!(
-            n.start(Op::Write {
+            n.start_tag(Op::Write {
                 lba,
                 data: &vec![0; len]
             }),
@@ -502,7 +520,7 @@ fn invalid_transfers_never_reach_the_controller() {
         );
     }
     assert_eq!(
-        block_on(blk(&mut n).read(NBLOCKS, &mut [0; 512])),
+        rd(&mut n, NBLOCKS, &mut [0; 512]),
         Err(blkdev::Error::OutOfRange {
             lba: NBLOCKS,
             len: 512
@@ -510,24 +528,6 @@ fn invalid_transfers_never_reach_the_controller() {
     );
     assert_eq!(io_log(), []);
     assert_eq!(n.free_pages(), PAGES);
-}
-
-#[test]
-fn an_abandoned_command_blocks_the_next_until_it_is_back() {
-    let (_m, mut n) = sim::<false>(9, 0);
-    with(|c| c.mute = true);
-    n.start(Op::Read { lba: 1, len: 512 }).unwrap();
-    assert_eq!(n.start(Op::Flush), Err(blkdev::Error::Busy));
-    let w = Op::Write {
-        lba: 2,
-        data: &[1; 512],
-    };
-    assert_eq!(n.start(w), Err(blkdev::Error::Busy));
-    with(|c| c.mute = false);
-    now(); // De controller haalt in.
-    block_on(blk(&mut n).write(2, &[1; 512])).unwrap();
-    let ops: Vec<u8> = io_log().iter().map(|e| e.0).collect();
-    assert_eq!(ops, [IO_READ, IO_WRITE]);
 }
 
 /// `correctness_test.go`: een ontbrekende completion maakt de controller
@@ -548,11 +548,11 @@ fn a_timeout_kills_the_driver_and_keeps_its_pages() {
         lba: 1,
         data: &[99; 512],
     };
-    assert_eq!(n.start(w), Err(blkdev::Error::Dead));
+    assert_eq!(n.start_tag(w), Err(blkdev::Error::Dead));
     assert_eq!(dev::read8(page), 0x11, "page reused after a timeout");
     assert_eq!(n.free_pages(), PAGES - 1, "the page stays the controller's");
     assert_eq!(n.io.tail, 1, "queue reused after a timeout");
-    assert_eq!(block_on(blk(&mut n).flush()), Err(blkdev::Error::Dead));
+    assert_eq!(fl(&mut n), Err(blkdev::Error::Dead));
 }
 
 #[test]
@@ -561,13 +561,16 @@ fn a_foreign_completion_or_a_dead_transport_kills_the_driver() {
     with(|c| c.wrong_cid = true);
     let i = n.start_flush().unwrap();
     assert_eq!(n.wait_ticket(i, &mut []), Err(Error::Cid { got: 7 }));
-    assert_eq!(block_on(blk(&mut n).flush()), Err(blkdev::Error::Dead));
+    assert_eq!(fl(&mut n), Err(blkdev::Error::Dead));
 
     let (_m, mut n) = sim::<true>(9, 0);
     with(|c| (c.hold, c.crashed) = (true, true));
-    n.start(Op::Read { lba: 0, len: 512 }).unwrap();
-    assert_eq!(poll(&mut n, &mut []), Poll::Ready(Err(blkdev::Error::Dead)));
-    assert_eq!(n.start(Op::Flush), Err(blkdev::Error::Dead));
+    let t = n.start_tag(Op::Read { lba: 0, len: 512 }).unwrap();
+    assert_eq!(
+        wait_tag(&mut n, t, &mut []),
+        Poll::Ready(Err(blkdev::Error::Dead))
+    );
+    assert_eq!(n.start_tag(Op::Flush), Err(blkdev::Error::Dead));
 }
 
 #[test]
@@ -601,37 +604,37 @@ const HB: u64 = HAP as u64 / 4096;
 /// Leest één hap op `lba` met de controller vastgehouden: geeft de
 /// opdracht met `cid` vrij en wacht.
 fn read_held<T: Transport>(n: &mut Nvme<T>, lba: u64, cid: u16, b: &mut [u8]) {
-    n.start(Op::Read { lba, len: HAP }).unwrap();
+    let t = n.start_tag(Op::Read { lba, len: HAP }).unwrap();
     assert!(
-        poll(n, b).is_pending(),
+        wait_tag(n, t, b).is_pending(),
         "nothing back before the completion"
     );
     release(cid);
-    assert_eq!(poll(n, b), Poll::Ready(Ok(())));
+    assert_eq!(wait_tag(n, t, b), Poll::Ready(Ok(())));
 }
 
 #[test]
 fn a_write_comes_back_only_after_its_completion_and_a_flush_after_it() {
     let (_m, mut n) = steps::<false>(true);
     let data = [0x77u8; 4096];
-    n.start(Op::Write {
-        lba: 8,
-        data: &data,
-    })
-    .unwrap();
+    let t = n
+        .start_tag(Op::Write {
+            lba: 8,
+            data: &data,
+        })
+        .unwrap();
     // De controller deed de DMA al, maar bevestigde nog niet: de schrijf
     // komt niet terug, hoe vaak de wachter ook kijkt.
     with(|c| assert!(c.disk[4096..8192].iter().all(|&x| x == 0x77)));
-    assert!(poll(&mut n, &mut []).is_pending());
-    // De flush kan er niet tussendoor: één opdracht van de eigenaar.
-    assert_eq!(n.start(Op::Flush), Err(blkdev::Error::Busy));
+    assert!(wait_tag(&mut n, t, &mut []).is_pending());
     release(0);
-    assert_eq!(poll(&mut n, &mut []), Poll::Ready(Ok(())));
-    // Nu de flush, en ook die alleen met zijn eigen completion.
-    n.start(Op::Flush).unwrap();
-    assert!(poll(&mut n, &mut []).is_pending());
+    assert_eq!(wait_tag(&mut n, t, &mut []), Poll::Ready(Ok(())));
+    // Nu de flush (hopfs zet hem pas na de schrijfs die hij dekt), en ook
+    // die alleen met zijn eigen completion.
+    let t = n.start_tag(Op::Flush).unwrap();
+    assert!(wait_tag(&mut n, t, &mut []).is_pending());
     release(0);
-    assert_eq!(poll(&mut n, &mut []), Poll::Ready(Ok(())));
+    assert_eq!(wait_tag(&mut n, t, &mut []), Poll::Ready(Ok(())));
     with(|c| assert_eq!(c.acked, [(IO_WRITE, 0), (IO_FLUSH, 0)]));
 }
 
@@ -647,24 +650,25 @@ fn sequential_reads_keep_the_next_hap_in_flight_and_a_flush_waits_for_it() {
     with(|c| assert_eq!(c.held.iter().map(|h| h.0).collect::<Vec<_>>(), [0]));
     assert_eq!(io_log().last(), Some(&(IO_READ, 2 * HB, HB as u32)));
     // Een flush is pas klaar als er geen read-ahead meer loopt.
-    n.start(Op::Flush).unwrap();
+    let t = n.start_tag(Op::Flush).unwrap();
     release(1);
-    assert!(poll(&mut n, &mut []).is_pending());
+    assert!(wait_tag(&mut n, t, &mut []).is_pending());
     release(0);
-    assert_eq!(poll(&mut n, &mut []), Poll::Ready(Ok(())));
+    assert_eq!(wait_tag(&mut n, t, &mut []), Poll::Ready(Ok(())));
     // De derde hap komt van de read-ahead: geen nieuwe lees, maar de
     // vierde staat alweer op de controller.
     // De vierde gaat al bij het pakken van de derde, niet pas na zijn
     // drain: twee happen tegelijk voor een lezer die alleen is.
     let before = io_log().len();
-    n.start(Op::Read {
-        lba: 2 * LBAS,
-        len: HAP,
-    })
-    .unwrap();
+    let t = n
+        .start_tag(Op::Read {
+            lba: 2 * LBAS,
+            len: HAP,
+        })
+        .unwrap();
     assert_eq!(io_log().len(), before + 1);
     assert_eq!(io_log().last(), Some(&(IO_READ, 3 * HB, HB as u32)));
-    assert_eq!(poll(&mut n, &mut b), Poll::Ready(Ok(())));
+    assert_eq!(wait_tag(&mut n, t, &mut b), Poll::Ready(Ok(())));
     assert!(is_blocks(&b, 2 * HB));
     assert_eq!(n.ahead_hits, 1);
     assert_eq!(
@@ -674,12 +678,13 @@ fn sequential_reads_keep_the_next_hap_in_flight_and_a_flush_waits_for_it() {
     );
     // Hij komt terug en wordt gelezen zonder nieuwe lees.
     release(0);
-    n.start(Op::Read {
-        lba: 3 * LBAS,
-        len: HAP,
-    })
-    .unwrap();
-    assert_eq!(poll(&mut n, &mut b), Poll::Ready(Ok(())));
+    let t = n
+        .start_tag(Op::Read {
+            lba: 3 * LBAS,
+            len: HAP,
+        })
+        .unwrap();
+    assert_eq!(wait_tag(&mut n, t, &mut b), Poll::Ready(Ok(())));
     assert!(is_blocks(&b, 3 * HB));
     assert_eq!((n.ahead_hits, n.ahead_waste), (2, 0));
 }
@@ -695,7 +700,7 @@ fn the_early_read_ahead_waits_for_a_reader_that_is_not_alone() {
     let lbas = hap as u64 / SECTOR;
     let mut b = vec![0u8; hap];
     for k in [0, 1] {
-        block_on(blk(&mut n).read(k * lbas, &mut b)).unwrap();
+        rd(&mut n, k * lbas, &mut b).unwrap();
     }
     // De read-ahead van hap 2 is terug; een ander leest 4 KiB en wacht nog.
     with(|c| c.hold = true);
@@ -705,13 +710,14 @@ fn the_early_read_ahead_waits_for_a_reader_that_is_not_alone() {
     })
     .unwrap();
     let before = io_log().len();
-    n.start(Op::Read {
-        lba: 2 * lbas,
-        len: hap,
-    })
-    .unwrap();
+    let t = n
+        .start_tag(Op::Read {
+            lba: 2 * lbas,
+            len: hap,
+        })
+        .unwrap();
     assert_eq!(io_log().len(), before, "not while another ticket is out");
-    assert_eq!(poll(&mut n, &mut b), Poll::Ready(Ok(())));
+    assert_eq!(wait_tag(&mut n, t, &mut b), Poll::Ready(Ok(())));
     assert!(is_blocks(&b, 2 * hap as u64 / 4096));
     let next = 3 * hap as u64 / 4096;
     assert_eq!(
@@ -730,13 +736,14 @@ fn a_write_over_the_read_ahead_makes_it_stale() {
     // De read-ahead op CID 0 loopt nog; een schrijf over zijn blokken gaat
     // ernaast op CID 1, en komt eerder terug dan hij.
     let data = [0x5au8; 4096];
-    n.start(Op::Write {
-        lba: 2 * LBAS,
-        data: &data,
-    })
-    .unwrap();
+    let t = n
+        .start_tag(Op::Write {
+            lba: 2 * LBAS,
+            data: &data,
+        })
+        .unwrap();
     release(1);
-    assert_eq!(poll(&mut n, &mut []), Poll::Ready(Ok(())));
+    assert_eq!(wait_tag(&mut n, t, &mut []), Poll::Ready(Ok(())));
     release(0);
     // De lees daarna ziet de schrijf, niet de oude bytes van de read-ahead
     // (die op CID 0 terugkwam en weg is).
@@ -758,11 +765,11 @@ fn an_unclaimed_read_ahead_makes_room_for_the_next_stream() {
     let mut b = vec![0u8; HAP];
     // Een stroom die stopt: zijn laatste read-ahead (hap 2) leest niemand.
     for k in [0u64, 1] {
-        block_on(blk(&mut n).read(k * LBAS, &mut b)).unwrap();
+        rd(&mut n, k * LBAS, &mut b).unwrap();
     }
     // Een volgende stroom elders krijgt toch weer een read-ahead.
     for k in [5u64, 6, 7] {
-        block_on(blk(&mut n).read(k * LBAS, &mut b)).unwrap();
+        rd(&mut n, k * LBAS, &mut b).unwrap();
         assert!(is_blocks(&b, HB * k));
     }
     assert_eq!((n.ahead_hits, n.ahead_waste), (1, 1));
@@ -820,7 +827,7 @@ fn a_ticket_takes_free_pages_wherever_they_lie() {
     }
     with(|c| c.hold = false);
     let mut b = vec![0u8; d3.len()];
-    block_on(blk(&mut n).read(64, &mut b)).unwrap();
+    rd(&mut n, 64, &mut b).unwrap();
     assert_eq!(b, d3);
     assert_eq!(n.free_pages(), PAGES);
 }

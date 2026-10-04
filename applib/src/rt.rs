@@ -486,8 +486,8 @@ mod panic {
         if !crate::smp::on_primary() {
             crate::smp::secondary_panicked();
         }
-        // Alleen de outbox: de stack wordt na dit punt niet meer gepompt.
-        crate::log::emit_outbox(format_args!("panic: {info} HOPOS_APP_PANIC"));
+        // De outbox: de stack wordt na dit punt niet meer gepompt.
+        crate::log::emit(format_args!("panic: {info} HOPOS_APP_PANIC"));
         match super::app() {
             Some(app) => app.exit(2),
             None => crate::arch::park_exit(),

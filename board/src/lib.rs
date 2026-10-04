@@ -263,10 +263,10 @@ impl blkdev::AsyncBlockDevice for NoDisk {
     fn max_transfer(&self) -> usize {
         match *self {}
     }
-    fn start(&mut self, _op: blkdev::Op<'_>) -> blkdev::Result {
+    fn start_tag(&mut self, _op: blkdev::Op<'_>) -> blkdev::Result<usize> {
         match *self {}
     }
-    fn poll_done(&mut self, _into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
+    fn poll_tag(&mut self, _t: usize, _into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
         match *self {}
     }
 }

@@ -1,13 +1,14 @@
-//! De voorkant voor meer opdrachten tegelijk: [`Queue`].
+//! De voorkant van het blokcontract: [`Queue`], voor één opdracht of
+//! zestien tegelijk.
 //!
 //! Wie I/O wil, krijgt een ticket ([`AsyncBlockDevice::start_tag`]) en wacht
 //! op zijn eigen completion. Het device pollen doet precies één wachter
 //! tegelijk, de pacer: hij haalt met één [`reap`](AsyncBlockDevice::reap)
 //! alle completions op, wekt de wachters van wat terug is, en wacht zelf op
 //! het ritme van de driver (eerst per ronde, dan op een timer, of op de bel
-//! van de lijn), zoals [`crate::Done`]. Per ronde pollt hij zolang er op
-//! het device iets gebeurt: tot [`poll_pace`](AsyncBlockDevice::poll_pace)
-//! na de laatste submit of completion, niet na zijn eigen submit. Een
+//! van de lijn). Per ronde pollt hij zolang er op het device iets gebeurt:
+//! tot [`poll_pace`](AsyncBlockDevice::poll_pace) na de laatste submit of
+//! completion, niet na zijn eigen submit. Een
 //! wachter op zestien lezingen tegelijk (een batch) zag anders de traagste
 //! pas na de timer van 200 us: GEMETEN 04-10 op de Altra, een bundel van
 //! zestien kostte zo 340 us per call, met de beweging als maat 150 us.
@@ -617,12 +618,6 @@ mod tests {
     impl AsyncBlockDevice for Fake {
         fn max_transfer(&self) -> usize {
             4096
-        }
-        fn start(&mut self, _op: Op<'_>) -> Result {
-            Err(Error::Busy)
-        }
-        fn poll_done(&mut self, _into: &mut [u8]) -> Poll<Result> {
-            Poll::Ready(Err(Error::Dead))
         }
         fn depth(&self) -> usize {
             self.0.borrow().tags.len()

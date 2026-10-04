@@ -507,6 +507,8 @@ async fn nic_retry(exec: &'static Executor, board: &'static Machine, system: &'s
                 println!("net: the NIC came up on retry {attempt} HOPOS_NIC_RETRY_OK");
                 NIC_RETRY.store(false, Relaxed);
                 nic_up(exec, board, system, nic);
+                // FLIP: wat de adoptie zonder switch niet kon doorzetten.
+                slots::republish(exec);
                 return;
             }
             Err(e @ board::Error::Nic(_)) => {

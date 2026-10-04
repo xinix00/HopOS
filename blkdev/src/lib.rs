@@ -7,34 +7,34 @@
 //! `kern`, omdat een driver de kern niet kent (handboek §7, dezelfde reden
 //! als `netdev`).
 //!
-//! Eén vorm: [`AsyncBlockDevice`]. Eén opdracht tegelijk,
-//! [`submit`](AsyncBlockDevice::submit) geeft een [`InFlight`], en
-//! [`InFlight::done`] wacht op de completion: op de bel van de IRQ-lijn met
-//! een vangrail van [`IRQ_GUARD`], of zonder lijn door te pollen (eerst per
-//! ronde, daarna op [`POLL_PERIOD`]). Tijdens het wachten draait de executor
-//! door. [`Paced`] maakt er de [`BlockIo`] van die hopfs gebruikt. Wie vóór
-//! de executor iets met de schijf doet (de mount bij de boot, de meetbank),
-//! draait precies die futures af met [`block_on`] en een [`Pace`] die pollt
-//! ([`Spin`]): dezelfde driver, dezelfde `start` en `poll_done`, geen
-//! tweede pad.
+//! Eén vorm: [`AsyncBlockDevice`] met tickets. Een opdracht krijgt bij
+//! [`start_tag`](AsyncBlockDevice::start_tag) een ticket, [`reap`](
+//! AsyncBlockDevice::reap) haalt alle completions op en
+//! [`poll_tag`](AsyncBlockDevice::poll_tag) rondt er één af. Een driver met
+//! tags (de NVMe: [`depth`](AsyncBlockDevice::depth) tickets) zegt hoeveel
+//! er tegelijk mogen; een driver zonder tags (virtio-blk) heeft er één,
+//! ticket 0, en kijkt in `poll_tag` zelf naar het device.
 //!
-//! # Meer opdrachten tegelijk: tickets en de [`Queue`]
+//! De [`Queue`] is de enige voorkant (Linux blk-mq in het klein) en maakt
+//! er de [`BlockIo`] van die hopfs gebruikt: wie I/O wil, krijgt een ticket
+//! en wacht op zijn eigen completion; precies één wachter tegelijk pollt het
+//! device (de "pacer") op de bel van de IRQ-lijn met een vangrail van
+//! [`IRQ_GUARD`], of zonder lijn eerst per ronde en daarna op
+//! [`POLL_PERIOD`], en wekt de anderen waarvan de completion binnenkwam.
+//! Tijdens het wachten draait de executor door. Zo kost een node met
+//! zestien opdrachten in de lucht één poll per ronde, niet zestien.
+//! GEMETEN 01-10 op de M4 (`hopos.nvmebench=1`): willekeurig 4 KiB lezen
+//! haalt 11.888 per seconde met één opdracht tegelijk (~84 us per lees) en
+//! 175.055 met zestien tegelijk door deze wachtrij. De wachtrij is er voor
+//! de node, niet voor de app.
 //!
-//! Een driver met tags (de ANS: zestien) zegt dat met
-//! [`depth`](AsyncBlockDevice::depth) en levert per opdracht een ticket
-//! ([`start_tag`](AsyncBlockDevice::start_tag),
-//! [`poll_tag`](AsyncBlockDevice::poll_tag), en één
-//! [`reap`](AsyncBlockDevice::reap) die alle completions ophaalt). Een
-//! driver zonder tags hoeft niets: de standaard is zijn ene opdracht als
-//! ticket 0. De [`Queue`] is de voorkant (Linux blk-mq in het klein): wie
-//! I/O wil, krijgt een ticket en wacht op zijn eigen completion; precies één
-//! wachter tegelijk pollt het device (de "pacer", op het ritme van hierboven)
-//! en wekt de anderen waarvan de completion binnenkwam. Zo kost een
-//! node met zestien opdrachten in de lucht één poll per ronde, niet
-//! zestien. GEMETEN 01-10 op de M4 (`hopos.nvmebench=1`): willekeurig
-//! 4 KiB lezen haalt 11.888 per seconde met één opdracht tegelijk (~84 us
-//! per lees) en 175.055 met zestien tegelijk door deze wachtrij. De
-//! wachtrij is er voor de node, niet voor de app.
+//! Wie vóór de executor iets met de schijf doet (de mount bij de boot, de
+//! meetbank), draait precies die futures af met [`block_on`] en een
+//! [`Pace`] die pollt ([`Spin`]): dezelfde driver, dezelfde wachtrij, geen
+//! tweede pad. Tot 04-10 stond ernaast nog een tweede voorkant voor één
+//! opdracht tegelijk (`Paced`, met `start` en `poll_done` in het contract),
+//! alleen voor de meetbank en de tests: weg, de meetbank meet nu de
+//! wachtrij die hopfs ook gebruikt.
 //!
 //! # Waarom er één pad is
 //!
@@ -54,7 +54,7 @@
 //! met alles erop. Wachten is dus `.await`, en de enige manier om zonder
 //! scheduler te wachten zonder de core vast te houden is submit plus await
 //! (PORT.md §3: "de NVMe-actor: zijn lus ís één tegelijk, `submit(buf) ->
-//! InFlight`").
+//! InFlight`"; hier een ticket en de wachter van de [`Queue`]).
 //!
 //! Een synchrone vorm ernaast was daarom geen gemak maar een tweede
 //! driverpad (post plus spin) dat de stilte terugbrengt zodra iemand hem
@@ -77,7 +77,6 @@
 
 use core::fmt;
 use core::future::Future;
-use core::pin::Pin;
 use core::task::{Context, Poll, Waker};
 use core::time::Duration;
 use sync::Signal;
@@ -91,8 +90,8 @@ pub const LBA_SIZE: u64 = 512;
 /// 10 ms als de RX-pomp).
 pub const IRQ_GUARD: Duration = Duration::from_millis(10);
 
-/// Zonder lijn: zo lang na de submit pollt [`InFlight::done`] per ronde
-/// van de executor (een yield, geen timer). Een 4 KB-lees op NVMe is binnen
+/// Zonder lijn: zo lang na een submit of completion pollt de wachter van de
+/// [`Queue`] per ronde van de executor (een yield, geen timer). Een 4 KB-lees op NVMe is binnen
 /// een paar tientallen microseconden klaar; die hoort geen timer te kosten.
 pub const POLL_SPIN_NS: u64 = 100_000;
 
@@ -121,9 +120,9 @@ pub enum Error {
     /// Het device is blijvend dood (een stil device kan nog in zijn
     /// DMA-buffer schrijven, dus na één stilte is er geen weg terug).
     Dead,
-    /// Er loopt nog een opdracht waarvan de wachter wegging (een gedropte
-    /// [`Done`]): tot die terug is, gaat er niets nieuws naar het device,
-    /// want de DMA-buffer is nog van de controller (handboek §1.2).
+    /// Nu geen plaats op het device: alle tickets bezet, of de DMA-ruimte
+    /// nog van een opdracht waarvan de wachter wegging (die buffer is van de
+    /// controller tot de completion, handboek §1.2).
     Busy,
 }
 
@@ -169,30 +168,45 @@ pub enum Op<'a> {
     Flush,
 }
 
-/// Een blokapparaat in de vorm van de driver: één opdracht tegelijk, met
+/// Een blokapparaat in de vorm van de driver: opdrachten op tickets, met
 /// een submit en een completion.
 ///
 /// De driver bezit zijn DMA-buffer; een opdracht die loopt, is van de
-/// controller tot de completion hem teruggeeft. [`submit`] geeft daarom een
-/// [`InFlight`] die de driver leent: een tweede submit kan pas als de eerste
-/// klaar is, en dat bewijst de compiler (handboek §1.2).
-///
-/// [`submit`]: AsyncBlockDevice::submit
+/// controller tot de completion hem teruggeeft (handboek §1.2): een ticket
+/// komt pas vrij bij een `Ready` van [`poll_tag`](Self::poll_tag), en tot
+/// dan raakt niemand zijn bytes.
 pub trait AsyncBlockDevice {
     /// De grootste transfer van één opdracht in bytes (een veelvoud van
     /// [`LBA_SIZE`]).
     fn max_transfer(&self) -> usize;
 
-    /// Zet `op` op het device en luidt de doorbell; keert meteen terug. Een
-    /// fout hier (buiten de schijf, dood, [`Error::Busy`]) betekent dat er
-    /// niets naar het device ging.
-    fn start(&mut self, op: Op<'_>) -> Result;
+    /// Zet `op` op het device onder een eigen ticket, luidt de doorbell en
+    /// keert meteen terug. [`Error::Busy`] = nu geen plaats (alle tags of de
+    /// DMA-ruimte bezet): probeer het na een completion opnieuw. Een andere
+    /// fout (buiten de schijf, dood) betekent dat er niets naar het device
+    /// ging.
+    fn start_tag(&mut self, op: Op<'_>) -> Result<usize>;
 
-    /// Kijkt of de opdracht van [`start`](Self::start) klaar is. Bij een
-    /// lees komen de bytes in `into` (vooraan, zoveel als gelezen). De
-    /// time-out van het device is van de driver: daarna is het
+    /// Is ticket `t` klaar? Een driver met tags kijkt hier alleen naar wat
+    /// [`reap`](Self::reap) al ophaalde; een driver zonder kijkt zelf. Bij
+    /// `Ready` is het ticket weer vrij en staan de bytes van een lees vooraan
+    /// in `into`. De time-out van het device is van de driver: daarna is het
     /// `Ready(Err(Dead))`, nooit eeuwig `Pending`.
-    fn poll_done(&mut self, into: &mut [u8]) -> Poll<Result>;
+    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> Poll<Result>;
+
+    /// Haalt alle completions op die er zijn en toetst de time-outs; geeft
+    /// de tickets die daarbij klaar kwamen (bit `t`). Een fout is een dood
+    /// device: daarna geeft elke [`poll_tag`](Self::poll_tag) de fout. Een
+    /// driver zonder tags haalt niets op: zijn `poll_tag` kijkt.
+    fn reap(&mut self) -> Result<u64> {
+        Ok(0)
+    }
+
+    /// Hoeveel opdrachten het device tegelijk aanneemt: tickets
+    /// `0..depth`. Eén voor een driver zonder tags.
+    fn depth(&self) -> usize {
+        1
+    }
 
     /// De bel van de IRQ-lijn van het device, als het board er een
     /// bedraadt. `None` = pollen.
@@ -200,41 +214,12 @@ pub trait AsyncBlockDevice {
         None
     }
 
-    /// Zonder lijn: hoe lang de wachter na de submit per ronde pollt, en
-    /// daarna op welke periode. Een driver die zijn opdrachten kent, kiest
-    /// zelf (de ANS: 20 us en 20 us); anders [`POLL_SPIN_NS`] en
-    /// [`POLL_PERIOD`].
+    /// Zonder lijn: hoe lang de wachter na een beweging op het device per
+    /// ronde pollt, en daarna op welke periode. Een driver die zijn
+    /// opdrachten kent, kiest zelf (de ANS: 20 us en 20 us); anders
+    /// [`POLL_SPIN_NS`] en [`POLL_PERIOD`].
     fn poll_pace(&self) -> (u64, Duration) {
         (POLL_SPIN_NS, POLL_PERIOD)
-    }
-
-    /// Hoeveel opdrachten het device tegelijk aanneemt: tickets
-    /// `0..depth`. Eén voor een driver zonder tags; dan is de standaard van
-    /// de drie methoden hieronder zijn ene opdracht als ticket 0.
-    fn depth(&self) -> usize {
-        1
-    }
-
-    /// Zet `op` op het device onder een eigen ticket en keert meteen terug.
-    /// [`Error::Busy`] = nu geen plaats (alle tags of de DMA-ruimte bezet):
-    /// probeer het na een completion opnieuw.
-    fn start_tag(&mut self, op: Op<'_>) -> Result<usize> {
-        self.start(op).map(|()| 0)
-    }
-
-    /// Is ticket `t` klaar? Een driver met tags kijkt hier alleen naar wat
-    /// [`reap`](Self::reap) al ophaalde. Bij `Ready` is het ticket weer vrij
-    /// en staan de bytes van een lees vooraan in `into`.
-    fn poll_tag(&mut self, t: usize, into: &mut [u8]) -> Poll<Result> {
-        let _ = t;
-        self.poll_done(into)
-    }
-
-    /// Haalt alle completions op die er zijn en toetst de time-outs; geeft
-    /// de tickets die daarbij klaar kwamen (bit `t`). Een fout is een dood
-    /// device: daarna geeft elke [`poll_tag`](Self::poll_tag) de fout.
-    fn reap(&mut self) -> Result<u64> {
-        Ok(0)
     }
 
     /// De meetlat van de driver als tekst voor één consoleregel (opdrachten,
@@ -243,15 +228,6 @@ pub trait AsyncBlockDevice {
     fn stats(&self, out: &mut dyn fmt::Write) -> Result<u64, fmt::Error> {
         let _ = out;
         Ok(0)
-    }
-
-    /// Zet `op` op het device; de [`InFlight`] wacht op de completion.
-    fn submit(&mut self, op: Op<'_>) -> Result<InFlight<'_, Self>>
-    where
-        Self: Sized,
-    {
-        self.start(op)?;
-        Ok(InFlight { dev: self })
     }
 }
 
@@ -266,17 +242,11 @@ pub trait Disk: AsyncBlockDevice {
 }
 
 /// Een geleende driver is ook een driver: zo leent de meetbank de schijf
-/// (`Paced::new(&mut disk, Spin)`) en geeft hij hem daarna terug aan de
+/// (`Queue::new(&mut disk, Spin)`) en geeft hij hem daarna terug aan de
 /// opslag.
 impl<D: AsyncBlockDevice + ?Sized> AsyncBlockDevice for &mut D {
     fn max_transfer(&self) -> usize {
         (**self).max_transfer()
-    }
-    fn start(&mut self, op: Op<'_>) -> Result {
-        (**self).start(op)
-    }
-    fn poll_done(&mut self, into: &mut [u8]) -> Poll<Result> {
-        (**self).poll_done(into)
     }
     fn irq(&self) -> Option<&'static Signal> {
         (**self).irq()
@@ -313,11 +283,11 @@ pub trait Pace {
 }
 
 /// Een [`Pace`] die pollt: nooit slapen, altijd opnieuw kijken. Voor
-/// [`block_on`] vóór de executor (de meetbank) en de tests. De klok staat
-/// stil, dus [`InFlight::done`] blijft in zijn yield-venster en toetst het
-/// device bij elke ronde van `block_on`; de time-out van een verzoek is van
-/// de driver (zijn eigen klok), dus ook zo wordt een stil device nooit een
-/// eeuwige lus.
+/// [`block_on`] vóór de executor (de mount, de meetbank) en de tests. De
+/// klok staat stil, dus de wachter van de [`Queue`] blijft in zijn
+/// yield-venster en toetst het device bij elke ronde van `block_on`; de
+/// time-out van een verzoek is van de driver (zijn eigen klok), dus ook zo
+/// wordt een stil device nooit een eeuwige lus.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Spin;
 
@@ -328,83 +298,6 @@ impl Pace for Spin {
     }
     fn sleep(&self, _d: Duration) -> Self::Sleep {
         core::future::ready(())
-    }
-}
-
-/// Een opdracht die op het device staat. Hij leent de driver: zolang hij
-/// leeft, kan er geen tweede opdracht bij.
-#[must_use = "een opdracht die niemand afwacht, houdt de driver bezet"]
-pub struct InFlight<'d, D: AsyncBlockDevice> {
-    dev: &'d mut D,
-}
-
-impl<'d, D: AsyncBlockDevice> InFlight<'d, D> {
-    /// Wacht op de completion; bij een lees komen de bytes in `into`.
-    /// Tijdens het wachten draait de executor door: op de bel van de lijn
-    /// (met de vangrail [`IRQ_GUARD`]), of pollend.
-    pub fn done<'b, P: Pace>(self, into: &'b mut [u8], pace: &'b P) -> Done<'d, 'b, D, P> {
-        Done {
-            t0: pace.now(),
-            dev: self.dev,
-            into,
-            pace,
-            sleep: None,
-        }
-    }
-}
-
-/// De future van [`InFlight::done`].
-///
-/// Hij toetst het device bij élke poll, ook als niemand hem wekte: zo werkt
-/// hij onder [`block_on`] (die pollt zonder wekker) precies als op de
-/// executor. Gedropt vóór de completion is de opdracht niet weg; de driver
-/// ruimt haar op bij de volgende submit, of weigert die met
-/// [`Error::Busy`] tot het device klaar is.
-#[must_use = "een future doet niets tot hij gepolld wordt"]
-pub struct Done<'d, 'b, D: AsyncBlockDevice, P: Pace> {
-    dev: &'d mut D,
-    into: &'b mut [u8],
-    pace: &'b P,
-    t0: u64,
-    sleep: Option<P::Sleep>,
-}
-
-impl<D: AsyncBlockDevice, P: Pace> Future for Done<'_, '_, D, P> {
-    type Output = Result;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result> {
-        // `Done` is `Unpin`: verwijzingen, een getal en een `Unpin`-slaap.
-        let this = self.get_mut();
-        loop {
-            if let Poll::Ready(r) = this.dev.poll_done(this.into) {
-                return Poll::Ready(r);
-            }
-            let period = match this.dev.irq() {
-                Some(bell) => {
-                    // Level-triggered: een bel van een vorige opdracht geeft
-                    // hoogstens één ronde te veel kijken.
-                    if Pin::new(&mut bell.wait()).poll(cx).is_ready() {
-                        this.sleep = None;
-                        continue;
-                    }
-                    IRQ_GUARD
-                }
-                None => {
-                    let (spin, period) = this.dev.poll_pace();
-                    if this.pace.now().saturating_sub(this.t0) < spin {
-                        cx.waker().wake_by_ref();
-                        return Poll::Pending;
-                    }
-                    period
-                }
-            };
-            let pace = this.pace;
-            let s = this.sleep.get_or_insert_with(|| pace.sleep(period));
-            if Pin::new(s).poll(cx).is_pending() {
-                return Poll::Pending;
-            }
-            this.sleep = None;
-        }
     }
 }
 
@@ -476,74 +369,11 @@ impl<D: BlockIo + ?Sized> BlockIo for &mut D {
     }
 }
 
-/// Een [`AsyncBlockDevice`] met zijn [`Pace`] als [`BlockIo`]: een verzoek
-/// in brokken van `max_transfer`, elk brok een submit en een await.
-pub struct Paced<D, P> {
-    dev: D,
-    pace: P,
-}
-
-impl<D: AsyncBlockDevice, P: Pace> Paced<D, P> {
-    /// De driver `dev`, wachtend op `pace`.
-    pub fn new(dev: D, pace: P) -> Self {
-        Self { dev, pace }
-    }
-
-    /// De driver, veranderlijk.
-    pub fn dev_mut(&mut self) -> &mut D {
-        &mut self.dev
-    }
-
-    /// De brokmaat: de grootste transfer in hele LBA's, minstens één.
-    fn step(&self) -> usize {
-        let lba = LBA_SIZE as usize;
-        let m = self.dev.max_transfer();
-        (m - m % lba).max(lba)
-    }
-}
-
-impl<D: AsyncBlockDevice, P: Pace> BlockIo for Paced<D, P> {
-    async fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result {
-        let step = self.step();
-        let mut l = lba;
-        for chunk in buf.chunks_mut(step) {
-            let len = chunk.len();
-            self.dev
-                .submit(Op::Read { lba: l, len })?
-                .done(chunk, &self.pace)
-                .await?;
-            l += len as u64 / LBA_SIZE;
-        }
-        Ok(())
-    }
-
-    async fn write(&mut self, lba: u64, buf: &[u8]) -> Result {
-        let step = self.step();
-        let mut l = lba;
-        for chunk in buf.chunks(step) {
-            self.dev
-                .submit(Op::Write {
-                    lba: l,
-                    data: chunk,
-                })?
-                .done(&mut [], &self.pace)
-                .await?;
-            l += chunk.len() as u64 / LBA_SIZE;
-        }
-        Ok(())
-    }
-
-    async fn flush(&mut self) -> Result {
-        self.dev.submit(Op::Flush)?.done(&mut [], &self.pace).await
-    }
-}
-
 /// Draait een future af zonder executor: pollen tot hij klaar is. Voor wat
 /// vóór `exec.run` op de schijf wacht (de mount bij de boot, de meetbank) en
 /// voor de tests; op de executor hoort hij nooit, want hij houdt de core
-/// vast. Het is geen tweede driverpad: dezelfde [`Paced`]-futures, dezelfde
-/// `start` en `poll_done`, alleen zonder iemand die intussen iets anders
-/// doet.
+/// vast. Het is geen tweede driverpad: dezelfde [`Queue`]-futures, dezelfde
+/// tickets, alleen zonder iemand die intussen iets anders doet.
 pub fn block_on<F: Future>(f: F) -> F::Output {
     let mut f = core::pin::pin!(f);
     let mut cx = Context::from_waker(Waker::noop());

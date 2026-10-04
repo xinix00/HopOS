@@ -583,9 +583,9 @@ fn firmware_installed_after_boot_loads_on_open_and_survives_no_reboot() {
         let mut engine = FakeEngine::new();
         engine.firmware_missing = true;
         port.with(|s, _| s.install(engine)).unwrap();
-        let (mut fs, _) = crate::rpc::tests::disk(16);
+        let (fs, _) = crate::rpc::tests::disk(16);
         let blob = vec![37u8; 300 * 1024 + 17];
-        crate::rpc::tests::on(fs.write_at(path, 0, &blob)).unwrap();
+        let fs = crate::rpc::tests::put(fs, path, &blob);
         let svc = crate::slots::Servicers::new();
         let console = crate::slots::tests::FakeConsole::default();
         let mut actor = crate::rpc::FsActor::new(fs, &svc, &console);
@@ -630,8 +630,8 @@ fn stale_owner_during_firmware_read_never_opens_a_session() {
     let mut engine = FakeEngine::new();
     engine.firmware_missing = true;
     port.with(|s, _| s.install(engine)).unwrap();
-    let (mut fs, _) = crate::rpc::tests::disk(16);
-    crate::rpc::tests::on(fs.write_at(b"/firmware/hevcdec.fwb", 0, b"firmware")).unwrap();
+    let (fs, _) = crate::rpc::tests::disk(16);
+    let fs = crate::rpc::tests::put(fs, b"/firmware/hevcdec.fwb", b"firmware");
     let svc = crate::slots::Servicers::new();
     let console = crate::slots::tests::FakeConsole::default();
     let mut actor = crate::rpc::FsActor::new(fs, &svc, &console);
@@ -667,8 +667,7 @@ fn missing_or_oversize_firmware_keeps_open_uncommitted_and_reports_name() {
         port.with(|s, _| s.install(engine)).unwrap();
         let (mut fs, _) = crate::rpc::tests::disk(16);
         if size != 0 {
-            crate::rpc::tests::on(fs.write_at(b"/firmware/hevcdec.fwb", 0, &vec![1; size]))
-                .unwrap();
+            fs = crate::rpc::tests::put(fs, b"/firmware/hevcdec.fwb", &vec![1; size]);
         }
         let svc = crate::slots::Servicers::new();
         let console = crate::slots::tests::FakeConsole::default();

@@ -11,9 +11,9 @@
 #
 #   kern        HOPOS_BOOT, HOPOS_CLOCK_FIXED, HOPOS_PRIVILEGE, HOPOS_NET_UP,
 #               HOPOS_SYSTEM_UP, HOPOS_DISK_UP en HOPOS_FS_UP fresh=1 (een
-#               verse schijf per run), HOPOS_HOP_START slot=1, en twee keer
-#               HOPOS_HOP_PUBLISH (8080 en 9080), en de canary van de
-#               watchdog: "self-dial 10.100.0.2:8080 connected ...
+#               verse schijf per run), HOPOS_HOP_START slot=1, één
+#               HOPOS_SLOT_PUBLISH van slot 1 (8080 en 9080), en de canary
+#               van de watchdog: "self-dial 10.100.0.2:8080 connected ...
 #               HOPOS_WD_CANARY_OK" (een nieuwe verbinding van de kern door
 #               de switch naar de accept-laag van Hop);
 #   Hop         via de servicer van slot 1: HOP_UP en HOP_LEADER, en
@@ -131,7 +131,7 @@ if [ "$TARGET" = riscv64gc-unknown-none-elf ]; then
 else
 	RED="$RED|HOPOS_OSCORE_FALLBACK|HOPOS_CAGE_FAIL"
 fi
-BOOT_MARKS="$BOOT_MARKS|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH|uplink tcp :9080 -> slot 1 :9080 HOPOS_HOP_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
+BOOT_MARKS="$BOOT_MARKS|HOPOS_HOP_START slot=1 core=0 cpu=$OSCPU |slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 if [ "$TARGET" != riscv64gc-unknown-none-elf ]; then
 	BOOT_MARKS="$BOOT_MARKS|HOPOS_RNG_SLOTS source=jitter|slot 1: applib: rng seed from the kernel .*HOPOS_APP_RNG source=jitter|self-dial 10.100.0.2:8080 connected .*HOPOS_WD_CANARY_OK"
 	[ "$OSCPU" = 0 ] || BOOT_MARKS="$BOOT_MARKS|HOPOS_OSCORE_PARKED"

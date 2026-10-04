@@ -11,6 +11,8 @@
 //! - [`spsc::Channel`]: één producer, één consument, vaste capaciteit.
 //! - [`mpsc::Mailbox`]: veel producers, één consument: de brievenbus van
 //!   een actor.
+//! - [`Oneshot`]: de antwoordplek van een verzoek aan een actor, met
+//!   [`oneshot::call`] (zend, wacht, neem het antwoord).
 //! - [`Local`]: een static die alleen de executor van één core aanraakt.
 //! - [`select`], [`yield_now`]: de twee lus-hulpjes uit de Go-vertaling.
 //! - [`Timer`]: de klok en de slaap van een taak.
@@ -36,6 +38,7 @@ pub mod doors;
 pub mod futures;
 pub mod local;
 pub mod mpsc;
+pub mod oneshot;
 pub mod select;
 pub mod signal;
 pub mod spsc;
@@ -45,6 +48,7 @@ pub mod waker;
 pub use doors::Doors;
 pub use futures::Futures;
 pub use local::{Local, LocalCell};
+pub use oneshot::Oneshot;
 pub use select::{Either, select};
 pub use signal::Signal;
 pub use stop::Stop;

@@ -1,33 +1,29 @@
 //! De deuren van een vaste pool werkers: [`Doors`].
 
-use crate::{Local, Signal};
+use crate::{Local, Oneshot, Signal};
 use core::cell::Cell;
 
-/// De stoel achter één deur.
-enum Seat<T> {
-    /// De werker wacht op werk.
-    Free,
-    /// De acceptor gaf werk; de werker haalt het op.
-    Handed(T),
-    /// De werker dient zijn werk.
-    Busy,
+/// Eén deur: de antwoordplek waarin de acceptor het werk legt, en of de
+/// werker bezet is (van de overdracht tot [`Doors::free`]).
+struct Door<T> {
+    job: Oneshot<T>,
+    busy: Cell<bool>,
 }
 
 /// Een vaste pool van `N` werkers met één acceptor (handboek §2: geen taak
 /// per verbinding).
 ///
-/// De acceptor zet het werk achter de eerste vrije deur en luidt haar bel;
-/// de werker neemt het ([`take`](Self::take)), dient het, en meldt zich vrij
-/// ([`free`](Self::free)), en dat luidt de bel van de acceptor. Met alle
-/// werkers bezet wacht [`place`](Self::place) dus op een gebeurtenis, niet
-/// op de klok (docs/apps.md); wie liever weigert, neemt
-/// [`hand`](Self::hand). Elke bel heeft één wachter: werker `i` de zijne,
-/// de acceptor die van de vrije deuren.
+/// De acceptor legt het werk achter de eerste vrije deur (een [`Oneshot`],
+/// die de werker wekt); de werker neemt het ([`take`](Self::take)), dient
+/// het, en meldt zich vrij ([`free`](Self::free)), en dat luidt de bel van
+/// de acceptor. Met alle werkers bezet wacht [`place`](Self::place) dus op
+/// een gebeurtenis, niet op de klok (docs/apps.md); wie liever weigert,
+/// neemt [`hand`](Self::hand). Elke deur en de bel hebben één wachter:
+/// werker `i` de zijne, de acceptor die van de vrije deuren.
 ///
-/// Alles op de executor van één core: de stoelen staan in een [`Local`].
+/// Alles op de executor van één core: de deuren staan in een [`Local`].
 pub struct Doors<T, const N: usize> {
-    seats: Local<[Cell<Seat<T>>; N]>,
-    bells: [Signal; N],
+    doors: Local<[Door<T>; N]>,
     freed: Signal,
 }
 
@@ -36,8 +32,14 @@ impl<T, const N: usize> Doors<T, N> {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            seats: Local::new([const { Cell::new(Seat::Free) }; N]),
-            bells: [const { Signal::new() }; N],
+            doors: Local::new(
+                [const {
+                    Door {
+                        job: Oneshot::new(),
+                        busy: Cell::new(false),
+                    }
+                }; N],
+            ),
             freed: Signal::new(),
         }
     }
@@ -49,17 +51,13 @@ impl<T, const N: usize> Doors<T, N> {
     ///
     /// `job` zelf, als geen deur vrij is.
     pub fn hand(&self, job: T) -> Result<(), T> {
-        for (seat, bell) in self.seats.iter().zip(&self.bells) {
-            match seat.replace(Seat::Busy) {
-                Seat::Free => {
-                    seat.set(Seat::Handed(job));
-                    bell.set();
-                    return Ok(());
-                }
-                other => seat.set(other),
+        match self.doors.iter().find(|d| !d.busy.replace(true)) {
+            Some(d) => {
+                d.job.put(job);
+                Ok(())
             }
+            None => Err(job),
         }
-        Err(job)
     }
 
     /// Geeft `job` aan een vrije werker; zijn ze alle bezet, dan wacht hij
@@ -75,23 +73,16 @@ impl<T, const N: usize> Doors<T, N> {
     /// [`free`](Self::free). Een werker zonder deur (`i >= N`) krijgt nooit
     /// iets.
     pub async fn take(&self, i: usize) -> T {
-        let (Some(seat), Some(bell)) = (self.seats.get().get(i), self.bells.get(i)) else {
-            return core::future::pending().await;
-        };
-        loop {
-            bell.wait().await;
-            match seat.replace(Seat::Busy) {
-                Seat::Handed(job) => return job,
-                // Een bel zonder werk: de stoel blijft zoals hij was.
-                other => seat.set(other),
-            }
+        match self.doors.get().get(i) {
+            Some(d) => d.job.recv().await,
+            None => core::future::pending().await,
         }
     }
 
     /// Werker `i` is klaar: zijn deur gaat open en de acceptor hoort het.
     pub fn free(&self, i: usize) {
-        if let Some(seat) = self.seats.get().get(i) {
-            seat.set(Seat::Free);
+        if let Some(d) = self.doors.get().get(i) {
+            d.busy.set(false);
         }
         self.freed.set();
     }

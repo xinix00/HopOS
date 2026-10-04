@@ -34,7 +34,7 @@ impl Disk {
 fn on<F: core::future::Future>(f: F) -> F::Output {
     blkdev::block_on(f)
 }
-impl BlockIo for Disk {
+impl BlockIo for &Disk {
     async fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
         let start = lba as usize * 512;
         buf.copy_from_slice(&self.0.borrow().cache[start..start + buf.len()]);
@@ -62,52 +62,50 @@ impl BlockIo for Disk {
         Ok(())
     }
 }
-fn mount(d: &Disk) -> Fs<Disk> {
-    on(Fs::mount(
-        d.clone(),
-        0,
-        (2 << 20) / 512,
-        512,
-        1 << 20,
-        false,
-    ))
-    .unwrap()
-    .0
+fn mount(d: &Disk) -> Tree<&Disk> {
+    LocalCell::cell(
+        on(Fs::mount(d, 0, (2 << 20) / 512, 512, 1 << 20, false))
+            .unwrap()
+            .0,
+    )
 }
-fn read(fs: &mut Fs<Disk>, path: &[u8]) -> Vec<u8> {
-    let mut b = vec![0; fs.stat(path).unwrap().0 as usize];
-    let n = on(fs.read_at(path, 0, &mut b)).unwrap();
+fn read(fs: &Tree<&Disk>, p: &[u8]) -> Vec<u8> {
+    let mut b = vec![0; fs.borrow_mut().stat(p).unwrap().0 as usize];
+    let n = on(path::read(fs, p, 0, &mut b)).unwrap();
     b.truncate(n);
     b
+}
+fn write(fs: &Tree<&Disk>, p: &[u8], data: &[u8]) {
+    on(path::write(fs, p, 0, data)).unwrap();
 }
 #[test]
 fn barrier_survives_power_loss_in_place_overwrite_truncate_and_journal_remove() {
     let disk = Disk::new();
-    let mut fs = mount(&disk);
-    on(fs.write_at(b"db", 0, b"first")).unwrap();
-    on(fs.write_at(b"db-journal", 0, b"rollback")).unwrap();
-    assert_eq!(on(fs.sync()).unwrap(), 1);
+    let fs = mount(&disk);
+    write(&fs, b"db", b"first");
+    write(&fs, b"db-journal", b"rollback");
+    assert_eq!(on(sync(&fs)).unwrap(), 1);
     drop(fs);
     disk.crash();
-    let mut fs = mount(&disk);
-    assert_eq!(read(&mut fs, b"db"), b"first");
-    assert_eq!(read(&mut fs, b"db-journal"), b"rollback");
-    on(fs.write_at(b"db", 0, b"other")).unwrap();
-    assert_eq!(on(fs.sync()).unwrap(), 2);
+    let fs = mount(&disk);
+    assert_eq!(read(&fs, b"db"), b"first");
+    assert_eq!(read(&fs, b"db-journal"), b"rollback");
+    write(&fs, b"db", b"other");
+    assert_eq!(on(sync(&fs)).unwrap(), 2);
     drop(fs);
     disk.crash();
-    let mut fs = mount(&disk);
-    assert_eq!(read(&mut fs, b"db"), b"other");
-    on(fs.truncate(b"db", 3)).unwrap();
-    fs.remove(b"db-journal", false).unwrap();
-    on(fs.sync()).unwrap();
+    let fs = mount(&disk);
+    assert_eq!(read(&fs, b"db"), b"other");
+    on(path::truncate(&fs, b"db", 3)).unwrap();
+    fs.borrow_mut().remove(b"db-journal", false).unwrap();
+    on(sync(&fs)).unwrap();
     drop(fs);
     disk.crash();
-    let mut fs = mount(&disk);
-    assert_eq!(read(&mut fs, b"db"), b"oth");
-    assert_eq!(fs.stat(b"db-journal"), Err(Error::NoEnt));
+    let fs = mount(&disk);
+    assert_eq!(read(&fs, b"db"), b"oth");
+    assert_eq!(fs.borrow_mut().stat(b"db-journal"), Err(Error::NoEnt));
     let before = disk.0.borrow().flushes;
-    on(fs.sync()).unwrap();
+    on(sync(&fs)).unwrap();
     assert_eq!(
         disk.0.borrow().flushes,
         before + 1,
@@ -119,16 +117,16 @@ fn every_commit_failure_is_returned_without_advancing_generation_and_can_retry()
     // commit: dataflush, metadatabody, metadatakop, metadataflush.
     for fault in 1..=4 {
         let disk = Disk::new();
-        let mut fs = mount(&disk);
-        on(fs.write_at(b"before", 0, b"old")).unwrap();
-        on(fs.sync()).unwrap();
-        on(fs.write_at(b"after", 0, b"new")).unwrap();
+        let fs = mount(&disk);
+        write(&fs, b"before", b"old");
+        on(sync(&fs)).unwrap();
+        write(&fs, b"after", b"new");
         disk.fail_after(fault);
         assert!(
-            matches!(on(fs.sync()), Err(Error::Io { .. })),
+            matches!(on(sync(&fs)), Err(Error::Io { .. })),
             "fase {fault}"
         );
-        assert_eq!(fs.generation(), 1);
+        assert_eq!(fs.borrow().generation(), 1);
         // De nieuwe naam mag vóór een geslaagde metadataflush niet zichtbaar zijn.
         let saved = disk.0.borrow().stable.clone();
         let reboot = Disk::new();
@@ -137,22 +135,22 @@ fn every_commit_failure_is_returned_without_advancing_generation_and_can_retry()
             d.cache.copy_from_slice(&saved);
             d.stable.copy_from_slice(&saved);
         }
-        let mut old = mount(&reboot);
-        assert_eq!(read(&mut old, b"before"), b"old");
-        assert_eq!(old.stat(b"after"), Err(Error::NoEnt));
+        let old = mount(&reboot);
+        assert_eq!(read(&old, b"before"), b"old");
+        assert_eq!(old.borrow_mut().stat(b"after"), Err(Error::NoEnt));
         disk.0.borrow_mut().fail = None;
-        assert_eq!(on(fs.sync()).unwrap(), 2);
+        assert_eq!(on(sync(&fs)).unwrap(), 2);
         drop(fs);
         disk.crash();
-        let mut fs = mount(&disk);
-        assert_eq!(read(&mut fs, b"after"), b"new");
+        let fs = mount(&disk);
+        assert_eq!(read(&fs, b"after"), b"new");
     }
 }
 #[test]
 fn volatile_filesystem_cannot_acknowledge_a_durable_barrier() {
     let disk = Disk::new();
-    let mut fs = Fs::new(disk.clone(), 0, (2 << 20) / 512, 512, 1 << 20).unwrap();
-    on(fs.write_at(b"db", 0, b"volatile")).unwrap();
-    assert_eq!(on(fs.sync()), Err(Error::VolatileStorage));
+    let fs = LocalCell::cell(Fs::new(&disk, 0, (2 << 20) / 512, 512, 1 << 20).unwrap());
+    write(&fs, b"db", b"volatile");
+    assert_eq!(on(sync(&fs)), Err(Error::VolatileStorage));
     assert_eq!(disk.0.borrow().flushes, 0);
 }

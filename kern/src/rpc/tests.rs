@@ -212,12 +212,6 @@ impl blkdev::AsyncBlockDevice for Ram {
     fn max_transfer(&self) -> usize {
         1 << 20
     }
-    fn start(&mut self, _op: blkdev::Op<'_>) -> blkdev::Result {
-        Err(blkdev::Error::Busy)
-    }
-    fn poll_done(&mut self, _into: &mut [u8]) -> core::task::Poll<blkdev::Result> {
-        core::task::Poll::Ready(Err(blkdev::Error::Dead))
-    }
     fn depth(&self) -> usize {
         16
     }
@@ -297,6 +291,14 @@ pub(crate) fn disk(mib: usize) -> (Fs<Disk>, crate::hopfs::Mounted) {
     on(Fs::mount(r.queue(), 0, sectors, 512, 1 << 20, false)).unwrap()
 }
 
+/// Schrijft `data` als `path` op een schijf van [`disk`], vóór de actor hem
+/// krijgt: dezelfde weg als een call (`hopfs::path::write`).
+pub(crate) fn put(fs: Fs<Disk>, path: &[u8], data: &[u8]) -> Fs<Disk> {
+    let t = LocalCell::cell(fs);
+    on(crate::hopfs::path::write(&t, path, 0, data)).unwrap();
+    t.into_inner().into_inner()
+}
+
 /// De nep-controller onder een schijf van [`disk`].
 pub(crate) fn ram(fs: &Fs<Disk>) -> Ram {
     fs.disk().with_dev(|r| r.clone())
@@ -309,9 +311,9 @@ pub(crate) fn ram(fs: &Fs<Disk>) -> Ram {
 fn a_commit_waits_for_the_disk_without_holding_the_core() {
     let svc = Servicers::new();
     let con = FakeConsole::default();
-    let (mut fs, _) = disk(64);
+    let (fs, _) = disk(64);
     let r = ram(&fs);
-    on(fs.write_at(b"/volumes/hop/state", 0, b"staat")).unwrap();
+    let fs = put(fs, b"/volumes/hop/state", b"staat");
     let mut f = FsActor::new(fs, &svc, &con);
     let inbox: FsInbox<'_> = Mailbox::new();
     assert!(
@@ -477,12 +479,12 @@ fn commit_logs_once_per_generation_and_survives_a_remount() {
 fn list_resp_wire_limit() {
     // `TestListRespWireLimit`: precies op de grens past, één byte erover is
     // een nette fout en geen half antwoord.
-    let (mut fs, _) = disk(64);
+    let (fs, _) = disk(64);
     let limit = 64usize;
-    on(fs.write_at(&[b"/d/".as_slice(), &[b'x'; 64]].concat(), 0, b"1")).unwrap();
+    let mut fs = put(fs, &[b"/d/".as_slice(), &[b'x'; 64]].concat(), b"1");
     let mut dst = vec![0u8; limit];
     assert_eq!(fs.list_into(b"/d", &mut dst).unwrap(), (1, 64));
-    on(fs.write_at(b"/d/y", 0, b"1")).unwrap();
+    let mut fs = put(fs, b"/d/y", b"1");
     assert!(matches!(
         fs.list_into(b"/d", &mut dst),
         Err(Error::TooLarge { .. })
@@ -561,12 +563,12 @@ fn drive<F: core::future::Future>(
 fn the_kern_reads_a_firmware_blob_without_a_slot() {
     let svc = Servicers::new();
     let con = FakeConsole::default();
-    let (mut fs, _) = disk(64);
+    let (fs, _) = disk(64);
     // Een blob van 300 KB, zoals de echte: over meer blokken dan één
-    // `read_at`-stap en met een staart die geen heel blok is.
+    // leesstap en met een staart die geen heel blok is.
     let blob: Vec<u8> = (0..300 * 1024 + 17).map(|i| (i * 7 % 251) as u8).collect();
-    on(fs.write_at(b"/firmware/hevcdec.fwb", 0, &blob)).unwrap();
-    on(fs.write_at(b"/.tasks/slot2/geheim", 0, b"van de app")).unwrap();
+    let fs = put(fs, b"/firmware/hevcdec.fwb", &blob);
+    let fs = put(fs, b"/.tasks/slot2/geheim", b"van de app");
     let mut f = FsActor::new(fs, &svc, &con);
 
     // Het handvat van de actor: maat, data, en de weigeringen.
@@ -773,7 +775,7 @@ fn spin<F: core::future::Future>(run: &mut core::pin::Pin<&mut F>) {
 
 /// De uitkomst op een antwoordplek, als die er is.
 fn got(r: &Reply) -> Option<Result<(u64, usize)>> {
-    r.take_fs().map(|d| d.result)
+    r.fs.try_take().map(|d| d.result)
 }
 
 impl<'s> Bench<'s> {
@@ -883,7 +885,7 @@ fn two_apps_have_their_reads_on_the_device_at_once_and_one_app_keeps_its_order()
     r.release(Kind::Write);
     spin(&mut run);
     assert_eq!(got(&wa), Some(Ok((4096, 0))));
-    let d = ra2.take_fs().unwrap();
+    let d = ra2.fs.try_take().unwrap();
     assert_eq!(d.result, Ok((4096, 4096)));
     assert!(
         d.out[HDR_LEN..HDR_LEN + 4096].iter().all(|&x| x == 7),
@@ -932,7 +934,7 @@ fn a_remove_waits_until_no_io_is_running() {
     assert!(got(&rm).is_none(), "remove terwijl een lees liep");
     r.release(Kind::Read);
     spin(&mut run);
-    let d = rd.take_fs().unwrap();
+    let d = rd.fs.try_take().unwrap();
     assert_eq!(d.result, Ok((4096, 4096)));
     assert!(d.out[HDR_LEN..HDR_LEN + 4096].iter().all(|&x| x == 9));
     assert_eq!(got(&rm), Some(Ok((0, 0))));
@@ -977,7 +979,15 @@ fn two_writers_of_one_file_take_turns() {
         (Some(Ok((4096, 0))), Some(Ok((4096, 0))))
     );
     let mut out = [0u8; 4096];
-    assert_eq!(on(f.fs().read_at(b"/volumes/v/log", 0, &mut out)), Ok(4096));
+    assert_eq!(
+        on(crate::hopfs::path::read(
+            f.tree(),
+            b"/volumes/v/log",
+            0,
+            &mut out
+        )),
+        Ok(4096)
+    );
     assert!(
         out.iter().all(|&x| x == 3),
         "de laatste schrijver wint, één blok"
@@ -1246,7 +1256,7 @@ fn a_failing_read_in_a_bundle_leaves_the_others_and_is_loud() {
     assert!(got(&done).is_none());
     r.release(Kind::Read);
     spin(&mut run);
-    let d = done.take_fs().unwrap();
+    let d = done.fs.try_take().unwrap();
     assert_eq!(d.result, Ok((3 * 4096, 4 * many::RESULT_LEN + 3 * 4096)));
     let c = FsCall {
         out: d.out,
@@ -1297,7 +1307,7 @@ fn two_bundles_of_one_app_share_the_device_and_a_write_waits_for_both() {
     r.release(Kind::Write);
     spin(&mut run);
     assert_eq!(got(&w), Some(Ok((4096, 0))));
-    let d = b3.take_fs().unwrap();
+    let d = b3.fs.try_take().unwrap();
     assert_eq!(d.result, Ok((4096, many::RESULT_LEN + 4096)));
     let at = HDR_LEN + many::RESULT_LEN;
     assert!(

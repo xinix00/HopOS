@@ -129,9 +129,6 @@ static UPLINK_MAC: AtomicU64 = AtomicU64::new(0);
 /// De DNS-server uit de lease (big-endian als getal; 0 = geen): Hop krijgt
 /// hem in zijn env, want zonder resolver haalt hij niets op naam.
 static UPLINK_DNS: AtomicU32 = AtomicU32::new(0);
-/// De bevestiging van een `Publish`; de plaatsing van Hop is de enige
-/// zender en wacht elke bevestiging af voor hij de volgende stuurt.
-static PUBLISH_ACK: Ack = Ack::new();
 /// Draait de switch-actor? Gezet na zijn spawn, nooit meer terug (de
 /// switch stopt niet). Wie op een bevestiging van de switch wil wachten,
 /// kijkt eerst hier.
@@ -221,26 +218,18 @@ pub(crate) fn uplink_ip() -> Option<Ipv4Addr> {
     }
 }
 
-/// Zet TCP-poort `port` van de uplink door naar dezelfde poort in `slot`
-/// (DNAT in de switch, `Command::Publish`): de poorten van Hop zelf. Wacht
-/// op de bevestiging van de switch.
-pub(crate) async fn publish(slot: usize, port: u16) -> Result<(), net::Error> {
-    publish_via(&PUBLISH_ACK, net::nat::Proto::Tcp, slot, port).await
-}
-
 /// Zet poort `port` (`proto`) van de uplink door naar dezelfde poort in
-/// `slot` en wacht op `ack`. Elke zender heeft zijn eigen `ack` en stuurt
-/// pas een volgende als de vorige bevestigd is: de plaatsing van Hop
-/// ([`publish`]) en de lifecycle-actor (de poorten van een jobspec,
-/// `kooi.rs`). Alleen met een draaiende switch ([`switch_up`]): anders
-/// leest niemand de brievenbus en duurt de wacht eeuwig.
-pub(crate) async fn publish_via(
+/// `slot` en wacht op `ack`: de poorten van een start (Hop en elke
+/// jobspec), door de lifecycle-actor (`kooi.rs`), die elke bevestiging
+/// afwacht voor hij de volgende stuurt. Alleen met een draaiende switch
+/// ([`switch_up`]): anders leest niemand de brievenbus en duurt de wacht
+/// eeuwig.
+pub(crate) async fn publish(
     ack: &'static Ack,
     proto: net::nat::Proto,
     slot: usize,
     port: u16,
 ) -> Result<(), net::Error> {
-    let _ = ack.try_take();
     let cmd = Command::Publish {
         proto,
         node_port: port,
@@ -248,10 +237,10 @@ pub(crate) async fn publish_via(
         slot_port: port,
         ack,
     };
-    if COMMANDS.try_send(cmd).is_err() {
-        return Err(net::Error::Full("switch mailbox", switch::COMMANDS));
+    match sync::oneshot::call(&COMMANDS, ack, cmd).await {
+        Ok(r) => r.map(|_| ()),
+        Err(_) => Err(net::Error::Full("switch mailbox", switch::COMMANDS)),
     }
-    ack.wait().await.map(|_| ())
 }
 
 /// Draait de switch-actor? Zonder NIC niet, en dan beantwoordt niemand een
@@ -475,12 +464,10 @@ impl Node {
                     uplink,
                     ack: &UPLINK_ACK,
                 };
-                if COMMANDS.try_send(cmd).is_ok() {
-                    if let Err(e) = UPLINK_ACK.wait().await {
-                        println!("net: switch refused the uplink: {e} HOPOS_NET_FAIL");
-                    }
-                } else {
-                    println!("net: switch mailbox full, uplink not set HOPOS_NET_FAIL");
+                match sync::oneshot::call(&COMMANDS, &UPLINK_ACK, cmd).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => println!("net: switch refused the uplink: {e} HOPOS_NET_FAIL"),
+                    Err(_) => println!("net: switch mailbox full, uplink not set HOPOS_NET_FAIL"),
                 }
             }
             Err(e) => println!("net: uplink /{}: {e} HOPOS_NET_FAIL", cidr.prefix),

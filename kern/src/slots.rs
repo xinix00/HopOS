@@ -61,7 +61,7 @@ use core::sync::atomic::{
 };
 use core::time::Duration;
 use sync::mpsc::Mailbox;
-use sync::{Either, LocalCell, Signal, select, yield_now};
+use sync::{Either, LocalCell, Oneshot, Signal, oneshot, select, yield_now};
 
 /// De brokmaat van de scrub. Een ononderbroken veeg over een partitie
 /// verhongert de netstack (96 MB x 127 loaders is ongeveer 12 s, gemeten in
@@ -307,6 +307,10 @@ pub enum Request {
         /// Voor wie.
         what: &'static str,
     },
+    /// Zet de poorten van elke bewoner opnieuw door
+    /// ([`Lifecycle::republish`]): na een adoptie waarvan de eerste poging
+    /// geen switch vond. Alleen de kern stuurt dit.
+    Republish,
 }
 
 /// Een verzameling slots: bit `i - 1` voor slot `i`.
@@ -361,16 +365,16 @@ pub struct SlotStatus {
     pub cage: Status,
 }
 
-/// Een antwoordplek voor één aanroeper. Een aanroeper uit een vaste pool
+/// De antwoordplekken van één aanroeper. Een aanroeper uit een vaste pool
 /// (een system-verbinding, de boot-code) heeft er één.
 ///
-/// Dezelfde plek draagt ook het antwoord van de hopfs-actor
-/// ([`crate::rpc`]): een aanroeper doet één verzoek tegelijk, dus de bel
-/// wordt nooit door twee actoren tegelijk geluid.
+/// Twee plaatsen, één per actor: [`Response`] van de lifecycle en
+/// [`FsDone`](crate::rpc::FsDone) van de hopfs-actor ([`crate::rpc`]) en de
+/// apparaat-actor ([`crate::deviceabi`]). Een aanroeper doet één verzoek
+/// tegelijk.
 pub struct Reply {
-    pub(crate) done: Signal,
-    val: LocalCell<Option<Response>>,
-    fs: LocalCell<Option<crate::rpc::FsDone>>,
+    val: Oneshot<Response>,
+    pub(crate) fs: Oneshot<crate::rpc::FsDone>,
 }
 
 impl Reply {
@@ -378,27 +382,9 @@ impl Reply {
     #[must_use]
     pub const fn new() -> Reply {
         Reply {
-            done: Signal::new(),
-            val: LocalCell::cell(None),
-            fs: LocalCell::cell(None),
+            val: Oneshot::new(),
+            fs: Oneshot::new(),
         }
-    }
-
-    fn put(&self, r: Response) {
-        *self.val.borrow_mut() = Some(r);
-        self.done.set();
-    }
-
-    /// Het antwoord van de hopfs-actor: de buffers gaan terug naar hun
-    /// eigenaar, met de uitkomst.
-    pub(crate) fn put_fs(&self, d: crate::rpc::FsDone) {
-        *self.fs.borrow_mut() = Some(d);
-        self.done.set();
-    }
-
-    /// Haalt het antwoord van de hopfs-actor op (één lening).
-    pub(crate) fn take_fs(&self) -> Option<crate::rpc::FsDone> {
-        self.fs.borrow_mut().take()
     }
 }
 
@@ -420,16 +406,13 @@ pub async fn call<'a, const N: usize>(
     reply: &'a Reply,
     req: Request,
 ) -> Result<Response> {
-    let _ = reply.done.take();
-    inbox
-        .try_send(Envelope {
-            req,
-            reply: Some(reply),
-        })
-        .map_err(|_| Error::Busy)?;
-    reply.done.wait().await;
-    let r = reply.val.borrow_mut().take();
-    r.ok_or(Error::Busy)
+    let env = Envelope {
+        req,
+        reply: Some(reply),
+    };
+    oneshot::call(inbox, &reply.val, env)
+        .await
+        .map_err(|_| Error::Busy)
 }
 
 /// De besturing van één servicer-taak.
@@ -805,7 +788,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             let env = inbox.recv().await;
             let r = self.handle(env.req).await;
             if let Some(reply) = env.reply {
-                reply.put(r);
+                reply.val.put(r);
             }
         }
     }
@@ -835,6 +818,10 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             }
             Request::ReleaseDevice { region, what } => {
                 self.release_device(region, what).map(|()| Response::Done)
+            }
+            Request::Republish => {
+                self.republish().await;
+                Ok(Response::Done)
             }
         };
         r.unwrap_or_else(Response::Failed)
@@ -1016,6 +1003,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             if !ports.is_empty() {
                 self.cage.unpublish(slot);
             }
+            self.cage.detach(slot).await;
             self.abort(grant);
             return Err(e);
         }
@@ -1069,6 +1057,7 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         if published {
             self.cage.unpublish(slot);
         }
+        self.cage.detach(slot).await;
         self.abort(grant);
         self.places.retire(core);
         self.log.log(format_args!(
@@ -1322,6 +1311,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         let (core, span) = (r.core, r.span);
         let published = !r.ports.is_empty();
         self.evict(slot).await;
+        // Eerst van de switch af (bevestigd), dan de kill-vlag: na de stop
+        // schrijft niemand meer in de ringen van een partitie die vrijkomt.
+        self.cage.detach(slot).await;
         self.cage.request_exit(slot);
         // De deuren dicht zodra de app gevraagd is te stoppen: een nieuwe
         // verbinding naar een app die weggaat, bereikt niemand meer, en de
@@ -1795,6 +1787,9 @@ pub(crate) mod tests {
         pub(crate) published: Vec<(usize, Vec<u16>)>,
         /// Welke slots hun publicaties terugtrokken, in volgorde.
         pub(crate) unpublished: Vec<usize>,
+        /// Welke slots van de switch gingen, en of hun kill-vlag toen al
+        /// stond (hij hoort er pas na te komen).
+        pub(crate) detached: Vec<(usize, bool)>,
         /// Een poort die al van dit slot is (de switch weigert hem).
         pub(crate) taken: Option<(u16, usize)>,
         /// Cores die nooit stil worden, wat de app ook doet (een secundaire
@@ -1827,6 +1822,7 @@ pub(crate) mod tests {
                 calls: Cell::new(0),
                 published: Vec::new(),
                 unpublished: Vec::new(),
+                detached: Vec::new(),
                 taken: None,
                 stuck: [false; 16],
                 asked_quiet: RefCell::new(Vec::new()),
@@ -1934,6 +1930,11 @@ pub(crate) mod tests {
         }
         fn unpublish(&mut self, slot: Slot) {
             self.unpublished.push(slot.get());
+        }
+        fn detach(&mut self, slot: Slot) -> impl core::future::Future<Output = ()> {
+            self.detached
+                .push((slot.get(), self.exit_asked[slot.get()]));
+            core::future::ready(())
         }
     }
 
@@ -2238,6 +2239,7 @@ pub(crate) mod tests {
             ctl.gone.set();
         });
         assert!(matches!(r, Err(Error::NeverStarted { slot: 1, core: 1 })));
+        assert_eq!(a.cage.detached, [(1, false)], "the built rings come off");
         assert!(con.saw("HOPOS_CORE_RETIRED"));
         assert!(!con.saw("HOPOS_PART_QUARANTINE"));
         assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
@@ -2297,7 +2299,13 @@ pub(crate) mod tests {
         let (svc, con) = (Servicers::new(), FakeConsole::default());
         let mut a = actor(&svc, &con, Obey::Exit, 32, 1);
         start(&mut a, 1, 32, 1).unwrap();
+        assert!(a.cage.detached.is_empty());
         stop(&mut a, 1).unwrap();
+        assert_eq!(
+            a.cage.detached,
+            [(1, false)],
+            "off the switch before the kill flag"
+        );
         assert!(!a.cage.revoked[1], "cooperative exit needed no revocation");
         assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
         assert_eq!(svc.current(s(1)), None);

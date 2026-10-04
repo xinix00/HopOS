@@ -17,8 +17,8 @@
 //! daarna gewoon, zoals in Go (`HOPOS_FS_UP` na `HOPOS_NVMEBENCH_DONE`).
 //!
 //! De bench meet het pad dat hopfs gebruikt, niet een eigen: de geleende
-//! schijf in een [`Paced`] met de pollende [`Spin`], elke opdracht een
-//! submit plus completion, afgedraaid met [`block_on`] (de executor draait
+//! schijf achter een [`Queue`] met de pollende [`Spin`], elke opdracht een
+//! ticket plus completion, afgedraaid met [`block_on`] (de executor draait
 //! nog niet; waarom er geen synchrone vorm is: de crate-doc van `blkdev`).
 //!
 //! De bench schrijft alleen in de staart van de schijf: de helft, hoogstens
@@ -30,16 +30,16 @@
 use crate::Disk;
 use alloc::string::String;
 use alloc::vec::Vec;
-use blkdev::{AsyncBlockDevice, BlockIo, LBA_SIZE, Op, Paced, Queue, Spin, block_on};
+use blkdev::{AsyncBlockDevice, BlockIo, LBA_SIZE, Op, Queue, Spin, block_on};
 use board::Board;
 use core::sync::atomic::Ordering::Relaxed;
 use core::task::Poll;
 use core::time::Duration;
 use cpu::println;
 use executor::Executor;
-use kern::hopfs::Fs;
+use kern::hopfs::{self, Fs};
 use kern::slots::{Reply, Request, Response};
-use sync::Futures;
+use sync::{Futures, LocalCell};
 
 /// De staart die de bench hoogstens beschrijft.
 const SPAN_MAX: u64 = 1 << 30;
@@ -278,19 +278,22 @@ fn bench_disk(exec: &'static Executor, disk: &mut Disk) {
         span >> 20
     );
     let t = Bench { exec, base, max };
-    let mut disk = Paced::new(disk, Spin);
     // Eerst de blokken die een vorige run schreef (oud), straks dezelfde
     // net geschreven (vers): zo zie je of een lees uit de cache van de SSD
     // komt of van het flash.
-    let ok = t.random_queue(disk.dev_mut(), span, 1, "old")
-        && t.sizes(&mut disk, &mut buf, span)
-        && t.sequential(&mut disk, &mut buf, span)
-        && t.random(&mut disk, &mut buf, span)
+    let ok = t.random_queue(&mut *disk, span, 1, "old")
+        && {
+            let q = Queue::new(&mut *disk, Spin);
+            let mut io = &q;
+            t.sizes(&mut io, &mut buf, span)
+                && t.sequential(&mut io, &mut buf, span)
+                && t.random(&mut io, &mut buf, span)
+        }
         && QUEUE_DEPTHS
             .iter()
-            .all(|&d| t.random_queue(disk.dev_mut(), span, d, "fresh"));
+            .all(|&d| t.random_queue(&mut *disk, span, d, "fresh"));
     if ok {
-        t.hopfs(&mut disk, &mut buf, span);
+        t.hopfs(&Queue::new(&mut *disk, Spin), &mut buf, span);
     }
     println!("nvme bench: done HOPOS_NVMEBENCH_DONE");
 }
@@ -500,16 +503,16 @@ impl Bench {
     /// de rauwe regels is wat hopfs zelf kost, zonder servicer en
     /// transport. Vóór de executor draait: elke call met `block_on`
     /// afgedraaid.
-    fn hopfs<D: BlockIo>(&self, disk: D, buf: &mut [u8], span: u64) {
-        let mut fs = match Fs::new(disk, self.base, span / LBA_SIZE, LBA_SIZE, self.max as u64) {
-            Ok(f) => f,
+    fn hopfs<D: AsyncBlockDevice>(&self, q: &Queue<D, Spin>, buf: &mut [u8], span: u64) {
+        let fs = match Fs::new(q, self.base, span / LBA_SIZE, LBA_SIZE, self.max as u64) {
+            Ok(f) => LocalCell::cell(f),
             Err(e) => {
                 println!("hopfs bench: {e} HOPOS_NVMEBENCH_FAIL");
                 return;
             }
         };
         let path: &[u8] = b"/.bench/hopfs.bin";
-        if let Err(e) = fs.mkdir_all(b"/.bench") {
+        if let Err(e) = fs.borrow_mut().mkdir_all(b"/.bench") {
             println!("hopfs bench: mkdir: {e} HOPOS_NVMEBENCH_FAIL");
             return;
         }
@@ -521,7 +524,7 @@ impl Bench {
             let t0 = self.now();
             for k in 0..n {
                 crate::watchdog::pet_now();
-                if let Err(e) = block_on(fs.write_at(path, k * sz, chunk)) {
+                if let Err(e) = block_on(hopfs::path::write(&fs, path, k * sz, chunk)) {
                     println!("hopfs bench: write: {e} HOPOS_NVMEBENCH_FAIL");
                     return;
                 }
@@ -529,7 +532,7 @@ impl Bench {
             let t1 = self.now();
             for k in 0..n {
                 crate::watchdog::pet_now();
-                if let Err(e) = block_on(fs.read_at(path, k * sz, chunk)) {
+                if let Err(e) = block_on(hopfs::path::read(&fs, path, k * sz, chunk)) {
                     println!("hopfs bench: read: {e} HOPOS_NVMEBENCH_FAIL");
                     return;
                 }
@@ -600,12 +603,6 @@ impl<D: AsyncBlockDevice> Meter<D> {
 impl<D: AsyncBlockDevice> AsyncBlockDevice for Meter<D> {
     fn max_transfer(&self) -> usize {
         self.dev.max_transfer()
-    }
-    fn start(&mut self, op: Op<'_>) -> blkdev::Result {
-        self.dev.start(op)
-    }
-    fn poll_done(&mut self, into: &mut [u8]) -> Poll<blkdev::Result> {
-        self.dev.poll_done(into)
     }
     fn poll_pace(&self) -> (u64, Duration) {
         self.dev.poll_pace()

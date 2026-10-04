@@ -2,8 +2,8 @@
 //!
 //! De vorm is die van de NVMe-driver uit de Go-kern
 //! (`OLD/metal/driver/nvme`): één verzoek tegelijk, één DMA-buffer, achter
-//! [`blkdev::AsyncBlockDevice`] (submit plus completion). Dat is het enige
-//! pad: de hopfs-actor wacht erop met `.await`, en wat vóór de executor
+//! [`blkdev::AsyncBlockDevice`] (submit plus completion, op ticket 0). Dat
+//! is het enige pad: de hopfs-actor wacht erop met `.await`, en wat vóór de executor
 //! draait (de mount, de meetbank) met `blkdev::block_on` over dezelfde
 //! futures (waarom: de crate-doc van `blkdev`).
 //! Eén in-flight verzoek is geen beperking maar de vorm: de eigenaar
@@ -21,10 +21,10 @@
 //! data (het device leest of schrijft) en de statusbyte (het device
 //! schrijft).
 //!
-//! Wachten: na de doorbell gaat de executor door, en de wachter kijkt weer
-//! bij de bel van de IRQ-lijn ([`VirtioBlk::set_irq`], het board bedraadt
-//! hem) of, zonder lijn, pollend (`blkdev::InFlight::done`). Les van 30-09:
-//! de synchrone commit van hopfs hield de OS-core tot 7 s stil op een trage
+//! Wachten: na de doorbell gaat de executor door, en de wachter van
+//! `blkdev::Queue` kijkt weer bij de bel van de IRQ-lijn
+//! ([`VirtioBlk::set_irq`], het board bedraadt hem) of, zonder lijn,
+//! pollend. Les van 30-09: de synchrone commit van hopfs hield de OS-core tot 7 s stil op een trage
 //! schijf (een FLUSH is op macOS een F_FULLFSYNC van het image). Een
 //! verzoek dat na [`REQUEST_TIMEOUT_NS`] niet klaar is, maakt de driver
 //! dood: het device kan nog in de buffer schrijven, dus een volgend verzoek
@@ -601,16 +601,19 @@ impl<T: Transport> blkdev::AsyncBlockDevice for VirtioBlk<T> {
         MAX_TRANSFER
     }
 
-    fn start(&mut self, op: Op<'_>) -> blkdev::Result {
+    /// Eén opdracht tegelijk: ticket 0.
+    fn start_tag(&mut self, op: Op<'_>) -> blkdev::Result<usize> {
         let (lba, len) = match op {
             Op::Read { lba, len } => (lba, len),
             Op::Write { lba, data } => (lba, data.len()),
             Op::Flush => (0, 0),
         };
-        self.start_op(op).map_err(|e| blk_err(e, lba, len))
+        self.start_op(op)
+            .map(|()| 0)
+            .map_err(|e| blk_err(e, lba, len))
     }
 
-    fn poll_done(&mut self, into: &mut [u8]) -> Poll<blkdev::Result> {
+    fn poll_tag(&mut self, _t: usize, into: &mut [u8]) -> Poll<blkdev::Result> {
         let lba = self.pending.map_or(0, |p| p.sector);
         let len = self.pending.map_or(0, |p| p.len);
         self.poll_op(into).map_err(|e| blk_err(e, lba, len))

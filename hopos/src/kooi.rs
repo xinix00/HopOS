@@ -480,8 +480,7 @@ impl<I: Isa> Cage for Kooi<I> {
     }
 
     fn request_exit(&mut self, slot: Slot) {
-        // Elke stop begint hier: eerst van de switch af, dan de kill-vlag.
-        detach(slot);
+        // De lifecycle haalde de ringen al van de switch (`Cage::detach`).
         self.ctrl_write(slot, CTRL_KILL, 1);
         let Some(b) = self.built(slot) else { return };
         // Een buur die alleen overblijft, hoeft niet meer te yielden; en de
@@ -622,6 +621,10 @@ impl<I: Isa> Cage for Kooi<I> {
     fn unpublish(&mut self, slot: Slot) {
         unpublish_ports(slot);
     }
+
+    fn detach(&mut self, slot: Slot) -> impl Future<Output = ()> {
+        detach(slot)
+    }
 }
 
 /// De cores van deze node over architectuur `I`: logische core 0 is de
@@ -687,9 +690,9 @@ fn idle_ns(ticks: u64) -> u64 {
 /// wacht erop (de kooi-trait is synchroon); het resultaat wordt bij de
 /// volgende attach opgehaald en gemeld als het een weigering was.
 static ATTACH_ACK: Ack = Ack::new();
-/// De bevestiging van de `Detach` bij een stop.
+/// De bevestiging van de `Detach` bij een stop; de lifecycle wacht erop.
 static DETACH_ACK: Ack = Ack::new();
-/// De bevestiging van elke `Publish` van de poorten van een jobspec. De
+/// De bevestiging van elke `Publish` van de poorten van een start. De
 /// lifecycle-actor is de enige zender en wacht elke bevestiging af.
 static PUBLISH_ACK: Ack = Ack::new();
 /// De bevestiging van de `UnpublishSlot` bij een stop. Niemand wacht erop:
@@ -767,25 +770,30 @@ mod tail_rings {
     }
 }
 
-/// Haalt de ringen van `slot` weer van de switch, bij elke stop. FIXME: de
-/// kooi-trait is synchroon, dus niemand wacht op de bevestiging; de
-/// partitie komt pas vrij na de stil-toets van de actor en een nieuwe claim
-/// is een later bericht, en in die tijd draait de switch zijn ronde. Een
-/// asynchrone ontkoppel-haak in `kern::slots::stop` maakt dit hard.
-fn detach(slot: Slot) {
-    let _ = DETACH_ACK.try_take();
+/// Haalt de ringen van `slot` weer van de switch en wacht op de
+/// bevestiging (`Cage::detach`, door de lifecycle bij elke stop): daarna
+/// raakt de switch de staart van de partitie niet meer aan. Zonder switch
+/// (geen NIC) hing er niets en leest niemand de brievenbus.
+async fn detach(slot: Slot) {
+    if !crate::net::switch_up() {
+        return;
+    }
     let cmd = Command::Detach {
         slot: slot.get(),
         ack: &DETACH_ACK,
     };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        println!("cage: slot {slot}: switch mailbox full, detach not sent HOPOS_CAGE_DETACH");
+    match sync::oneshot::call(&crate::net::COMMANDS, &DETACH_ACK, cmd).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => println!("cage: slot {slot}: detach refused: {e} HOPOS_CAGE_DETACH"),
+        Err(_) => {
+            println!("cage: slot {slot}: switch mailbox full, detach not sent HOPOS_CAGE_DETACH")
+        }
     }
 }
 
-/// Zet de poorten van een jobspec door, elk voor tcp en udp (Go's
-/// `armSlot`: de jobspec kent geen protocol, en een app die er één bedient
-/// laat de ander onbeantwoord). Stopt bij de eerste weigering; wat er al
+/// Zet de poorten van een start door (Hop of een jobspec), elk voor tcp en
+/// udp (Go's `armSlot`: de jobspec kent geen protocol, en een app die er één
+/// bedient laat de ander onbeantwoord). Stopt bij de eerste weigering; wat er al
 /// open stond, trekt de lifecycle in (`Cage::unpublish`).
 async fn publish_ports(slot: Slot, ports: &[u16]) -> Result<(), PortError> {
     use net::nat::Proto;
@@ -798,7 +806,7 @@ async fn publish_ports(slot: Slot, ports: &[u16]) -> Result<(), PortError> {
     }
     for &port in ports {
         for proto in [Proto::Tcp, Proto::Udp] {
-            match crate::net::publish_via(&PUBLISH_ACK, proto, slot.get(), port).await {
+            match crate::net::publish(&PUBLISH_ACK, proto, slot.get(), port).await {
                 Ok(()) => {}
                 Err(net::Error::AlreadyPublished { port, slot: owner }) => {
                     return Err(PortError::Taken { port, owner });

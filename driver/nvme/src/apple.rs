@@ -540,7 +540,7 @@ mod tests {
     use super::*;
     use crate::tests::{Ctl, Mem, machine, now, with};
     use crate::{ADM_IDENTIFY, DMA_NEED, IO_WRITE, SECTOR};
-    use blkdev::{BlockIo, Paced, Spin, block_on};
+    use blkdev::{BlockIo, Spin, block_on};
     use std::cell::RefCell;
     use std::string::ToString;
     use std::vec;
@@ -793,11 +793,13 @@ mod tests {
         // Zonder venster ziet het contract geen schijf, en elke schrijf
         // wordt luid geweigerd.
         assert_eq!(a.sectors(), 0);
-        let mut io = Paced::new(&mut a, Spin);
+        let q = blkdev::Queue::new(&mut a, Spin);
+        let mut io = &q;
         assert!(matches!(
             block_on(io.read(0, &mut b)),
             Err(blkdev::Error::OutOfRange { .. })
         ));
+        drop(q);
         let r = write_abs(&mut a, 20, &b);
         assert_eq!(
             r,
@@ -822,7 +824,8 @@ mod tests {
         // Het contract over het venster: LBA 16 (512 bytes) is blok 2 van
         // het venster, schijfblok 12; voorbij het venster is buiten.
         assert_eq!(a.sectors(), 5 * BLOCK / SECTOR);
-        let mut io = Paced::new(&mut a, Spin);
+        let q = blkdev::Queue::new(&mut a, Spin);
+        let mut io = &q;
         block_on(io.write(16, &vec![0x11; 2 * BLOCK as usize])).unwrap();
         let past = block_on(io.write(32, &vec![0; 2 * BLOCK as usize]));
         assert!(matches!(past, Err(blkdev::Error::OutOfRange { .. })));

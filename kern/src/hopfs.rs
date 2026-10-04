@@ -1,26 +1,24 @@
 //! hopfs: HOP's minimale bestandslaag op de NVMe. De metadata (boom,
 //! extents, vrije lijst) leeft in RAM, de data in 4 KB-blokken op de schijf,
-//! en sinds 24-09 legt [`Fs::commit`] de boom vast (twee plekken, de nieuwste
+//! en sinds 24-09 legt [`commit`] de boom vast (twee plekken, de nieuwste
 //! geldige wint) zodat een flip en een koude boot niet leeg beginnen.
 //!
 //! Eén eigenaar-taak bezit de [`Fs`]: de `FS.mu` uit Go is weg. Het plan
 //! staat los van de I/O: [`Fs::read_step`] en [`Fs::write_step`] vertalen
 //! één brok synchroon (een schrijf krijgt daar zijn verse run), de I/O doet
 //! de aanroeper, en [`Fs::write_landed`] publiceert de mapping pas ná de
-//! data. [`Fs::read_at`] en [`Fs::write_at`] zijn die stappen met de eigen
-//! schijf; de actor met meerdere calls in de lucht doet ze met de boom in
-//! een [`Tree`] die alleen tussen twee stappen geleend wordt
-//! ([`read_shared`], [`write_shared`]), en legt vast met [`commit_shared`]
-//! terwijl andere calls doorlopen.
+//! data. [`read`], [`write`] en [`truncate`] zijn die stappen met de I/O
+//! ertussen, op de boom in een [`Tree`] die alleen tussen twee stappen
+//! geleend wordt, zodat de actor meerdere calls in de lucht heeft; [`commit`]
+//! legt vast terwijl andere calls doorlopen. Eén pad, ook voor de tests en
+//! de meetbank.
 //!
 //! De I/O is een future ([`BlockIo`]): elk blok-verzoek is een submit plus
 //! een `.await` op de completion, en tijdens die await draait de executor
-//! door. Les van 30-09: [`Fs::commit`] (FLUSH, de boom, FLUSH) wachtte tot
+//! door. Les van 30-09: de commit (FLUSH, de boom, FLUSH) wachtte tot
 //! dan synchroon op het device, en op een trage schijf stond de hele
-//! OS-core met Hop en de switch tot 7 s stil. De eigenaar houdt zijn boom
-//! over de await (hij is de enige die hem aanraakt, en een tweede bericht
-//! wacht in zijn brievenbus); geen `RefCell` of tabel van een ander leeft
-//! eroverheen.
+//! OS-core met Hop en de switch tot 7 s stil. Geen lening van de boom
+//! leeft over een await.
 //!
 //! Paden zijn al door de mount-resolutie heen: dit is de laatste grens, dus
 //! `..` is een fout.
@@ -51,8 +49,8 @@ const MAX_DEPTH: usize = 4096;
 
 /// Het blokapparaat onder hopfs. Het contract woont in `blkdev`, onder
 /// driver én kern (handboek §7); hier alleen de naam. Er is één vorm: een
-/// driver (`blkdev::AsyncBlockDevice`) in een `blkdev::Paced`; wie vóór de
-/// executor mount of meet, draait dezelfde futures af met
+/// driver (`blkdev::AsyncBlockDevice`) achter een `blkdev::Queue`; wie vóór
+/// de executor mount of meet, draait dezelfde futures af met
 /// `blkdev::block_on`.
 pub use blkdev::{BatchRead, BlockIo};
 
@@ -484,20 +482,6 @@ impl<D: BlockIo> Fs<D> {
         }
     }
 
-    /// Leest hooguit `buf.len()` bytes; gaten lezen als nul.
-    pub async fn read_at(&mut self, path: &[u8], off: u64, buf: &mut [u8]) -> Result<usize> {
-        let n = self.find(path)?;
-        let want = self.read_len(n, off, buf.len())?;
-        let mut tmp = [0u8; BLOCK_SIZE];
-        let mut done = 0usize;
-        while done < want {
-            let step = self.read_step(n, off + done as u64, want - done)?;
-            let dst = buf.get_mut(done..want).unwrap_or(&mut []);
-            done += read_step_io(&mut self.disk, step, dst, &mut tmp).await?;
-        }
-        Ok(done)
-    }
-
     /// De node van een bestaand pad.
     pub fn find(&mut self, path: &[u8]) -> Result<usize> {
         self.walk(&split(path)?, false)
@@ -553,25 +537,6 @@ impl<D: BlockIo> Fs<D> {
         } else {
             Ok(n)
         }
-    }
-
-    /// Schrijft `data` op `off`. Eerdere geslaagde brokken blijven bij een
-    /// I/O-fout; een verse mapping wordt pas NA de data gepubliceerd, zodat
-    /// een oude eigenaar nooit zichtbaar wordt.
-    pub async fn write_at(&mut self, path: &[u8], off: u64, data: &[u8]) -> Result {
-        let n = self.write_open(path, off, data.len())?;
-        let mut tmp = [0u8; BLOCK_SIZE];
-        let mut done = 0usize;
-        while done < data.len() {
-            let pos = off + done as u64;
-            let step = self.write_step(n, pos, data.len() - done)?;
-            let src = data
-                .get(done..done + step.len)
-                .ok_or(Error::Corrupt { at: done })?;
-            let res = write_step_io(&mut self.disk, &step, src, &mut tmp).await;
-            done += self.write_landed(n, &step, pos, res)?;
-        }
-        Ok(())
     }
 
     /// Toetst een schrijf van `len` bytes op `off` en geeft de node van het
@@ -662,17 +627,6 @@ impl<D: BlockIo> Fs<D> {
         }
         self.dirty = true;
         Ok(s.len)
-    }
-
-    /// Groeit ijl; krimpen geeft runs terug en wist de bewaarde staart, zodat
-    /// een latere groei geen weggegooide bytes laat zien.
-    pub async fn truncate(&mut self, path: &[u8], size: u64) -> Result {
-        let n = self.truncate_open(path, size)?;
-        if let Some(lba) = self.truncate_tail(n, size)? {
-            let mut tmp = [0u8; BLOCK_SIZE];
-            clear_tail(&mut self.disk, lba, (size % BS) as usize, &mut tmp).await?;
-        }
-        self.truncate_set(n, size)
     }
 
     /// Toetst een truncate en geeft de node van het bestand (dat zo nodig
@@ -889,8 +843,9 @@ impl<D: BlockIo> Fs<D> {
 /// calls nooit op elkaars schijf.
 pub type Tree<D> = LocalCell<Fs<D>>;
 
-/// [`Fs::read_at`] voor een call in de lucht, op node `n`.
-pub async fn read_shared<D: BlockIo + Copy>(
+/// Leest hooguit `buf.len()` bytes van node `n` (uit [`Fs::find`]) op
+/// `off`; gaten lezen als nul. Geeft de gelezen bytes.
+pub async fn read<D: BlockIo + Copy>(
     t: &Tree<D>,
     n: usize,
     off: u64,
@@ -910,16 +865,13 @@ pub async fn read_shared<D: BlockIo + Copy>(
     Ok(done)
 }
 
-/// [`Fs::write_at`] voor een call in de lucht, op node `n` (uit
-/// [`Fs::write_open`]). Eén schrijver per bestand tegelijk: dat bewaakt de
-/// aanroeper (twee verse runs voor hetzelfde blok zouden allebei gemapt
+/// Schrijft `data` op `off` in node `n` (uit [`Fs::write_open`]). Eerdere
+/// geslaagde brokken blijven bij een I/O-fout; een verse mapping wordt pas
+/// NA de data gepubliceerd ([`Fs::write_landed`]), zodat een oude eigenaar
+/// nooit zichtbaar wordt. Eén schrijver per bestand tegelijk: dat bewaakt
+/// de aanroeper (twee verse runs voor hetzelfde blok zouden allebei gemapt
 /// willen worden).
-pub async fn write_shared<D: BlockIo + Copy>(
-    t: &Tree<D>,
-    n: usize,
-    off: u64,
-    data: &[u8],
-) -> Result {
+pub async fn write<D: BlockIo + Copy>(t: &Tree<D>, n: usize, off: u64, data: &[u8]) -> Result {
     let mut disk = t.borrow().disk();
     let mut tmp = [0u8; BLOCK_SIZE];
     let mut done = 0usize;
@@ -935,10 +887,11 @@ pub async fn write_shared<D: BlockIo + Copy>(
     Ok(())
 }
 
-/// [`Fs::truncate`] voor een call in de lucht, op node `n` (uit
-/// [`Fs::truncate_open`]). Krimpen geeft blokken vrij: de aanroeper laat
-/// dit alleen toe als er niets anders loopt.
-pub async fn truncate_shared<D: BlockIo + Copy>(t: &Tree<D>, n: usize, size: u64) -> Result {
+/// Zet de maat van node `n` (uit [`Fs::truncate_open`]) op `size`. Groeit
+/// ijl; krimpen geeft runs terug en wist de bewaarde staart, zodat een
+/// latere groei geen weggegooide bytes laat zien. Krimpen geeft blokken
+/// vrij: de aanroeper laat dit alleen toe als er niets anders loopt.
+pub async fn truncate<D: BlockIo + Copy>(t: &Tree<D>, n: usize, size: u64) -> Result {
     let (tail, mut disk) = {
         let fs = t.borrow();
         (fs.truncate_tail(n, size)?, fs.disk())
@@ -950,10 +903,17 @@ pub async fn truncate_shared<D: BlockIo + Copy>(t: &Tree<D>, n: usize, size: u64
     t.borrow_mut().truncate_set(n, size)
 }
 
-/// [`Fs::commit`] voor de actor: de boom van nu vastleggen terwijl andere
-/// calls doorlopen. Geeft de nieuwe generatie, of `None` als er niets te
-/// doen was. Hoogstens één tegelijk: dat bewaakt de aanroeper.
-pub async fn commit_shared<D: BlockIo + Copy>(t: &Tree<D>) -> Result<Option<u64>> {
+/// Legt de boom van nu vast als hij veranderde, terwijl andere calls
+/// doorlopen: data flushen, boom in de ANDERE plek (eerst de body, dan de
+/// kop), weer flushen, en pas dan de uitgestelde vrijgaven echt vrijgeven
+/// ([`Fs::commit_begin`], [`CommitJob::io`], [`Fs::commit_end`]). De kop
+/// komt als laatste, dus een gescheurde schrijf maakt alleen de nieuwe plek
+/// ongeldig. Geeft de nieuwe generatie, of `None` als er niets te doen was.
+/// Hoogstens één tegelijk: dat bewaakt de aanroeper.
+///
+/// De flip bevriest hopfs door dit te roepen en daarna geen verzoek meer
+/// aan te nemen: de eigenaar-taak IS het slot dat `Freeze` in Go was.
+pub async fn commit<D: BlockIo + Copy>(t: &Tree<D>) -> Result<Option<u64>> {
     let (job, mut disk) = {
         let mut fs = t.borrow_mut();
         (fs.commit_begin()?, fs.disk())
@@ -967,17 +927,54 @@ pub async fn commit_shared<D: BlockIo + Copy>(t: &Tree<D>) -> Result<Option<u64>
     Ok(Some(fs.generation()))
 }
 
-/// [`Fs::sync`] voor de actor: de barrière (een vastlegging, of zonder
-/// verandering alleen een flush). Geeft de bevestigde generatie.
-pub async fn sync_shared<D: BlockIo + Copy>(t: &Tree<D>) -> Result<u64> {
+/// De expliciete duurzame barrière: een vastlegging, of zonder verandering
+/// alleen een device-flush. Geeft de bevestigde generatie; op vluchtige
+/// opslag [`Error::VolatileStorage`], want daar bestaat geen duurzame
+/// bevestiging.
+pub async fn sync<D: BlockIo + Copy>(t: &Tree<D>) -> Result<u64> {
     if !t.borrow().is_persistent() {
         return Err(Error::VolatileStorage);
     }
-    if commit_shared(t).await?.is_none() {
+    if commit(t).await?.is_none() {
         let mut disk = t.borrow().disk();
         disk.flush().await?;
     }
     Ok(t.borrow().generation())
+}
+
+/// De calls op een pad, voor wie zonder actor leest en schrijft: de tests en
+/// de meetbank. Dezelfde [`read`], [`write`] en [`truncate`], met de node
+/// eerst opgezocht.
+pub mod path {
+    use super::{BlockIo, Result, Tree};
+
+    /// Leest hooguit `buf.len()` bytes van `path` op `off`.
+    pub async fn read<D: BlockIo + Copy>(
+        t: &Tree<D>,
+        path: &[u8],
+        off: u64,
+        buf: &mut [u8],
+    ) -> Result<usize> {
+        let n = t.borrow_mut().find(path)?;
+        super::read(t, n, off, buf).await
+    }
+
+    /// Schrijft `data` op `off` in `path`; het bestand ontstaat zo nodig.
+    pub async fn write<D: BlockIo + Copy>(
+        t: &Tree<D>,
+        path: &[u8],
+        off: u64,
+        data: &[u8],
+    ) -> Result {
+        let n = t.borrow_mut().write_open(path, off, data.len())?;
+        super::write(t, n, off, data).await
+    }
+
+    /// Zet de maat van `path` op `size`; het bestand ontstaat zo nodig.
+    pub async fn truncate<D: BlockIo + Copy>(t: &Tree<D>, path: &[u8], size: u64) -> Result {
+        let n = t.borrow_mut().truncate_open(path, size)?;
+        super::truncate(t, n, size).await
+    }
 }
 
 /// Wat [`Fs::mount`] aantrof, voor de ene consoleregel.
@@ -1069,38 +1066,6 @@ impl<D: BlockIo> Fs<D> {
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.generation
-    }
-
-    /// Expliciete duurzame barrière: ook een ongewijzigde boom vraagt een
-    /// device-flush. `commit` alleen mag op vluchtige opslag niets doen;
-    /// deze API mag daar nooit een duurzame bevestiging voor teruggeven.
-    pub async fn sync(&mut self) -> Result<u64> {
-        if !self.persist {
-            return Err(Error::VolatileStorage);
-        }
-        match self.commit_begin()? {
-            Some(job) => {
-                let r = job.io(&mut self.disk).await;
-                self.commit_end(job, r)?;
-            }
-            None => self.disk.flush().await?,
-        }
-        Ok(self.generation)
-    }
-
-    /// Legt de boom vast als hij veranderde: data flushen, boom in de ANDERE
-    /// plek (eerst de body, dan de kop), weer flushen, en pas dan de
-    /// uitgestelde vrijgaven echt vrijgeven. De kop komt als laatste, dus een
-    /// gescheurde schrijf maakt alleen de nieuwe plek ongeldig.
-    ///
-    /// De flip bevriest hopfs door dit te roepen en daarna geen verzoek meer
-    /// aan te nemen: de eigenaar-taak IS het slot dat `Freeze` in Go was.
-    pub async fn commit(&mut self) -> Result {
-        let Some(job) = self.commit_begin()? else {
-            return Ok(());
-        };
-        let r = job.io(&mut self.disk).await;
-        self.commit_end(job, r)
     }
 
     /// Is de opslag duurzaam (een boom die vastgelegd wordt)?
@@ -1477,24 +1442,30 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::cell::{Cell, RefCell};
     use std::vec;
 
-    /// Een schijf in RAM die telt wat er langskomt.
+    /// Een schijf in RAM die telt wat er langskomt. Hopfs leent hem als
+    /// gedeeld handvat (`&RamDisk`), zoals de kern de wachtrij.
     struct RamDisk {
         block: u64,
-        data: Vec<u8>,
-        writes: Vec<(u64, usize)>,
-        fail: bool,
+        data: RefCell<Vec<u8>>,
+        writes: RefCell<Vec<(u64, usize)>>,
+        fail: Cell<bool>,
     }
 
     impl RamDisk {
         fn new(block: u64, bytes: usize) -> RamDisk {
             RamDisk {
                 block,
-                data: vec![0; bytes],
-                writes: Vec::new(),
-                fail: false,
+                data: RefCell::new(vec![0; bytes]),
+                writes: RefCell::new(Vec::new()),
+                fail: Cell::new(false),
             }
+        }
+
+        fn blocks(&self) -> u64 {
+            self.data.borrow().len() as u64 / self.block
         }
     }
 
@@ -1503,27 +1474,27 @@ mod tests {
         blkdev::block_on(f)
     }
 
-    impl BlockIo for RamDisk {
+    impl BlockIo for &RamDisk {
         async fn read(&mut self, lba: u64, buf: &mut [u8]) -> blkdev::Result {
             let off = (lba * self.block) as usize;
-            let s = self
-                .data
+            let data = self.data.borrow();
+            let s = data
                 .get(off..off + buf.len())
                 .ok_or(blkdev::Error::Io { lba })?;
             buf.copy_from_slice(s);
             Ok(())
         }
         async fn write(&mut self, lba: u64, buf: &[u8]) -> blkdev::Result {
-            if self.fail {
+            if self.fail.get() {
                 return Err(blkdev::Error::Io { lba });
             }
             let off = (lba * self.block) as usize;
-            let d = self
-                .data
+            let mut data = self.data.borrow_mut();
+            let d = data
                 .get_mut(off..off + buf.len())
                 .ok_or(blkdev::Error::Io { lba })?;
             d.copy_from_slice(buf);
-            self.writes.push((lba, buf.len()));
+            self.writes.borrow_mut().push((lba, buf.len()));
             Ok(())
         }
         async fn flush(&mut self) -> blkdev::Result {
@@ -1537,38 +1508,42 @@ mod tests {
             .collect()
     }
 
-    fn vol(d: &mut RamDisk) -> Fs<&mut RamDisk> {
-        let blocks = d.data.len() as u64 / d.block;
-        let b = d.block;
-        Fs::new(d, 0, blocks, b, 1 << 20).unwrap()
+    type Vol<'d> = Tree<&'d RamDisk>;
+
+    fn vol(d: &RamDisk) -> Vol<'_> {
+        LocalCell::cell(Fs::new(d, 0, d.blocks(), d.block, 1 << 20).unwrap())
     }
 
-    fn must_read(f: &mut Fs<&mut RamDisk>, path: &[u8], want: &[u8]) {
+    fn write(f: &Vol<'_>, p: &[u8], off: u64, data: &[u8]) -> Result {
+        on(path::write(f, p, off, data))
+    }
+
+    fn must_read(f: &Vol<'_>, p: &[u8], want: &[u8]) {
         let mut got = vec![0u8; want.len()];
-        assert_eq!(on(f.read_at(path, 0, &mut got)).unwrap(), want.len());
+        assert_eq!(on(path::read(f, p, 0, &mut got)).unwrap(), want.len());
         assert!(got == want, "content differs");
     }
 
     #[test]
     fn aaneengesloten_io_wordt_per_mi_b_gebundeld() {
-        let mut d = RamDisk::new(512, 4 << 20);
-        let mut f = vol(&mut d);
+        let d = RamDisk::new(512, 4 << 20);
+        let f = vol(&d);
         let want = pattern(2 << 20, 7);
-        on(f.write_at(b"/data.bin", 0, &want)).unwrap();
-        must_read(&mut f, b"/data.bin", &want);
+        write(&f, b"/data.bin", 0, &want).unwrap();
+        must_read(&f, b"/data.bin", &want);
         drop(f);
-        assert_eq!(d.writes, vec![(0, 1 << 20), (2048, 1 << 20)]);
+        assert_eq!(*d.writes.borrow(), vec![(0, 1 << 20), (2048, 1 << 20)]);
     }
 
     #[test]
     fn list_n_sorteert_binnen_limiet() {
-        let mut d = RamDisk::new(4096, 1 << 20);
-        let mut f = vol(&mut d);
+        let d = RamDisk::new(4096, 1 << 20);
+        let f = vol(&d);
         for n in [&b"b"[..], b"a", b"c"] {
-            on(f.write_at(&[b"/d/", n].concat(), 0, b"x")).unwrap();
+            write(&f, &[b"/d/", n].concat(), 0, b"x").unwrap();
         }
-        f.mkdir_all(b"/d/sub").unwrap();
-        let names = f.list_n(b"/d", 4).unwrap().unwrap();
+        f.borrow_mut().mkdir_all(b"/d/sub").unwrap();
+        let names = f.borrow_mut().list_n(b"/d", 4).unwrap().unwrap();
         assert_eq!(
             names,
             vec![
@@ -1578,63 +1553,64 @@ mod tests {
                 b"sub/".to_vec()
             ]
         );
-        assert_eq!(f.list_n(b"/d", 3).unwrap(), None, "partial listing built");
+        assert_eq!(
+            f.borrow_mut().list_n(b"/d", 3).unwrap(),
+            None,
+            "partial listing built"
+        );
     }
 
     #[test]
     fn paths_reject_dot_dot_and_kinds() {
-        let mut d = RamDisk::new(4096, 1 << 20);
-        let mut f = vol(&mut d);
-        assert_eq!(on(f.write_at(b"/a/../b", 0, b"x")), Err(Error::BadPath));
-        on(f.write_at(b"/f", 0, b"x")).unwrap();
-        assert_eq!(f.mkdir_all(b"/f"), Err(Error::Kind));
-        assert_eq!(f.stat(b"/nope"), Err(Error::NoEnt));
-        f.mkdir_all(b"/d/e").unwrap();
-        assert_eq!(f.remove(b"/d", false), Err(Error::NotEmpty));
-        f.remove(b"/d", true).unwrap();
-        assert_eq!(f.stat(b"/d/e"), Err(Error::NoEnt));
+        let d = RamDisk::new(4096, 1 << 20);
+        let f = vol(&d);
+        assert_eq!(write(&f, b"/a/../b", 0, b"x"), Err(Error::BadPath));
+        write(&f, b"/f", 0, b"x").unwrap();
+        assert_eq!(f.borrow_mut().mkdir_all(b"/f"), Err(Error::Kind));
+        assert_eq!(f.borrow_mut().stat(b"/nope"), Err(Error::NoEnt));
+        f.borrow_mut().mkdir_all(b"/d/e").unwrap();
+        assert_eq!(f.borrow_mut().remove(b"/d", false), Err(Error::NotEmpty));
+        f.borrow_mut().remove(b"/d", true).unwrap();
+        assert_eq!(f.borrow_mut().stat(b"/d/e"), Err(Error::NoEnt));
     }
 
     // Een venster: blok 0 ligt op de eerste LBA van het venster.
     #[test]
     fn venster_verschuift_en_begrenst() {
-        let mut d = RamDisk::new(4096, 64 << 12);
-        let mut f = Fs::new(&mut d, 16, 8, 4096, 1 << 20).unwrap();
-        on(f.write_at(b"x", 0, &[1u8; 4096])).unwrap();
+        let d = RamDisk::new(4096, 64 << 12);
+        let f = LocalCell::cell(Fs::new(&d, 16, 8, 4096, 1 << 20).unwrap());
+        write(&f, b"x", 0, &[1u8; 4096]).unwrap();
         let big = vec![1u8; 8 * 4096];
-        assert!(
-            on(f.write_at(b"y", 0, &big)).is_err(),
-            "wrote beyond window"
-        );
+        assert!(write(&f, b"y", 0, &big).is_err(), "wrote beyond window");
         drop(f);
-        assert_eq!(d.writes.first(), Some(&(16, 4096)));
+        assert_eq!(d.writes.borrow().first(), Some(&(16, 4096)));
     }
 
     #[test]
     fn leeg_venster_deelt_niets_uit() {
-        let mut d = RamDisk::new(4096, 1 << 16);
-        let mut f = Fs::new(&mut d, 4096, 0, 4096, 1 << 20).unwrap();
-        assert!(on(f.write_at(b"x", 0, b"a")).is_err());
+        let d = RamDisk::new(4096, 1 << 16);
+        let f = LocalCell::cell(Fs::new(&d, 4096, 0, 4096, 1 << 20).unwrap());
+        assert!(write(&f, b"x", 0, b"a").is_err());
     }
 
     #[test]
     fn truncate_and_recycled_write_failure_do_not_expose_old_data() {
-        let mut d = RamDisk::new(4096, 1 << 20);
-        let mut f = vol(&mut d);
-        on(f.write_at(b"f", 0, &[0xAA; 8192])).unwrap();
-        on(f.truncate(b"f", 100)).unwrap();
-        on(f.truncate(b"f", 8192)).unwrap();
+        let d = RamDisk::new(4096, 1 << 20);
+        let f = vol(&d);
+        write(&f, b"f", 0, &[0xAA; 8192]).unwrap();
+        on(path::truncate(&f, b"f", 100)).unwrap();
+        on(path::truncate(&f, b"f", 8192)).unwrap();
         let mut got = [0u8; 8192];
-        on(f.read_at(b"f", 0, &mut got)).unwrap();
+        on(path::read(&f, b"f", 0, &mut got)).unwrap();
         assert!(
             got[100..].iter().all(|b| *b == 0),
             "discarded bytes reappeared"
         );
-        f.disk.fail = true;
-        assert!(on(f.write_at(b"g", 0, &[1; 4096])).is_err());
-        f.disk.fail = false;
+        d.fail.set(true);
+        assert!(write(&f, b"g", 0, &[1; 4096]).is_err());
+        d.fail.set(false);
         assert_eq!(
-            f.stat(b"g").unwrap().0,
+            f.borrow_mut().stat(b"g").unwrap().0,
             0,
             "failed write published a mapping"
         );
@@ -1642,41 +1618,41 @@ mod tests {
 
     #[test]
     fn fragmented_random_io_and_reuse() {
-        let mut d = RamDisk::new(4096, 2 << 20);
-        let mut f = vol(&mut d);
+        let d = RamDisk::new(4096, 2 << 20);
+        let f = vol(&d);
         for i in 0..32u8 {
-            on(f.write_at(&[b'f', i], 0, &pattern(4096 * (1 + i as usize % 3), i))).unwrap();
+            write(&f, &[b'f', i], 0, &pattern(4096 * (1 + i as usize % 3), i)).unwrap();
         }
         for i in (0..32u8).step_by(2) {
-            f.remove(&[b'f', i], false).unwrap();
+            f.borrow_mut().remove(&[b'f', i], false).unwrap();
         }
         let big = pattern(40 * 4096, 99);
-        on(f.write_at(b"big", 0, &big)).unwrap();
-        must_read(&mut f, b"big", &big);
+        write(&f, b"big", 0, &big).unwrap();
+        must_read(&f, b"big", &big);
         for i in (1..32u8).step_by(2) {
-            must_read(&mut f, &[b'f', i], &pattern(4096 * (1 + i as usize % 3), i));
+            must_read(&f, &[b'f', i], &pattern(4096 * (1 + i as usize % 3), i));
         }
     }
 
     #[test]
     fn hole_fill_merges_both_neighbors() {
-        let mut d = RamDisk::new(4096, 1 << 20);
-        let mut f = vol(&mut d);
-        on(f.write_at(b"h", 0, &[1; 4096])).unwrap();
-        on(f.write_at(b"h", 2 * 4096, &[3; 4096])).unwrap();
-        on(f.write_at(b"h", 4096, &[2; 4096])).unwrap();
-        let n = f.walk(&split(b"h").unwrap(), false).unwrap();
+        let d = RamDisk::new(4096, 1 << 20);
+        let f = vol(&d);
+        write(&f, b"h", 0, &[1; 4096]).unwrap();
+        write(&f, b"h", 2 * 4096, &[3; 4096]).unwrap();
+        write(&f, b"h", 4096, &[2; 4096]).unwrap();
+        let n = f.borrow_mut().walk(&split(b"h").unwrap(), false).unwrap();
         // Bump-allocatie: fysiek 0, 1, 2 voor logisch 0, 2, 1: geen buren.
-        assert_eq!(f.node(n).unwrap().extents.len(), 3);
-        assert_eq!(f.index, 3);
+        assert_eq!(f.borrow().node(n).unwrap().extents.len(), 3);
+        assert_eq!(f.borrow().index, 3);
         // Aansluitend schrijven smelt samen tot één extent.
-        on(f.write_at(b"m", 0, &[4; 4096])).unwrap();
-        on(f.write_at(b"m", 4096, &[5; 4096])).unwrap();
-        let m = f.walk(&split(b"m").unwrap(), false).unwrap();
-        assert_eq!(f.node(m).unwrap().extents.len(), 1);
-        assert_eq!(f.index, 4);
+        write(&f, b"m", 0, &[4; 4096]).unwrap();
+        write(&f, b"m", 4096, &[5; 4096]).unwrap();
+        let m = f.borrow_mut().walk(&split(b"m").unwrap(), false).unwrap();
+        assert_eq!(f.borrow().node(m).unwrap().extents.len(), 1);
+        assert_eq!(f.borrow().index, 4);
         let mut got = [0u8; 3 * 4096];
-        on(f.read_at(b"h", 0, &mut got)).unwrap();
+        on(path::read(&f, b"h", 0, &mut got)).unwrap();
         assert!(got[..4096].iter().all(|b| *b == 1) && got[8192..].iter().all(|b| *b == 3));
     }
 
@@ -1684,27 +1660,27 @@ mod tests {
         RamDisk::new(512, 64 << 20)
     }
 
-    fn mount(d: &mut RamDisk, fresh: bool) -> (Fs<&mut RamDisk>, Mounted) {
-        let blocks = d.data.len() as u64 / 512;
-        on(Fs::mount(d, 0, blocks, 512, 128 << 10, fresh)).unwrap()
+    fn mount(d: &RamDisk, fresh: bool) -> (Vol<'_>, Mounted) {
+        let (f, m) = on(Fs::mount(d, 0, d.blocks(), 512, 128 << 10, fresh)).unwrap();
+        (LocalCell::cell(f), m)
     }
 
     #[test]
     fn persist_round_trip() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         let film = pattern((3 << 20) + 123, 1);
         let sub = pattern(5000, 9);
         let (nodes, index) = {
-            let (mut f, m) = mount(&mut d, false);
+            let (f, m) = mount(&d, false);
             assert_eq!(m, Mounted::Empty);
-            on(f.write_at(b"media/Films/A/a.mkv", 0, &film)).unwrap();
-            on(f.write_at(b"media/Films/A/a.srt", 0, &sub)).unwrap();
-            f.mkdir_all(b"media/Backups").unwrap();
-            on(f.truncate(b"media/sparse", 10 << 20)).unwrap();
-            on(f.commit()).unwrap();
-            (f.count, f.index)
+            write(&f, b"media/Films/A/a.mkv", 0, &film).unwrap();
+            write(&f, b"media/Films/A/a.srt", 0, &sub).unwrap();
+            f.borrow_mut().mkdir_all(b"media/Backups").unwrap();
+            on(path::truncate(&f, b"media/sparse", 10 << 20)).unwrap();
+            on(commit(&f)).unwrap();
+            (f.borrow().count, f.borrow().index)
         };
-        let (mut g, m) = mount(&mut d, false);
+        let (g, m) = mount(&d, false);
         assert_eq!(
             m,
             Mounted::Restored {
@@ -1712,30 +1688,30 @@ mod tests {
                 slot: 0
             }
         );
-        must_read(&mut g, b"media/Films/A/a.mkv", &film);
-        must_read(&mut g, b"media/Films/A/a.srt", &sub);
-        assert_eq!(g.stat(b"media/Backups").unwrap(), (0, true));
-        assert_eq!(g.stat(b"media/sparse").unwrap().0, 10 << 20);
-        assert_eq!((g.count, g.index), (nodes, index));
-        on(g.write_at(b"media/new.bin", 0, &pattern(2 << 20, 5))).unwrap();
-        must_read(&mut g, b"media/Films/A/a.mkv", &film);
+        must_read(&g, b"media/Films/A/a.mkv", &film);
+        must_read(&g, b"media/Films/A/a.srt", &sub);
+        assert_eq!(g.borrow_mut().stat(b"media/Backups").unwrap(), (0, true));
+        assert_eq!(g.borrow_mut().stat(b"media/sparse").unwrap().0, 10 << 20);
+        assert_eq!((g.borrow().count, g.borrow().index), (nodes, index));
+        write(&g, b"media/new.bin", 0, &pattern(2 << 20, 5)).unwrap();
+        must_read(&g, b"media/Films/A/a.mkv", &film);
     }
 
     #[test]
     fn persist_torn_slot_falls_back() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         let one = pattern(8192, 1);
         let slot = {
-            let (mut f, _) = mount(&mut d, false);
-            on(f.write_at(b"one", 0, &one)).unwrap();
-            on(f.commit()).unwrap();
-            on(f.write_at(b"two", 0, &pattern(8192, 2))).unwrap();
-            on(f.commit()).unwrap();
-            assert_eq!((f.last, f.generation), (Some(1), 2));
-            f.slot
+            let (f, _) = mount(&d, false);
+            write(&f, b"one", 0, &one).unwrap();
+            on(commit(&f)).unwrap();
+            write(&f, b"two", 0, &pattern(8192, 2)).unwrap();
+            on(commit(&f)).unwrap();
+            assert_eq!((f.borrow().last, f.borrow().generation), (Some(1), 2));
+            f.borrow().slot
         };
-        d.data[((u64::from(slot) + 1) * BS + 3) as usize] ^= 0xff;
-        let (mut g, m) = mount(&mut d, false);
+        d.data.borrow_mut()[((u64::from(slot) + 1) * BS + 3) as usize] ^= 0xff;
+        let (g, m) = mount(&d, false);
         assert_eq!(
             m,
             Mounted::Restored {
@@ -1743,35 +1719,36 @@ mod tests {
                 slot: 0
             }
         );
-        must_read(&mut g, b"one", &one);
-        assert_eq!(g.stat(b"two"), Err(Error::NoEnt));
-        on(g.write_at(b"three", 0, &pattern(100, 3))).unwrap();
-        on(g.commit()).unwrap();
-        assert_eq!((g.last, g.generation), (Some(1), 2));
+        must_read(&g, b"one", &one);
+        assert_eq!(g.borrow_mut().stat(b"two"), Err(Error::NoEnt));
+        write(&g, b"three", 0, &pattern(100, 3)).unwrap();
+        on(commit(&g)).unwrap();
+        assert_eq!((g.borrow().last, g.borrow().generation), (Some(1), 2));
     }
 
     #[test]
     fn persist_deferred_free() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         let old = pattern(1 << 20, 4);
-        let (mut f, _) = mount(&mut d, false);
-        on(f.write_at(b"old", 0, &old)).unwrap();
-        on(f.commit()).unwrap();
-        let n = f.walk(&split(b"old").unwrap(), false).unwrap();
-        let run = f.node(n).unwrap().extents[0];
-        f.remove(b"old", false).unwrap();
-        on(f.write_at(b"new", 0, &pattern(4 << 20, 6))).unwrap();
-        let n = f.walk(&split(b"new").unwrap(), false).unwrap();
-        for e in &f.node(n).unwrap().extents {
+        let (f, _) = mount(&d, false);
+        write(&f, b"old", 0, &old).unwrap();
+        on(commit(&f)).unwrap();
+        let n = f.borrow_mut().walk(&split(b"old").unwrap(), false).unwrap();
+        let run = f.borrow().node(n).unwrap().extents[0];
+        f.borrow_mut().remove(b"old", false).unwrap();
+        write(&f, b"new", 0, &pattern(4 << 20, 6)).unwrap();
+        let n = f.borrow_mut().walk(&split(b"new").unwrap(), false).unwrap();
+        for e in &f.borrow().node(n).unwrap().extents {
             assert!(
                 !(e.physical < run.physical + run.count && run.physical < e.physical + e.count),
                 "new reused old's blocks before a commit"
             );
         }
-        on(f.commit()).unwrap();
-        assert!(f.pending.is_empty());
+        on(commit(&f)).unwrap();
+        assert!(f.borrow().pending.is_empty());
         assert!(
-            f.free
+            f.borrow()
+                .free
                 .first()
                 .is_some_and(|r| r.start == run.physical && r.count >= run.count)
         );
@@ -1779,64 +1756,64 @@ mod tests {
 
     #[test]
     fn persist_deferred_free_survives_power_loss() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         let old = pattern(1 << 20, 4);
         {
-            let (mut f, _) = mount(&mut d, false);
-            on(f.write_at(b"old", 0, &old)).unwrap();
-            on(f.commit()).unwrap();
-            f.remove(b"old", false).unwrap();
-            on(f.write_at(b"new", 0, &pattern(4 << 20, 6))).unwrap();
+            let (f, _) = mount(&d, false);
+            write(&f, b"old", 0, &old).unwrap();
+            on(commit(&f)).unwrap();
+            f.borrow_mut().remove(b"old", false).unwrap();
+            write(&f, b"new", 0, &pattern(4 << 20, 6)).unwrap();
         } // Stroom weg vóór de commit.
-        let (mut g, _) = mount(&mut d, false);
-        must_read(&mut g, b"old", &old);
+        let (g, _) = mount(&d, false);
+        must_read(&g, b"old", &old);
     }
 
     #[test]
     fn persist_other_window_ignored() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         {
-            let (mut f, _) = mount(&mut d, false);
-            on(f.write_at(b"x", 0, &pattern(4096, 1))).unwrap();
-            on(f.commit()).unwrap();
+            let (f, _) = mount(&d, false);
+            write(&f, b"x", 0, &pattern(4096, 1)).unwrap();
+            on(commit(&f)).unwrap();
         }
-        let blocks = d.data.len() as u64 / 512 / 2;
-        let (g, m) = on(Fs::mount(&mut d, 0, blocks, 512, 128 << 10, false)).unwrap();
+        let blocks = d.blocks() / 2;
+        let (g, m) = on(Fs::mount(&d, 0, blocks, 512, 128 << 10, false)).unwrap();
         assert_eq!((m, g.count), (Mounted::Empty, 0));
     }
 
     #[test]
     fn persist_fresh_clears() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         {
-            let (mut f, _) = mount(&mut d, false);
-            on(f.write_at(b"x", 0, &pattern(4096, 1))).unwrap();
-            on(f.commit()).unwrap();
-            on(f.write_at(b"y", 0, &pattern(4096, 2))).unwrap();
-            on(f.commit()).unwrap();
+            let (f, _) = mount(&d, false);
+            write(&f, b"x", 0, &pattern(4096, 1)).unwrap();
+            on(commit(&f)).unwrap();
+            write(&f, b"y", 0, &pattern(4096, 2)).unwrap();
+            on(commit(&f)).unwrap();
         }
-        assert_eq!(mount(&mut d, true).1, Mounted::Fresh);
-        let (g, m) = mount(&mut d, false);
-        assert_eq!((m, g.count), (Mounted::Empty, 0));
+        assert_eq!(mount(&d, true).1, Mounted::Fresh);
+        let (g, m) = mount(&d, false);
+        assert_eq!((m, g.borrow().count), (Mounted::Empty, 0));
     }
 
     #[test]
     fn persist_rejects_double_owner() {
-        let mut d = persist_disk();
+        let d = persist_disk();
         {
-            let (mut f, _) = mount(&mut d, false);
-            on(f.write_at(b"a", 0, &pattern(4096, 1))).unwrap();
-            on(f.write_at(b"b", 0, &pattern(4096, 2))).unwrap();
-            let a = f.walk(&split(b"a").unwrap(), false).unwrap();
-            let b = f.walk(&split(b"b").unwrap(), false).unwrap();
-            let p = f.node(a).unwrap().extents[0].physical;
-            f.node_mut(b).unwrap().extents[0].physical = p;
-            f.dirty = true;
-            on(f.commit()).unwrap();
+            let (f, _) = mount(&d, false);
+            write(&f, b"a", 0, &pattern(4096, 1)).unwrap();
+            write(&f, b"b", 0, &pattern(4096, 2)).unwrap();
+            let a = f.borrow_mut().walk(&split(b"a").unwrap(), false).unwrap();
+            let b = f.borrow_mut().walk(&split(b"b").unwrap(), false).unwrap();
+            let p = f.borrow().node(a).unwrap().extents[0].physical;
+            f.borrow_mut().node_mut(b).unwrap().extents[0].physical = p;
+            f.borrow_mut().dirty = true;
+            on(commit(&f)).unwrap();
         }
-        let (g, m) = mount(&mut d, false);
+        let (g, m) = mount(&d, false);
         assert!(matches!(m, Mounted::Inconsistent { generation: 1, .. }));
-        assert_eq!(g.count, 0);
+        assert_eq!(g.borrow().count, 0);
     }
 }
 

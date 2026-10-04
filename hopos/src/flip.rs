@@ -1069,7 +1069,7 @@ async fn send_and_wait(
         }
         exec.after(Duration::from_millis(5)).await;
     }
-    match select(ack.wait(), exec.after(ACTOR_WAIT)).await {
+    match select(ack.recv(), exec.after(ACTOR_WAIT)).await {
         Either::Left(r) => Some(r),
         Either::Right(()) => {
             println!(
@@ -1419,11 +1419,10 @@ async fn snapshot_nat(exec: &'static Executor) -> Result<Option<Nat>, &'static s
         buf,
         reply: &NAT_REPLY,
     };
-    if crate::net::COMMANDS.try_send(cmd).is_err() {
-        return Err("switch mailbox full");
-    }
-    match select(NAT_REPLY.wait(), exec.after(ACTOR_WAIT)).await {
-        Either::Left(s) => {
+    let ask = sync::oneshot::call(&crate::net::COMMANDS, &NAT_REPLY, cmd);
+    match select(ask, exec.after(ACTOR_WAIT)).await {
+        Either::Left(Err(_)) => Err("switch mailbox full"),
+        Either::Left(Ok(s)) => {
             println!(
                 "flip: conntrack captured, {} NAT flow(s), outbound mapping closed until the jump HOPOS_FLIP_NAT_CAPTURED flows={}",
                 s.flows.len(),

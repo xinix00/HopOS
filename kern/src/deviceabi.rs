@@ -19,7 +19,7 @@ pub struct Request<'a> {
 impl Request<'_> {
     /// Geeft ook bij fouten beide buffers terug.
     pub fn finish(self, result: Result<(u64, usize)>) {
-        self.reply.put_fs(FsDone {
+        self.reply.fs.put(FsDone {
             buf: self.call.buf,
             out: self.call.out,
             result,
@@ -53,14 +53,8 @@ pub async fn call<'a>(
     reply: &'a Reply,
     call: FsCall,
 ) -> core::result::Result<FsDone, FsCall> {
-    let _ = reply.done.take();
-    if let Err(sync::Full(req)) = inbox.try_send(Request { call, reply }) {
-        return Err(req.call);
-    }
-    loop {
-        reply.done.wait().await;
-        if let Some(done) = reply.take_fs() {
-            return Ok(done);
-        }
-    }
+    let req = Request { call, reply };
+    sync::oneshot::call(inbox, &reply.fs, req)
+        .await
+        .map_err(|sync::Full(req)| req.call)
 }

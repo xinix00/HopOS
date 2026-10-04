@@ -119,20 +119,10 @@ impl App {
     }
 
     /// Schrijft `args` als logregel(s) naar de outbox; het werk achter
-    /// [`log!`](crate::log!). Is de outbox al geleend (een `Display` die zelf
-    /// logt, een paniek midden in een regel), dan wordt gedropt en geteld.
-    ///
-    /// Heeft [`crate::appnet`] een log-verbinding open, dan gaat de regel
-    /// daarover (`KindLog`) en is de outbox de terugval.
+    /// [`log!`](crate::log!) en de paniek. Is de outbox al geleend (een
+    /// `Display` die zelf logt, een paniek midden in een regel), dan wordt
+    /// gedropt en geteld.
     pub fn log(&self, args: fmt::Arguments<'_>) {
-        match self.outbox.try_borrow_mut() {
-            Ok(mut w) => log::emit_via_net(Some(&mut w), args),
-            Err(_) => log::emit_via_net(None, args),
-        }
-    }
-
-    /// Als [`App::log`], maar alleen de outbox (het paniekpad).
-    pub fn log_outbox(&self, args: fmt::Arguments<'_>) {
         match self.outbox.try_borrow_mut() {
             Ok(mut w) => log::emit_to(Some(&mut w), args),
             Err(_) => log::emit_to(None, args),

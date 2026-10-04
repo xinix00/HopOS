@@ -753,7 +753,7 @@ fn de_conntrack_overleeft_de_flip_via_de_actor() {
     let reply: &'static NatReply = leak(NatReply::new());
     let buf = vec![FlowState::default(); crate::MAX_FLOWS];
     old.sw.handle(Command::SnapshotNat { buf, reply });
-    let snap = reply.snap.try_recv().expect("geen snapshot");
+    let snap = reply.try_take().expect("geen snapshot");
     assert_eq!(snap.flows.len(), 1);
     assert_eq!(snap.flows[0].node_port, node_port);
 

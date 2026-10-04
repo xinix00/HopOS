@@ -109,7 +109,7 @@ mod tests {
     use super::*;
     use crate::tests::{machine, now, with};
     use crate::{ADM_CREATE_CQ, ADM_CREATE_SQ, ADM_IDENTIFY, DMA_NEED, MAX_TRANSFER, PAGE};
-    use blkdev::{AsyncBlockDevice, BlockIo, Paced, Spin, block_on};
+    use blkdev::{AsyncBlockDevice, BlockIo, Spin, block_on};
     use std::vec;
     use std::vec::Vec;
 
@@ -153,7 +153,10 @@ mod tests {
         assert_eq!(r(0x14), CC_EN | CC_IOSQES | CC_IOCQES);
         // DSTRD 2: deurbellen per 16 bytes. Admin: SQ-tail en CQ-head 4.
         assert_eq!((r(0x1000), r(0x1010)), (4, 4));
-        block_on(Paced::new(&mut n, Spin).write(0, &[1; 512])).unwrap();
+        let q = blkdev::Queue::new(&mut n, Spin);
+        let mut io = &q;
+        block_on(io.write(0, &[1; 512])).unwrap();
+        drop(q);
         assert_eq!((r(0x1020), r(0x1030)), (1, 1));
     }
 

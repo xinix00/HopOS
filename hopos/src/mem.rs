@@ -1,5 +1,6 @@
 //! De symbolen `memcpy`, `memcmp` en `bcmp` voor de kern op arm64; de
-//! lussen staan in [`dev::mem`], met het waarom.
+//! lussen en de symbolen staan in [`dev::mem`] ([`dev::mem_symbols`]), met
+//! het waarom.
 //!
 //! Op het opslagpad was dit de rem (01-10, O6N): een lees van 1 MiB gaat in
 //! de kern door vier kopieën die ongelijk uitgelijnd zijn (de datablok-kopie
@@ -18,11 +19,6 @@
 //! (`kooi::tail_rings`): een ringrecord kopieert hij met `memcpy` alleen
 //! als die remap lukte; wat hij verder uit de pool kopieert, is niet
 //! nagelopen.
-//!
-//! `#[inline(never)]`: anders plakt LTO de lus in elke aanroeper, en het
-//! kernimage moet in zijn flipvenster passen.
-
-use dev::mem::{cmp_fast, cmp_slow, copy_fast, copy_slow};
 
 /// Staan de MMU van deze core aan en de uitlijncontrole uit?
 #[inline(always)]
@@ -49,51 +45,4 @@ fn normal() -> bool {
     sctlr & 0b11 == 0b01
 }
 
-/// `memcpy(3)`.
-///
-/// # Safety
-///
-/// Het contract van `memcpy`: twee geldige, niet-overlappende bereiken.
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub(crate) unsafe extern "C" fn memcpy(dst: *mut u8, src: *const u8, n: usize) -> *mut u8 {
-    // SAFETY: het contract van `memcpy`; het snelle pad alleen op Normal
-    // geheugen met de uitlijncontrole uit, en vanaf 16 bytes.
-    unsafe {
-        if n >= 16 && normal() {
-            copy_fast(dst, src, n);
-        } else {
-            copy_slow(dst, src, n);
-        }
-    }
-    dst
-}
-
-/// `memcmp(3)`.
-///
-/// # Safety
-///
-/// Het contract van `memcmp`: twee geldige bereiken van `n` bytes.
-#[unsafe(no_mangle)]
-#[inline(never)]
-pub(crate) unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
-    // SAFETY: het contract van `memcmp`; het snelle pad als bij `memcpy`.
-    unsafe {
-        if n >= 8 && normal() {
-            cmp_fast(a, b, n)
-        } else {
-            cmp_slow(a, b, n)
-        }
-    }
-}
-
-/// `bcmp(3)`: LLVM maakt er een van een `memcmp` die alleen op nul toetst.
-///
-/// # Safety
-///
-/// Als [`memcmp`].
-#[unsafe(no_mangle)]
-pub(crate) unsafe extern "C" fn bcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
-    // SAFETY: als `memcmp`.
-    unsafe { memcmp(a, b, n) }
-}
+dev::mem_symbols!(normal);

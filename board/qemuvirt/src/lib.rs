@@ -159,7 +159,7 @@ fn nic_ack() {
 }
 
 /// De bel van de schijf: de dispatch luidt hem, de hopfs-actor wacht erop
-/// tijdens een blok-verzoek (`blkdev::InFlight::done`).
+/// tijdens een blok-verzoek (de wachter van `blkdev::Queue`).
 static DISK_BELL: Signal = Signal::new();
 
 /// De schijflijn en zijn ack, gezet door `probe_disk`, scherp gezet door

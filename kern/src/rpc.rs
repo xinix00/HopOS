@@ -52,10 +52,7 @@
 //! De data zelf staat er al; de commit is de boom die haar terugvindt.
 
 use crate::cage::{Console, Timer};
-use crate::hopfs::{
-    BLOCK_SIZE, BatchRead, BlockIo, Fs, ReadStep, Tree, commit_shared, read_shared, sync_shared,
-    truncate_shared, write_shared,
-};
+use crate::hopfs::{self, BLOCK_SIZE, BatchRead, BlockIo, Fs, ReadStep, Tree};
 use crate::slots::{Mount, Reply, Servicers, try_push};
 use crate::system::MAX_IO_CHUNK;
 use crate::{Error, Result, SLOT_CAP, Slot};
@@ -354,25 +351,10 @@ pub async fn call<'a>(
     reply: &'a Reply,
     c: FsCall,
 ) -> core::result::Result<FsDone, FsCall> {
-    let _ = reply.done.take();
-    if let Err(sync::Full(env)) = inbox.try_send(FsEnvelope {
-        msg: FsMsg::Call(c),
-        reply: Some(reply),
-    }) {
-        return match env.msg {
-            FsMsg::Call(c) => Err(c),
-            FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw | FsMsg::KernRead(_) => Ok(FsDone {
-                buf: Vec::new(),
-                out: Vec::new(),
-                result: Err(Error::Busy),
-            }),
-        };
-    }
-    loop {
-        reply.done.wait().await;
-        if let Some(d) = reply.take_fs() {
-            return Ok(d);
-        }
+    match ask(inbox, reply, FsMsg::Call(c)).await {
+        Ok(d) => Ok(d),
+        Err(FsMsg::Call(c)) => Err(c),
+        Err(other) => Ok(busy(other)),
     }
 }
 
@@ -380,21 +362,9 @@ pub async fn call<'a>(
 /// vastlegde: wat daarna op de schijf staat, is precies wat de nieuwe kern
 /// mount. Een volle brievenbus is [`Error::Busy`] (en dan geen flip).
 pub async fn freeze<'a>(inbox: &FsInbox<'a>, reply: &'a Reply) -> Result<u64> {
-    let _ = reply.done.take();
-    if inbox
-        .try_send(FsEnvelope {
-            msg: FsMsg::Freeze,
-            reply: Some(reply),
-        })
-        .is_err()
-    {
-        return Err(Error::Busy);
-    }
-    loop {
-        reply.done.wait().await;
-        if let Some(d) = reply.take_fs() {
-            return d.result.map(|(generation, _)| generation);
-        }
+    match ask(inbox, reply, FsMsg::Freeze).await {
+        Ok(d) => d.result.map(|(generation, _)| generation),
+        Err(_) => Err(Error::Busy),
     }
 }
 
@@ -404,27 +374,39 @@ pub async fn freeze<'a>(inbox: &FsInbox<'a>, reply: &'a Reply) -> Result<u64> {
 /// Een termijn legt de aanroeper er zelf omheen (een `select` met zijn
 /// timer), zoals bij [`freeze`].
 pub async fn kern_read<'a>(inbox: &FsInbox<'a>, reply: &'a Reply, r: KernRead) -> FsDone {
-    let _ = reply.done.take();
-    if let Err(sync::Full(env)) = inbox.try_send(FsEnvelope {
-        msg: FsMsg::KernRead(r),
+    ask(inbox, reply, FsMsg::KernRead(r))
+        .await
+        .unwrap_or_else(busy)
+}
+
+/// Eén bericht aan de actor en het antwoord; een volle brievenbus geeft
+/// het bericht terug.
+async fn ask<'a>(
+    inbox: &FsInbox<'a>,
+    reply: &'a Reply,
+    msg: FsMsg,
+) -> core::result::Result<FsDone, FsMsg> {
+    let env = FsEnvelope {
+        msg,
         reply: Some(reply),
-    }) {
-        let (buf, out) = match env.msg {
-            FsMsg::KernRead(r) => (r.path, r.out),
-            FsMsg::Call(c) => (c.buf, c.out),
-            FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw => (Vec::new(), Vec::new()),
-        };
-        return FsDone {
-            buf,
-            out,
-            result: Err(Error::Busy),
-        };
-    }
-    loop {
-        reply.done.wait().await;
-        if let Some(d) = reply.take_fs() {
-            return d;
-        }
+    };
+    sync::oneshot::call(inbox, &reply.fs, env)
+        .await
+        .map_err(|sync::Full(env)| env.msg)
+}
+
+/// Het antwoord op een bericht dat de actor nooit zag: [`Error::Busy`],
+/// met de buffers terug.
+fn busy(msg: FsMsg) -> FsDone {
+    let (buf, out) = match msg {
+        FsMsg::Call(c) => (c.buf, c.out),
+        FsMsg::KernRead(r) => (r.path, r.out),
+        FsMsg::Commit(_) | FsMsg::Freeze | FsMsg::Thaw => (Vec::new(), Vec::new()),
+    };
+    FsDone {
+        buf,
+        out,
+        result: Err(Error::Busy),
     }
 }
 
@@ -624,20 +606,20 @@ async fn run_call<D: BlockIo + Copy>(
                 .out
                 .get_mut(HDR_LEN..HDR_LEN + len)
                 .ok_or(Error::TooLarge { len, max: room })?;
-            let got = read_shared(t, n, c.off, dst).await?;
+            let got = hopfs::read(t, n, c.off, dst).await?;
             Ok((got as u64, got))
         }
         Work::ReadMany(n) => read_many(t, n, c).await,
         Work::Write(n) => {
             let data = c.buf.get(c.data.clone()).ok_or(Error::Corrupt { at: 0 })?;
-            write_shared(t, n, c.off, data).await?;
+            hopfs::write(t, n, c.off, data).await?;
             Ok((data.len() as u64, 0))
         }
         Work::Truncate(n) => {
-            truncate_shared(t, n, c.n).await?;
+            hopfs::truncate(t, n, c.n).await?;
             Ok((c.n, 0))
         }
-        Work::Sync => Ok((sync_shared(t).await?, 0)),
+        Work::Sync => Ok((hopfs::sync(t).await?, 0)),
     }
 }
 
@@ -776,11 +758,11 @@ async fn work<'a, D: BlockIo + Copy>(
 ) -> (Job<'a>, Result<(u64, usize)>) {
     let r = match &mut job {
         Job::Call { c, work, .. } => run_call(t, c, *work).await,
-        Job::Kern { r, node, size, .. } => read_shared(t, *node, r.off, &mut r.out)
+        Job::Kern { r, node, size, .. } => hopfs::read(t, *node, r.off, &mut r.out)
             .await
             .map(|n| (*size, n)),
-        Job::Commit(_) => commit_shared(t).await.map(|g| (g.unwrap_or(0), 0)),
-        Job::Freeze(_) => commit_shared(t).await.map(|_| (t.borrow().generation(), 0)),
+        Job::Commit(_) => hopfs::commit(t).await.map(|g| (g.unwrap_or(0), 0)),
+        Job::Freeze(_) => hopfs::commit(t).await.map(|_| (t.borrow().generation(), 0)),
     };
     (job, r)
 }
@@ -877,7 +859,7 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
         if out.is_empty() {
             return Ok((size, 0));
         }
-        let n = read_shared(&self.tree, node, off, out).await?;
+        let n = hopfs::read(&self.tree, node, off, out).await?;
         Ok((size, n))
     }
 
@@ -885,7 +867,7 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
     /// Zonder brievenbus (de tests).
     #[cfg(test)]
     pub(crate) async fn commit(&mut self, why: CommitWhy) {
-        let r = commit_shared(&self.tree).await;
+        let r = hopfs::commit(&self.tree).await;
         self.desk.committed(why, r);
     }
 
@@ -893,7 +875,7 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
     /// Zonder brievenbus (de tests).
     #[cfg(test)]
     pub(crate) async fn freeze(&mut self) -> Result<(u64, usize)> {
-        let r = commit_shared(&self.tree).await;
+        let r = hopfs::commit(&self.tree).await;
         self.desk.frozen_after(&self.tree, r)
     }
 
@@ -907,6 +889,12 @@ impl<'s, D: BlockIo + Copy, L: Console> FsActor<'s, D, L> {
     #[cfg(test)]
     pub(crate) fn fs(&mut self) -> &mut Fs<D> {
         self.tree.get_mut().get_mut()
+    }
+
+    /// De boom als gedeelde lening (een test die leest zoals een call).
+    #[cfg(test)]
+    pub(crate) fn tree(&self) -> &Tree<D> {
+        &self.tree
     }
 }
 
@@ -1056,7 +1044,7 @@ impl<L: Console> Desk<'_, L> {
             res => {
                 let result = res.map(|(_, size)| (size, 0));
                 if let Some(reply) = reply {
-                    reply.put_fs(FsDone {
+                    reply.fs.put(FsDone {
                         buf: core::mem::take(&mut r.path),
                         out: core::mem::take(&mut r.out),
                         result,
@@ -1102,7 +1090,7 @@ impl<L: Console> Desk<'_, L> {
             }
             Job::Kern { r: k, reply, .. } => {
                 if let Some(reply) = reply {
-                    reply.put_fs(FsDone {
+                    reply.fs.put(FsDone {
                         buf: k.path,
                         out: k.out,
                         result: r,
@@ -1120,7 +1108,7 @@ impl<L: Console> Desk<'_, L> {
                     Err(e) => Err(e),
                 };
                 if let Some(reply) = reply {
-                    reply.put_fs(FsDone {
+                    reply.fs.put(FsDone {
                         buf: Vec::new(),
                         out: Vec::new(),
                         result,
@@ -1408,7 +1396,7 @@ impl<L: Console> Desk<'_, L> {
 /// Het antwoord van een call naar zijn plek, met de buffers terug.
 fn answer(reply: Option<&Reply>, c: FsCall, result: Result<(u64, usize)>) {
     if let Some(reply) = reply {
-        reply.put_fs(FsDone {
+        reply.fs.put(FsDone {
             buf: c.buf,
             out: c.out,
             result,

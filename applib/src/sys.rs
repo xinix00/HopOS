@@ -766,7 +766,9 @@ impl<D: Dial, T: Timer> Client<D, T> {
     }
 
     /// Eén logregel over de verbinding (`KindLog`), zonder antwoord. Een
-    /// fout sluit de verbinding; de aanroeper valt terug op de outbox.
+    /// fout sluit de verbinding. `log!` gaat via de outbox; dit is de weg
+    /// van de Go-apps (`Logf` in de Go-SDK), en appspike toetst er de kern
+    /// mee.
     pub async fn log(&mut self, line: &[u8]) -> Result {
         let fh = encode_header(Kind::Log, line.len()).map_err(|_| Error::TooLarge {
             len: line.len(),

@@ -7,7 +7,7 @@ use super::*;
 use crate::contract::{HOPABI_HDR_LEN, OP_STAT, SYS_HEADER_LEN};
 use crate::ring::tests::Backing;
 use crate::ring::{Peek, Reader, Writer};
-use abi::systemapi::{Kind, decode_header};
+use abi::systemapi::decode_header;
 use core::cell::Cell;
 use std::boxed::Box;
 
@@ -590,52 +590,6 @@ fn transport_errors_map_to_what_the_client_retries() {
     );
     assert_eq!(conn_error(NetError::Timeout), ConnError::Refused);
     assert_eq!(conn_error(NetError::NotUp), ConnError::Refused);
-}
-
-/// De log-verbinding: vóór de dial gaat een regel naar de outbox, daarna
-/// als `KindLog`-frame over TCP naar de kern. De enige test die de
-/// log-static aanraakt.
-#[test]
-fn log_lines_go_over_the_system_connection_once_it_is_up() {
-    let p = pair();
-    let l = p.kern.tcp_listen(sys::ADDRESS.1).unwrap();
-    let seen = slot();
-    p.exec
-        .spawn(async move {
-            let mut c = l.accept().await.unwrap();
-            let mut got = Vec::new();
-            for _ in 0..2 {
-                let mut fh = [0u8; SYS_HEADER_LEN];
-                c.read_exact(&mut fh).await.unwrap();
-                let h = decode_header(&fh).unwrap();
-                let mut line = vec![0u8; h.len];
-                c.read_exact(&mut line).await.unwrap();
-                got.push((h.kind, line));
-            }
-            *seen.borrow_mut() = Some(got);
-        })
-        .unwrap();
-    assert!(!try_log(b"too early"), "uit is outbox");
-    log_via_system(p.app).unwrap();
-    assert_eq!(log_via_system(p.app), Err(NetError::AlreadyUp));
-    assert!(!try_log(b"still dialing"));
-    p.run_until(|| {
-        log_cell()
-            .try_borrow()
-            .is_ok_and(|l| l.as_ref().is_some_and(|l| l.conn.is_some()))
-    });
-    let written = crate::log::WRITTEN.load(Relaxed);
-    crate::log::emit_via_net(None, format_args!("slot {} up", 1));
-    assert!(crate::log::WRITTEN.load(Relaxed) > written);
-    assert!(try_log(b"second"));
-    p.run_until(|| seen.borrow().is_some());
-    assert_eq!(
-        seen.borrow_mut().take().unwrap(),
-        [
-            (Kind::Log, b"slot 1 up".to_vec()),
-            (Kind::Log, b"second".to_vec())
-        ]
-    );
 }
 
 // ---- Flush en het net-afscheid ----

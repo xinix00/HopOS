@@ -1395,7 +1395,9 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     /// `out` haar antwoordbuffer, `reply` haar antwoordplek bij de actor.
     /// `timer` draagt de tik van het toezicht. Een log-frame (`Kind::Log`) gaat
     /// naar `log.app_line`: geef een [`LogTee`] mee om het ook in `NEXT_LOG`
-    /// te zien.
+    /// te zien. Een Rust-app logt via de outbox; `Kind::Log` blijft voor de
+    /// Go-apps (`Logf` van de Go-SDK `metal/v2` schrijft elke regel zo,
+    /// slot-ABI 10) en appspike toetst hem.
     #[expect(
         clippy::too_many_arguments,
         reason = "de verbinding brengt haar eigen buffers, antwoordplek en tik mee"

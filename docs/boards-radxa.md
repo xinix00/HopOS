@@ -239,9 +239,9 @@ DHCP-lease (hooguit 10 s, `UPLINK_WAIT`; zonder lease
     HOPOS_HOP_FAIL`: stap 5 zei al dat er geen image was.
     `Hop placement:`, `Hop env:` of `Hop not started: elf: ...` met
     `HOPOS_HOP_FAIL`: de regel noemt het getal.
-18. **`net: uplink tcp :8080 -> slot 1 :8080 HOPOS_HOP_PUBLISH`** en
-    hetzelfde voor `:9080` (de leader): de switch zet de twee poorten van de
-    node door naar Hop.
+18. **`slot 1: 2 port(s) published tcp+udp on the uplink: :8080 :9080
+    HOPOS_SLOT_PUBLISH`** (vóór `HOPOS_HOP_START`): de switch zet de twee
+    poorten van de node (agent en leader) door naar Hop.
 19. **`slot 1: hop: agent up node=radxa-1 cluster=hopos agent=:8080
     leader=:9080 cores=3 HOP_UP`**, en kort daarna `HOP_LEADER` (één node is
     zijn eigen leader). `cores=3`: de drie app-cores; Hop zelf deelt core 0
