@@ -194,6 +194,88 @@ mogelijk, maar daar schrijft niemand hem omdat `Read` blokkeert. In Rust ligt
 `poll::once(read)` plus `after(1 ms)` voor de hand als je een niet-blokkerende
 lus vertaalt. Dat is de valkuil, en `readable()` is de uitweg.
 
+## Lessen uit de Stulp-port (03-10-2026)
+
+Stulp (de huisautomatisering, tien plugins in één bundel-slot plus de
+controller in een tweede) ging in één dag van "alles is traag, 502's,
+Matter valt om" naar stabiel op de LicheeRV. Slapen op gebeurtenissen was
+de eerste stap. Wat daarna nog misging, en geen van die dingen was de
+scheduler:
+
+**Een late hartslag is niet dood.** Een plugin die na 5 s zonder antwoord
+de verbinding sloot, kostte bij het herverbinden ~70 inits en tientallen
+Matter-handshakes; die kosten maakten de volgende hartslag weer te laat.
+Een gemiste hartslag is nu een logregel; pas na 5 minuten volledige stilte
+gaat de verbinding dicht. Hoe duurder herverbinden is, hoe ruimer de grens.
+
+**Geef de executor terug, ook als alles klaar is.** Een protocollus waarvan
+elke `.await` meteen `Ready` is (een volle inbox, een kanaal met werk) yieldt
+nooit vanzelf. De SDK van Stulp geeft na 32 beurten verplicht
+`yield_now()` (het coöperatieve budget), los van wat er nog ligt.
+
+**Meet per taak, niet per slot.** `HOPOS_SLOT_LOAD` zei "slot 3 is druk";
+pas een meting per plugintaak (`busy_ms` per taak en een regel voor elke
+poll boven 200 ms, met de naam van de taak) wees de Matter-plugin aan met
+polls van ~290 ms, honderden keren. Meet ook wat vóór het werk gebeurt: de
+wachttijd van een verbinding in de rij voor een werker stond nergens, dus
+een volle pool was onzichtbaar.
+
+**Kopieer geen hele staat per gebeurtenis.** JSON van een plugin-staat naar
+tekst en terug kostte op de C906 ~300 ms, en de pool deed dat twee keer per
+lampcommando, voor elke werker die achterliep. Geef werkers de wijziging
+door (meestal één apparaat), niet de staat. Let ook op de bouwstenen:
+`json::set` bouwde het object opnieuw en kopieerde elk ander veld met alles
+eronder, dus één apparaatupdate kopieerde de hele staat. Stulp wijzigt nu
+ter plekke via `Object::get_mut`, `insert` en `remove`, voorlopig als
+overlay op `types` van Hop; die horen in Hop zelf.
+
+**De allocator telt mee.** Een first-fit-lijst met duizenden kleine vrije
+blokken maakte elke allocatie een wandeling: 505 ns per vrijgave plus
+allocatie bij 4547 vrije blokken, en op de node bootstraps van 250 ms.
+Exacte klassen tot 1 KiB met een bitmap van niet-lege klassen maakte het
+53 ns ([heap.md](heap.md), de commits van 03-10).
+
+**Handshakes zijn duur; deel ze.** Op de C906 kost een Matter-CASE 0,7 tot
+1,7 s (P-256) en een TLS-handshake ~100 ms (na de snellere AES en GHASH in
+leantls: seal van 10 naar 232 MB/s). Drie gevolgen:
+- Eén sessie per apparaat, gedeeld door alle werkers. Met een sessie per
+  werker betaalt het eerste commando naar een lamp op elke werker eerst
+  een volle handshake; de Go-versie deelde er één, en voelde daarom direct.
+- Hergebruik verbindingen. Een HTTPS-client die elke poll opnieuw
+  handshaket (TaHoma: 134 keer in een kwartier) verbrandt rekentijd.
+- Een onbereikbaar apparaat krijgt een backoff (Stulp: 1 minuut,
+  verdubbelend tot 30 minuten), geen poging per minuut met een time-out
+  van 40 s.
+
+**Laat levenscyclus geen lopend werk afbreken.** Het onderhoud van Matter
+werd door elke `device.init` geannuleerd, midden in een handshake (137 van
+173 handshakes na een start). Wacht tot de start stil is (Stulp: 3 s zonder
+init), en maak een init geen barrière voor commando's.
+
+**Elk faalpad een logregel.** Het camerabeeld was een stille 502:
+`leanhttp::get` eist een `Content-Length`, en een livestream of een bron
+die na het antwoord sluit heeft die niet (gebruik `leanhttp::fetch` en
+controleer de status zelf). Zonder regel zag de console alleen een
+geslaagde callback en daarna niets.
+
+**Een volle pool laat wachten, begrensd.** Een verbinding weggooien als alle
+werkers bezet zijn, is een 502 voor de browser. Een rij ervoor is beter,
+maar niet langer dan de klant zelf wacht: de tunnel geeft na 95 s zonder
+antwoordkop op, dus Stulp sluit wat langer dan 90 s in de rij lag.
+
+**Timers zijn schaars.** Een executor heeft er 32 (`applib::rt`, `TIMERS`).
+Een acceptor of werker die altijd een timer open heeft, eet daarvan; gebruik
+er alleen een zolang er iets te bewaken is.
+
+**Een sluitrace is geen fout.** Een write of close voor een stream die al
+weg is, is normaal na een herverbinding. Stulp maakte daar een fatale fout
+van, en de UniFi-plugin viel elke keer om.
+
+**Kies de core met een meting.** Op de LicheeRV is de grote core die van de
+kern (`system`); de bundel met plugins daar had de helft over, verplaatst
+naar de kleine core zat hij op 100%. Kijk naar `HOPOS_SLOT_LOAD` vóór en na
+een verhuizing, niet naar wat de naam van een hart doet vermoeden.
+
 ## Checklist voor de review
 
 - Geen `after(d)` in een lus met een `d` korter dan de termijn die de lus
@@ -206,6 +288,15 @@ lus vertaalt. Dat is de valkuil, en `readable()` is de uitweg.
   95%, wakes in de tientallen. Zet die regel in het testlogboek van de app.
 - Op een gedeelde core: de 404 van de buurman blijft onder de 50 ms terwijl
   jouw app werkt.
+- Een gemiste hartslag sluit niets af; een herverbinding is duurder dan
+  wachten.
+- Geen volledige kopie van een groot document per gebeurtenis; werkers
+  krijgen de wijziging.
+- Elke taak heeft een eigen meting (bezette tijd, lange polls met naam), en
+  elke wachtrij meet zijn wachttijd.
+- Elke foutstatus die de app teruggeeft, heeft een consoleregel met de reden.
+- Sessies en verbindingen naar hetzelfde apparaat worden gedeeld en
+  hergebruikt; een onbereikbaar apparaat krijgt een backoff.
 
 Zie ook: het Rust-handboek (`rustdoc/README.md`, §2 Taken en §4 De executor),
 [stacktask.md](stacktask.md) voor synchrone code op een eigen stack,

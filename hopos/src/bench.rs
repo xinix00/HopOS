@@ -1,4 +1,5 @@
 //! De meetbanken van de kern, aan met een bootparameter: `hopos.nvmebench=1`
+//! (of de feature `nvmebench`, voor een meetkern die je flipt)
 //! (de schijf rauw en door hopfs, Go: `nvmeBench` en `hopfsBench` in
 //! `OLD/metal/cmd/hopos/nvmebench.go`) en `hopos.idlestat=1` (de
 //! idle-meetlat van de OS-core, Go: `idleStat` in `node.go`).
@@ -84,7 +85,7 @@ pub(crate) fn start(
             Err(_) => println!("bench: idlestat not spawned HOPOS_IDLESTAT_FAIL"),
         }
     }
-    if bootparam(dtb, "hopos.nvmebench") == "1" {
+    if cfg!(feature = "nvmebench") || bootparam(dtb, "hopos.nvmebench") == "1" {
         match disk.as_mut() {
             Some(d) => bench_disk(exec, d),
             None => println!("nvme bench: no disk on this board, skipped HOPOS_NVMEBENCH_NONE"),
