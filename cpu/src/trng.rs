@@ -492,7 +492,10 @@ mod tests {
         assert_eq!((p, calls.len()), (Smccc::Old(None), 1));
         let (p, calls) = fake(0, 0x1_0000, 0);
         assert_eq!((p, calls.len()), (Smccc::Old(Some(0x1_0000)), 2));
-        assert!(p.to_string().contains("SMCCC_VERSION 1.0 (the TRNG needs 1.1)"));
+        assert!(
+            p.to_string()
+                .contains("SMCCC_VERSION 1.0 (the TRNG needs 1.1)")
+        );
     }
 
     #[test]

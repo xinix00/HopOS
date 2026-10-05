@@ -322,7 +322,10 @@ fn a_wide_job_with_devices_leaves_everything_placeable() {
     start(&mut a, 2, 8, 1).unwrap();
     let env = start_wide(&mut a, 3, 10).unwrap();
     assert!(env.ends_with(b"FB_BASE=0x20000000\n"), "no grant: {env:?}");
-    assert_eq!(a.status(s(3)).core.map(|(c, n)| (c.get(), n)), Some((2, 10)));
+    assert_eq!(
+        a.status(s(3)).core.map(|(c, n)| (c.get(), n)),
+        Some((2, 10))
+    );
     assert_eq!(a.cage.secondaries.len(), 9);
     stop(&mut a, 3).unwrap();
     assert!(a.cage.revoked[3], "the stop never revoked");
@@ -341,7 +344,13 @@ fn a_wide_job_with_devices_leaves_everything_placeable() {
     stop(&mut a, 4).unwrap();
     // En Lumen zelf weer, in hetzelfde slot, met zijn venster.
     let env = start_wide(&mut a, 3, 10).unwrap();
-    assert!(env.ends_with(b"FB_BASE=0x20000000\n"), "no grant again: {env:?}");
-    assert_eq!(a.status(s(3)).core.map(|(c, n)| (c.get(), n)), Some((2, 10)));
+    assert!(
+        env.ends_with(b"FB_BASE=0x20000000\n"),
+        "no grant again: {env:?}"
+    );
+    assert_eq!(
+        a.status(s(3)).core.map(|(c, n)| (c.get(), n)),
+        Some((2, 10))
+    );
     assert!(!con.saw("HOPOS_PART_QUARANTINE"));
 }

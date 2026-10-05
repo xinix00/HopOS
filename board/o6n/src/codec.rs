@@ -478,7 +478,13 @@ mod tests {
             // Lezen en cycleren delen de teller: een Cell, geen twee leningen.
             let cycles = core::cell::Cell::new(0);
             let r = recover(
-                || if cycles.get() >= after { healthy } else { stuck },
+                || {
+                    if cycles.get() >= after {
+                        healthy
+                    } else {
+                        stuck
+                    }
+                },
                 |_, _, _| {
                     cycles.set(cycles.get() + 1);
                     Ok(())
