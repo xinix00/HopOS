@@ -210,9 +210,11 @@ pub(crate) fn start(exec: &'static Executor, disk: Option<Disk>) -> Option<&'sta
     // staan.
     // De default is stateless: bij een koude boot wordt het indexbestand
     // genegeerd en begint de boom leeg. Alleen `hopos.storage=stateful`
-    // laadt hem. Een flip-landing houdt altijd de boom van de vorige kern.
+    // laadt hem. Een flip-landing (een gevonden overdracht, warm of koud)
+    // houdt altijd de boom van de vorige kern; een firmware-boot niet, ook
+    // niet op riscv waar elke boot als sprong telt (`flip::jumped`).
     let stateless =
-        crate::BOARD.boot_param("hopos.storage") != "stateful" && !crate::flip::jumped();
+        crate::BOARD.boot_param("hopos.storage") != "stateful" && !crate::flip::landed();
     if stateless {
         println!(
             "hopfs: stateless (hopos.storage), the index is ignored and the tree starts empty HOPOS_FS_STATELESS"

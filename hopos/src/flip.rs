@@ -207,6 +207,17 @@ static SUM: AtomicU64 = AtomicU64::new(0);
 static ADOPTED: Stop = Stop::new();
 /// Deze kern landde uit een KOUDE flip: niets te adopteren, wel de guard.
 static COLD_LANDED: AtomicBool = AtomicBool::new(false);
+/// Deze kern landde uit een flip (warm of koud): er was een overdracht. De
+/// opslag mount dan de generatie die de vorige kern vastlegde, ook als de
+/// config stateless zegt. Een firmware-boot, ook met een oud paar
+/// (`HOPOS_FLIP_STALE`), is geen landing.
+static LANDED: AtomicBool = AtomicBool::new(false);
+
+/// Landde deze kern uit een flip? Anders dan [`jumped`] zegt dit op elke
+/// architectuur alleen ja bij een gevonden overdracht.
+pub(crate) fn landed() -> bool {
+    LANDED.load(Relaxed)
+}
 /// De zwarte doos staat open: vanaf nu gaat elke consoleregel erin. Pas na
 /// de landing (zie [`land`]): wat er nog in staat, is van een vorige boot.
 static BOX_OPEN: AtomicBool = AtomicBool::new(false);
@@ -445,6 +456,7 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
             GENERATION.store(h.generation, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
             COLD_LANDED.store(true, Relaxed);
+            LANDED.store(true, Relaxed);
             // De doos van de kern die sprong gaat weg: die leeft niet meer,
             // maar stierf ook niet. Vanaf hier is hij van ons.
             open_box(h.generation);
@@ -462,6 +474,7 @@ pub(crate) fn land(x0: u64) -> Option<Handoff> {
         }
         Ok(Boot::Adopted(mut h)) => {
             GENERATION.store(h.generation, Relaxed);
+            LANDED.store(true, Relaxed);
             SUM.store(h.bundle_sum, Relaxed);
             open_box(h.generation);
             crate::clock::restore(h.wall_off);

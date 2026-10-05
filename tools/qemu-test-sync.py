@@ -38,6 +38,8 @@ def probe(binary=None, markers=('HOPOS_SYNC_WRITE','HOPOS_SYNC_READ'), output=OU
     with tempfile.TemporaryDirectory(prefix='hopos-sync-') as tmp:
         tmp = Path(tmp)
         env['DISK'] = str(tmp / 'disk.img')
+        # Stateful: de koude herstart moet het volume met de database terugvinden.
+        env['BOOTARGS'] = 'hopos.storage=stateful'
         objcopy = subprocess.check_output(['rustc','--print','sysroot'],cwd=ROOT,text=True).strip()
         bins = list(Path(objcopy).glob('lib/rustlib/*/bin/rust-objcopy'))
         if not bins:

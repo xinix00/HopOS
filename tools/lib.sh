@@ -233,6 +233,9 @@ qemu_rv() {
 			-device "loader,addr=0xa8100000,data=$(wc -c <"$img" | tr -d ' '),data-len=8" \
 			-device "loader,addr=0xa8100008,data=$role,data-len=8" "$@"
 	fi
+	# BOOTARGS: bootparameters in /chosen/bootargs van de DTB, zoals
+	# image/qemu-run.sh op arm64 (het board leest ze als config-laag).
+	[ -z "${BOOTARGS:-}" ] || set -- -append "$BOOTARGS" "$@"
 	exec qemu-system-riscv64 -M virt -m 1G -smp 2 -bios none -nographic \
 		-kernel "$KERNEL" \
 		-global virtio-mmio.force-legacy=false \
