@@ -79,10 +79,7 @@ impl Source {
         if !is_url(name) {
             return Ok(Source::File { path: name, off: 0 });
         }
-        let mut d = Dialer {
-            exec,
-            connect: CONNECT,
-        };
+        let mut d = Dialer::new(exec, CONNECT);
         let r = leanhttp::get(&mut d, name)
             .await
             .map_err(SourceError::Http)?;

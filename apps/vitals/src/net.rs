@@ -212,10 +212,7 @@ async fn rx_one(exec: &'static Exec, url: &str, share: u64) -> Result<(), RxErro
         header_timeout: Some(STALL),
         ..Call::default()
     };
-    let mut d = Dialer {
-        exec,
-        connect: CONNECT,
-    };
+    let mut d = Dialer::new(exec, CONNECT);
     let mut resp = leanhttp::fetch(&mut d, call).await.map_err(RxError::Http)?;
     if resp.status != 200 {
         return Err(RxError::Status(resp.status));
