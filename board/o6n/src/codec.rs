@@ -475,11 +475,12 @@ mod tests {
         let stuck = (0x07ce_f000, [0; 4]);
         assert_eq!(recover(|| healthy, |_, _, _| unreachable!()), Ok(0));
         for after in 1..=RECOVER_CYCLES {
-            let mut cycles = 0;
+            // Lezen en cycleren delen de teller: een Cell, geen twee leningen.
+            let cycles = core::cell::Cell::new(0);
             let r = recover(
-                || if cycles >= after { healthy } else { stuck },
+                || if cycles.get() >= after { healthy } else { stuck },
                 |_, _, _| {
-                    cycles += 1;
+                    cycles.set(cycles.get() + 1);
                     Ok(())
                 },
             );
