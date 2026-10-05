@@ -21,6 +21,7 @@
 
 use crate::{Core, Region, Slot};
 use core::future::Future;
+use core::time::Duration;
 
 /// De klasse van een core, zoals een jobspec hem vraagt.
 ///
@@ -217,8 +218,9 @@ pub trait Cage {
     fn dispatch(&mut self, slot: Slot, core: Core) -> Result<(), CageError>;
     /// Het startschot van een secundaire SMP-context op `core`.
     fn dispatch_secondary(&mut self, slot: Slot, core: Core) -> Result<(), CageError>;
-    /// Vraag de app coöperatief te stoppen (de kill-vlag op de control-page).
-    fn request_exit(&mut self, slot: Slot);
+    /// Vraag de app coöperatief te stoppen: de kill-vlag op de control-page,
+    /// met `grace` erin als de termijn die hij krijgt vóór de intrekking.
+    fn request_exit(&mut self, slot: Slot, grace: Duration);
     /// Doet de context van `slot` op `core` niets meer (dood, leeg, of de
     /// core staat stil)?
     fn quiet(&self, slot: Slot, core: Core) -> bool;
@@ -271,9 +273,9 @@ pub trait Cage {
     /// Haalt de frame-ringen van `slot` van de switch (die [`Cage::build`]
     /// eraan hing) en wacht tot de switch ze losliet: daarna raakt de switch
     /// de staart van de partitie niet meer aan. De lifecycle roept dit bij
-    /// elke stop vóór de kill-vlag, en na een start die na de bouw toch
-    /// niet doorging, dus altijd vóór de partitie terug kan. Zonder netwerk
-    /// is er niets los te halen.
+    /// elke stop nadat de app stil is (tijdens zijn gratie houdt hij zijn
+    /// net), en na een start die na de bouw toch niet doorging, dus altijd
+    /// vóór de partitie terug kan. Zonder netwerk is er niets los te halen.
     fn detach(&mut self, slot: Slot) -> impl Future<Output = ()> {
         let _ = slot;
         core::future::ready(())

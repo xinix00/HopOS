@@ -42,7 +42,7 @@ use applib::{App, EXEC, clock, heap::HEAP, log};
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use leanhttp::{Exchange, Found, Mux};
-use sync::Doors;
+use sync::{Doors, select};
 
 applib::main!(welcome);
 
@@ -139,7 +139,9 @@ async fn welcome(app: &'static App) {
         "welcome: serving http on {a}.{b}.{c}.{d}:{port} for node {node}, slot {}, {WORKERS} workers HOPOS_WELCOME_UP port={port}",
         shared.slot
     );
-    accept(listener, exec).await;
+    // Tot de kern vraagt te stoppen; de main-schil doet dan het
+    // net-afscheid (elke verbinding dicht) en de exit.
+    select(app.stopped(), accept(listener, exec)).await;
 }
 
 /// De acceptor: elke verbinding naar de eerste vrije werker.

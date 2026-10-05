@@ -30,7 +30,7 @@ use abi::hopabi::{
     AppStatus, CTRL_APP_FAULT_ELR, CTRL_APP_FAULT_ESR, CTRL_APP_FAULT_FAR, CTRL_APP_FAULT_VEC,
     CTRL_CORES, CTRL_ENTRY, CTRL_EXIT_CODE, CTRL_FAULT_ESR, CTRL_FAULT_FAR, CTRL_FAULT_VEC,
     CTRL_HART, CTRL_HEARTBEAT, CTRL_IDLE, CTRL_KILL, CTRL_MEM_SYS, CTRL_RAM_SIZE, CTRL_SHARED,
-    CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_WAKES, CTRL_WALL_OFF, hart_word,
+    CTRL_SLOT, CTRL_SMP_REQ, CTRL_STATUS, CTRL_WAKES, CTRL_WALL_OFF, KILL_STOP, hart_word,
 };
 use abi::layout::{
     self, ABI_TAIL, CTRL_STRIDE, CTX_CTRL_PA, CTX_LEN, CTX_REVOKE, CTX_RING_HEAD_PA, CTX_UNIT_SLOT,
@@ -39,6 +39,7 @@ use abi::layout::{
 use abi::ring;
 use core::future::Future;
 use core::marker::PhantomData;
+use core::time::Duration;
 use cpu::el2::{self, CoreState, roster};
 use cpu::println;
 use dev::Pa;
@@ -479,9 +480,12 @@ impl<I: Isa> Cage for Kooi<I> {
         self.isa.start_secondary(&self.plan, &b, c)
     }
 
-    fn request_exit(&mut self, slot: Slot) {
-        // De lifecycle haalde de ringen al van de switch (`Cage::detach`).
-        self.ctrl_write(slot, CTRL_KILL, 1);
+    fn request_exit(&mut self, slot: Slot, grace: Duration) {
+        // De termijn in ms op de vlag, nooit onder KILL_STOP: 0 is geen
+        // verzoek, en een app die alleen op "niet 0" kijkt (de Go-SDK) stopt
+        // bij elke waarde meteen.
+        let ms = u64::try_from(grace.as_millis()).unwrap_or(u64::MAX);
+        self.ctrl_write(slot, CTRL_KILL, ms.max(KILL_STOP));
         let Some(b) = self.built(slot) else { return };
         // Een buur die alleen overblijft, hoeft niet meer te yielden; en de
         // kick, zodat een slaper de vlag nu ziet en niet op zijn wektijd.

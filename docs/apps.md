@@ -127,6 +127,36 @@ Wat je daarvoor hebt, allemaal uit applib en de `sync`-crate:
 | een echte deadline: hartslag, time-out, keepalive | `exec.after(d)` of `exec.until(at)` |
 | een vangnet dat alleen telt zolang de core toch wakker is | `exec.after_deferrable(d)`: vuurt in de eerste ronde na zijn deadline, maar wekt een slapende core niet |
 | twee of meer van het bovenstaande | `select(a, b)`, genest voor meer |
+| de stop van de app | `app.stopped()` of `app.stop().wait()`: de stopbel, zie hieronder |
+
+### De stop
+
+Een `DELETE` van de job is geen kill: de kern zet de kill-vlag met een
+termijn erin (Hop vraagt 3 s), en applib maakt daar de stopbel van de app
+van, `app.stop()` (een `sync::Stop`, de tegenhanger van `close(stop)` en
+`context.WithCancel`). De app heeft dan die termijn min 500 ms (het
+net-afscheid en één hartslag) om af te ronden: de database dicht, de
+sessie beëindigd, de tunnel dicht, een laatste regel. Tijdens die gratie
+heeft hij zijn net en de system-API nog. Keert `main` terug, dan doet de
+main-schil het net-afscheid (elke verbinding dicht, elke FIN bevestigd) en
+de exit. Twee regels in de hoofdlus zijn genoeg:
+
+```rust
+async fn app_main(app: &'static App) {
+    let db = Db::open(app).await;
+    // De hoofdlus tot de kern vraagt te stoppen.
+    select(app.stopped(), serve(app, &db)).await;
+    db.close().await;                     // de opruiming, binnen de gratie
+}                                         // terug: applib doet shutdown(0)
+```
+
+Op de console: `HOPOS_APP_STOP grace_ms=2500` bij het verzoek,
+`HOPOS_APP_SHUTDOWN` bij het afscheid, en `HOPOS_SLOT_STOPPED` als de kern
+de partitie vrijgeeft. Een app die de bel negeert, krijgt na de gratie
+`HOPOS_APP_STOP_FORCED` en hetzelfde afscheid; wie ook dan niet parkeert,
+wordt na de termijn ingetrokken (`HOPOS_PART_QUARANTINE` als zelfs dat niet
+pakt). Een `stacktask` breekt af door hem te droppen: `select(app.stopped(),
+task)` geeft de C-kant `Cancelled` bij zijn volgende `wait`.
 
 `after(d)` is dus een deadline, geen peiling. Als je `after(d)` in een lus
 schrijft met een `d` kleiner dan de termijn die je werkelijk bewaakt, kijk je
@@ -361,6 +391,8 @@ een verhuizing, niet naar wat de naam van een hart doet vermoeden.
 - Elke taak heeft een eigen meting (bezette tijd, lange polls met naam), en
   elke wachtrij meet zijn wachttijd.
 - Elke foutstatus die de app teruggeeft, heeft een consoleregel met de reden.
+- De hoofdlus wacht ook op `app.stopped()`, en wat open is (een database,
+  een sessie, een tunnel) gaat dicht vóór `main` terugkeert.
 - Sessies en verbindingen naar hetzelfde apparaat worden gedeeld en
   hergebruikt; een onbereikbaar apparaat krijgt een backoff.
 - Elk apparaat (peer) heeft één eigenaar-taak; parallel per apparaat, niet

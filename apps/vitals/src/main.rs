@@ -61,7 +61,7 @@ use applib::tcp::TcpConn;
 use applib::{App, EXEC, clock, log};
 use core::time::Duration;
 use leanhttp::{Exchange, Found, Mux};
-use sync::Doors;
+use sync::{Doors, select};
 
 applib::main!(vitals);
 
@@ -214,7 +214,9 @@ async fn vitals(app: &'static App) {
         app.slot(),
         app.cores()
     );
-    accept(listener, exec).await;
+    // Tot de kern vraagt te stoppen; de main-schil doet dan het
+    // net-afscheid (elke verbinding dicht) en de exit.
+    select(app.stopped(), accept(listener, exec)).await;
 }
 
 /// Vult `buf` met een xorshift-patroon: de inhoud doet er niet toe (niemand

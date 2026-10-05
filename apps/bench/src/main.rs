@@ -79,7 +79,7 @@ async fn bench(app: &'static applib::App) {
         (_, None | Some("serve" | "")) => {
             let env = app.env("ER_PORT_HTTP").or_else(|| app.env("BENCH_PORT"));
             let port = applib::app::port_of(env, DEFAULT_PORT);
-            serve::run(app, port).await;
+            sync::select(app.stopped(), serve::run(app, port)).await;
             0
         }
         (_, Some(other)) => {
@@ -92,7 +92,7 @@ async fn bench(app: &'static applib::App) {
     // zichzelf (en vult de console). `BENCH_EXIT=1` stopt wel, met de code.
     if app.env("BENCH_EXIT") != Some("1") {
         log!("bench: done with code {code}, holding until the job is stopped HOPOS_BENCH_HOLD");
-        applib::park().await;
+        app.stopped().await;
     }
     app.shutdown(code).await;
 }

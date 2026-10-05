@@ -156,10 +156,14 @@ Wie wat bezit:
    in quarantaine.
 4. **Draaien.** De servicer leest de outbox (logregels naar de console en
    `NEXT_LOG`, SMP-verzoeken naar de lifecycle).
-5. **Stop.** `STOP_SLOT`: evict uit de tabel, de ringen van de switch,
-   kill-vlag, poorten weg, wachten op stil, anders revoke met 1 s gratie.
-   Stil: partitie en cores vrij. Niet stil: quarantaine. De committer ziet de
-   generatie verdwijnen en legt hopfs vast.
+5. **Stop.** `STOP_SLOT` met een termijn (Hop: 3 s): de kill-vlag met die
+   termijn in ms erin (`CTRL_KILL`; 1 was de oude vorm zonder termijn),
+   poorten weg, wachten op stil, anders revoke met 1 s gratie. Tijdens het
+   wachten houdt de app zijn net, zijn generatie (dus de system-API) en zijn
+   outbox-lezer: dat is zijn gratie, SIGTERM vóór SIGKILL. Dan pas evict
+   uit de tabel en de ringen van de switch. Stil: partitie en cores vrij.
+   Niet stil: quarantaine. De committer ziet de generatie verdwijnen en
+   legt hopfs vast.
 
 ### 4.4 De app-kant: applib
 
@@ -168,8 +172,14 @@ applib (`applib/`) is de runtime waar elke Rust-app tegen linkt (op
 de stage-1-identity map en de MMU; `main!` → `rt::run` maakt de `App`
 (staart, outbox, control-page, env), de heap (dezelfde crate als de kern),
 meldt READY, en draait de executor met twee taken: de hartslag (`watch`,
-elke 50 ms) en `main`. De slaper (`applib/src/sleep.rs`) wapent eerst de
-RX-deurbel en yieldt dan (HVC #1) of wacht op WFE.
+elke 50 ms) en `main`. Ziet de hartslag de kill-vlag, dan luidt hij de
+stopbel van de app (`App::stop`, een `sync::Stop`; `app.stopped().await`
+voor de hoofdlus) met de termijn van de kern min 500 ms als gratie
+(`HOPOS_APP_STOP grace_ms=`). Keert `main` terug, dan volgt het
+net-afscheid (`App::shutdown`, `HOPOS_APP_SHUTDOWN`) en de exit; is `main`
+na de gratie nog niet terug, dan doet de hartslag dat afscheid zelf
+(`HOPOS_APP_STOP_FORCED`). De slaper (`applib/src/sleep.rs`) wapent eerst
+de RX-deurbel en yieldt dan (HVC #1) of wacht op WFE.
 
 Wat een app verder krijgt: een leannet-stack per app (`appnet.rs`: IP en MAC
 uit het slotnummer, de kern als gateway, DNS-stub, TCP/UDP/UDP6-handvatten),

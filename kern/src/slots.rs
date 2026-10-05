@@ -639,10 +639,13 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
     let mut saw_live = false;
     let mut idle_since: Option<u64> = None;
     let mut batch = 0usize;
+    let mut stopping = false;
     loop {
-        if ctl.stop.take() {
-            return;
-        }
+        // Een stop (de evict) gaat pas door als de outbox leeg is: het
+        // afscheid van de app staat erin vlak vóór hij parkeert, en de
+        // evict komt binnen 10 ms daarna, vaak vóór deze tik (QEMU, 05-10:
+        // HOPOS_APP_STOP en HOPOS_APP_SHUTDOWN haalden de console niet).
+        stopping |= ctl.stop.take();
         // De app kan geparkeerde cores niet zelf starten (de mailboxen liggen
         // buiten elke stage-2-map); de actor dispatcht namens hem.
         if out.smp_pending() {
@@ -668,6 +671,9 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
             continue;
         }
         batch = 0;
+        if stopping {
+            return;
+        }
         if out.corrupt() {
             log.log(format_args!(
                 "slot {slot}: outbox corrupt HOPOS_SERVICER_RING"
@@ -688,7 +694,7 @@ async fn serve<'a, O: Outbox, T: Timer, L: Console, const N: usize>(
         let guard = Duration::from_nanos(grid - timer.now() % grid);
         let tick = select(timer.sleep_deferrable(SERVICER_TICK), timer.sleep(guard));
         if let Either::Left(()) = select(ctl.stop.wait(), tick).await {
-            return;
+            stopping = true;
         }
     }
 }
@@ -1295,8 +1301,9 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         true
     }
 
-    /// Stop: eerst de servicer weg, dan de coöperatieve kans, dan de
-    /// intrekking. Alleen een bevestigde beëindiging geeft de partitie en de
+    /// Stop: de coöperatieve kans (met de termijn op de vlag), dan de
+    /// intrekking, dan pas de servicer en de ringen weg. Alleen een
+    /// bevestigde beëindiging geeft de partitie en de
     /// cores terug (E2, E9); anders quarantaine, en een latere stop mag het
     /// opnieuw proberen.
     async fn stop(&mut self, slot: Slot, timeout: Duration) -> Result {
@@ -1310,11 +1317,13 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
         }
         let (core, span) = (r.core, r.span);
         let published = !r.ports.is_empty();
-        self.evict(slot).await;
-        // Eerst van de switch af (bevestigd), dan de kill-vlag: na de stop
-        // schrijft niemand meer in de ringen van een partitie die vrijkomt.
-        self.cage.detach(slot).await;
-        self.cage.request_exit(slot);
+        // De kill-vlag draagt de termijn: dat is de gratie van de app
+        // (SIGTERM, dan SIGKILL). Tot 05-10 ging eerst de servicer weg en
+        // gingen de ringen van de switch, en pas dan de vlag: de app had dan
+        // geen net, geen system-API (geen generatie) en geen outbox-lezer
+        // meer, dus niets om nog netjes mee af te sluiten. Nu houdt hij die
+        // drie tot hij stil is of ingetrokken wordt.
+        self.cage.request_exit(slot, timeout);
         // De deuren dicht zodra de app gevraagd is te stoppen: een nieuwe
         // verbinding naar een app die weggaat, bereikt niemand meer, en de
         // poort is dan vrij voor de volgende start (Go: `UnpublishSlot` in
@@ -1336,6 +1345,11 @@ impl<'s, C: Cage, K: Cores, T: Timer, L: Console, G: Grants> Lifecycle<'s, C, K,
             }
             quiet = self.wait_quiet(slot, core, span, REVOKE_GRACE).await;
         }
+        // Nu pas de servicer weg (hij las de laatste regels van de app al
+        // door) en de ringen van de switch af (bevestigd): na dit punt
+        // schrijft niemand meer in een partitie die vrijkomt.
+        self.evict(slot).await;
+        self.cage.detach(slot).await;
         let Some(r) = self.residents.get_mut(slot.get()).and_then(Option::take) else {
             return Ok(());
         };
@@ -1797,6 +1811,8 @@ pub(crate) mod tests {
         pub(crate) stuck: [bool; 16],
         /// Welke (slot, core)-paren de stop naar stilte vroeg.
         pub(crate) asked_quiet: RefCell<Vec<(usize, usize)>>,
+        /// De termijn in ms die de stop per slot op de vlag zette.
+        pub(crate) exit_grace_ms: [u64; 16],
         /// Slots die boot-pending blijven tot `hog` ingetrokken is (een buur
         /// die nooit yieldt; zonder `hog` voor altijd).
         pub(crate) boot_pending: [bool; 16],
@@ -1826,6 +1842,7 @@ pub(crate) mod tests {
                 taken: None,
                 stuck: [false; 16],
                 asked_quiet: RefCell::new(Vec::new()),
+                exit_grace_ms: [0; 16],
                 boot_pending: [false; 16],
                 hog: None,
             }
@@ -1873,9 +1890,10 @@ pub(crate) mod tests {
             }
             Ok(())
         }
-        fn request_exit(&mut self, slot: Slot) {
+        fn request_exit(&mut self, slot: Slot, grace: Duration) {
             self.calls.set(self.calls.get() + 1);
             self.exit_asked[slot.get()] = true;
+            self.exit_grace_ms[slot.get()] = grace.as_millis() as u64;
         }
         fn quiet(&self, slot: Slot, core: Core) -> bool {
             self.calls.set(self.calls.get() + 1);
@@ -2301,11 +2319,13 @@ pub(crate) mod tests {
         start(&mut a, 1, 32, 1).unwrap();
         assert!(a.cage.detached.is_empty());
         stop(&mut a, 1).unwrap();
+        // De app had zijn net tot hij stil was, en de vlag droeg de termijn.
         assert_eq!(
             a.cage.detached,
-            [(1, false)],
-            "off the switch before the kill flag"
+            [(1, true)],
+            "off the switch only after the kill flag"
         );
+        assert_eq!(a.cage.exit_grace_ms[1], 50, "the grace rides on the flag");
         assert!(!a.cage.revoked[1], "cooperative exit needed no revocation");
         assert_eq!(a.status(s(1)).occupancy, Occupancy::Empty);
         assert_eq!(svc.current(s(1)), None);
@@ -2427,6 +2447,44 @@ pub(crate) mod tests {
         fn smp_pending(&self) -> bool {
             false
         }
+    }
+
+    // De stop (de evict) komt vóór de servicer zijn beurt had: de laatste
+    // regels van de app (zijn afscheid) komen toch door, dan pas gone.
+    #[test]
+    fn servicer_drains_the_outbox_before_it_leaves_on_a_stop() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let live = Cell::new(false);
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        start_live(&mut a, 1, 8, 1).unwrap();
+        let inbox: Mailbox<Envelope<'_>, 4> = Mailbox::new();
+        let timer = FakeTimer::default();
+        let conr = &con;
+        let mut buf = [0u8; 64];
+        let servicer = servicer_task(
+            s(1),
+            &svc,
+            |_| FakeOutbox {
+                lines: vec![b"bye".to_vec(), b"stopping".to_vec()],
+                live: &live,
+            },
+            &timer,
+            &conr,
+            &inbox,
+            &mut buf,
+        );
+        let mut servicer = core::pin::pin!(servicer);
+        let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+        let ctl = svc.ctl(s(1)).unwrap();
+        ctl.stop.set();
+        for _ in 0..4 {
+            let _ = servicer.as_mut().poll(&mut cx);
+        }
+        assert_eq!(
+            con.app.borrow().as_slice(),
+            &[(1, b"stopping".to_vec()), (1, b"bye".to_vec())]
+        );
+        assert!(ctl.gone.is_set(), "the servicer left after the drain");
     }
 
     // Een outbox vol logregels: de servicer geeft na elke SERVICER_BATCH

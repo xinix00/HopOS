@@ -23,7 +23,11 @@ aborteren. Dit is geen vrijbrief voor onbeperkte recursie in externe C-code.
 
 Drop geeft annulering door en hervat de taak tot de functie terugkeert. Zo
 worden zowel lokale Rust-waarden als C-handvatten op hun eigen stack opgeruimd
-vóór vrijgave. Een future waarvan de I/O-bevestiging onbekend is, vereist
+vóór vrijgave. De stopbel van de app sluit daar zonder extra code op aan:
+`select(app.stopped(), task)` dropt de taak als de kern vraagt te stoppen, de
+C-kant ziet `Cancelled` bij zijn volgende `wait` (een lange CPU-query via de
+progresscallback met `wait(yield_now())`), en de app doet daarna zijn
+opruiming binnen de gratie (zie [apps.md](apps.md), De stop). Een future waarvan de I/O-bevestiging onbekend is, vereist
 daarnaast een vergiftigde I/O-eigenaar: alleen de C-stack opruimen maakt een
 onbekende write-uitkomst niet weer betrouwbaar.
 

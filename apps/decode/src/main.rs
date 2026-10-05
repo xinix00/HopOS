@@ -157,12 +157,16 @@ async fn decode(app: &'static App) {
         .min(MAX_FRAMES);
     match run(app, exec, &mut sys, &ses, name, bufs).await {
         Ok(m) => m.report(name),
+        Err(e @ Stop::Stopped { .. }) => log!("decode: {name}: {e}"),
         Err(e) => log!("decode: {name}: {e} HOPOS_DECODE_FAIL"),
     }
+    // De sessie dicht vóór de exit: een sessie die met de app sterft, laat
+    // de codec met een slot zitten ("session slot 0 will not terminate" op
+    // de O6N, 04-10). Dan wachten tot de kern vraagt te stoppen.
     if let Err(e) = ses.close(&mut sys).await {
         log!("decode: close: {e}");
     }
-    park().await;
+    app.stopped().await;
 }
 
 /// Waarom een meting stopte.
@@ -194,6 +198,11 @@ enum Stop {
         /// Beelden tot dan.
         frames: u64,
     },
+    /// De kern vroeg de app te stoppen.
+    Stopped {
+        /// Beelden tot dan.
+        frames: u64,
+    },
 }
 
 impl fmt::Display for Stop {
@@ -206,6 +215,7 @@ impl fmt::Display for Stop {
             }
             Stop::Grew { size } => write!(f, "the stream grew to {size} bytes per frame"),
             Stop::Fault { frames } => write!(f, "the decoder faulted after {frames} frame(s)"),
+            Stop::Stopped { frames } => write!(f, "stopped after {frames} frame(s)"),
             Stop::Quiet { frames } => write!(
                 f,
                 "no event for {} s after {frames} frame(s)",
@@ -345,6 +355,10 @@ async fn run(
     let quiet = u64::try_from(QUIET.as_nanos()).unwrap_or(u64::MAX);
     let mut last_event = start;
     loop {
+        // De stopbel: de meting staakt, de sessie gaat dan netjes dicht.
+        if app.stop().is_set() {
+            return Err(Stop::Stopped { frames: m.frames });
+        }
         // Bitstream bijvoeren zolang er een vrije invoerbuffer is.
         while !eos {
             let Some(i) = b.in_free.pop() else { break };

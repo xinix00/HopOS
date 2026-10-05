@@ -112,6 +112,9 @@ nagekeken worden tegen welke metal ze gebouwd zijn.
   app-fault-rapport) raakt hij niet.
 - Hij heeft zijn eigen RNG (RNDR of jitter-DRBG) en zijn eigen klok; het zaad
   van de kern op de control-page leest hij niet.
+- De stopbel kent hij niet: de kill-vlag (sinds 05-10 met de termijn in ms
+  erin) leest hij als "niet 0" en hij stopt meteen, zonder net-afscheid,
+  zoals vóór die datum elke app deed (apps.md, De stop).
 - SMP: de `CTRL_SMP_*`-woorden zijn de M/g0-overdracht van de Go-runtime en
   staan nog in ABI 1; een Go-app met `cores: 2` is nog niet gedraaid.
 

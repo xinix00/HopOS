@@ -21,11 +21,21 @@
 #               ("( -.-)") en "slot 2", en GET /health geeft 200 "ok";
 #   de stop     DELETE /v1/jobs/welcome: de kern trekt de poort in
 #               ("slot 2: ports withdrawn from the uplink
-#               HOPOS_SLOT_UNPUBLISH"), en daarna antwoordt
-#               127.0.0.1:$WEBPORT niet meer met de pagina.
+#               HOPOS_SLOT_UNPUBLISH"), de app hoort de stopbel ("slot 2:
+#               applib: stop requested ... HOPOS_APP_STOP grace_ms=2500"),
+#               keert zelf terug uit main en doet het net-afscheid ("slot 2:
+#               applib: shutdown code=0 ... HOPOS_APP_SHUTDOWN"), en de kern
+#               ziet hem stil zonder intrekking ("slot 2: stopped, partition
+#               and core released HOPOS_SLOT_STOPPED"); daarna antwoordt
+#               127.0.0.1:$WEBPORT niet meer met de pagina. De tijd van het
+#               verzoek tot stil staat in de meting (een Go-welcome kent de
+#               bel niet: dan alleen de intrekking van de poort en
+#               HOPOS_SLOT_STOPPED).
 #
 # Een HOPOS_PANIC, HOPOS_EXCEPTION, HOPOS_APP_PANIC, HOPOS_HOP_FAULT,
-# HOPOS_HOP_EXIT, HOPOS_HOP_FAIL of HOPOS_SLOT_PUBLISH_FAIL is meteen rood.
+# HOPOS_HOP_EXIT, HOPOS_HOP_FAIL, HOPOS_SLOT_PUBLISH_FAIL, en bij de stop
+# een HOPOS_APP_STOP_FORCED (de app negeerde de bel) of een
+# HOPOS_PART_QUARANTINE (de kern moest intrekken) is meteen rood.
 # Rood bewaart de console (en drukt hem af).
 #
 #   tools/qemu-test-welcome.sh             TIMEOUT=60 standaard, in seconden
@@ -71,8 +81,11 @@ hop_virt
 
 BOOT_MARKS="HOPOS_BOOT|HOPOS_NET_UP|HOPOS_SYSTEM_UP|HOPOS_HOP_START slot=1 |slot 1: 2 port\\(s\\) published tcp\\+udp on the uplink: :8080 :9080 HOPOS_SLOT_PUBLISH|slot 1: .*HOP_LEADER|slot 1: .*HOP_UP"
 PLACE_MARKS="slot 1: .*HOP_JOB_PLACED slot=2|slot 2: 1 port\\(s\\) published tcp\\+udp on the uplink: :80 HOPOS_SLOT_PUBLISH|slot 2: .*$UP_MARK"
-STOP_MARKS="slot 2: ports withdrawn from the uplink HOPOS_SLOT_UNPUBLISH"
-RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL"
+STOP_MARKS="slot 2: ports withdrawn from the uplink HOPOS_SLOT_UNPUBLISH|slot 2: stopped, partition and core released HOPOS_SLOT_STOPPED"
+if [ -z "${GO_ELF:-}" ]; then
+	STOP_MARKS="$STOP_MARKS|slot 2: applib: stop requested by the kernel, 2500 ms to finish HOPOS_APP_STOP grace_ms=2500|slot 2: applib: shutdown code=0 .*HOPOS_APP_SHUTDOWN"
+fi
+RED="HOPOS_PANIC|HOPOS_EXCEPTION|HOPOS_APP_PANIC|HOPOS_HOP_FAULT|HOPOS_HOP_EXIT|HOPOS_HOP_FAIL|HOPOS_SLOT_PUBLISH_FAIL|HOPOS_APP_STOP_FORCED|HOPOS_PART_QUARANTINE"
 
 JOB='{"name":"welcome","driver":"hop","artifacts":[{"url":"http://10.0.2.2:'"$ARTPORT"'/welcome.elf"}],"memory_limit":33554432,"ports":{"http":80}}'
 POSTED=""
@@ -147,5 +160,7 @@ fi
 served welcome.elf
 reds
 took
+# De meetlat van de stop: van het verzoek (de poort weg) tot stil.
+echo "   meting: $(tr -d '\r' <"$LOG" | grep -E 'HOPOS_SLOT_UNPUBLISH|HOPOS_APP_STOP|HOPOS_APP_SHUTDOWN|HOPOS_SLOT_STOPPED' | sed -E 's/^.*(slot 2:.*)$/\1/' | tr '\n' ';')"
 verdict qemu-welcome
 echo "welcome-kring groen"
