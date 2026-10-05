@@ -63,6 +63,15 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       (`SQLITE_IOCAP_BATCH_ATOMIC`, hermappen via `pending`, één vastlegging
       bij OP_SYNC) haalt het journal en twee van de drie syncs weg; na het
       weekend. Replica docs/bench.md heeft de tabel.
+- [ ] De nette stop (b1ae2a8, na 3.0.13): op ijzer te zien met een
+      `DELETE /v1/jobs/welcome`: `HOPOS_SLOT_UNPUBLISH`, binnen 50 ms
+      `HOPOS_APP_STOP grace_ms=2500`, `HOPOS_APP_SHUTDOWN`, `HOPOS_SLOT_STOPPED`,
+      zonder FORCED of QUARANTINE (een app uit de apps-release van 3.0.13 kent
+      de bel nog niet en gaat na 2,5 s via FORCED). Op de O6N met decode: geen
+      "session slot 0 will not terminate" meer. Hop zelf: `select(app.stopped(),
+      serve)` bij de volgende applib-bump; een jobspec-veld `stop_timeout`
+      (TimeoutStopSec) is de stap erna. Stateless geldt nu ook op riscv
+      (05aee54): de LicheeRV begint koud leeg, een flip blijft stateful.
 ### Fixen
 
 - [ ] `HOPOS_IRQ_STUCK` wordt nergens gedrukt (hing aan het dode irq::run;
