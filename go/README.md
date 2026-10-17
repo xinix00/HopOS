@@ -1,11 +1,11 @@
-# Go-apps
+# Go apps
 
-Een app waarvan de bron Go is blijft Go: hij bouwt met tamago tegen de Go-SDK
-(`github.com/xinix00/HopOS/metal/v2`, v2.2.8) en draait in een slot zoals een
-Rust-app. Hoe de kern dat toelaat en hoe je bouwt: [docs/go-apps.md](../docs/go-apps.md).
+An app whose source is Go stays Go: it builds with tamago against the Go SDK
+(`github.com/xinix00/HopOS/metal/v2`, v2.2.8) and runs in a slot like a
+Rust app. How the kernel allows that and how to build: [docs/go-apps.md](../docs/go-apps.md).
 
-| Wat | Waarom |
+| What | Why |
 | --- | --- |
-| [cloudflared/](cloudflared/) | cloudflared's eigen `tunnel run` als slot-app |
-| [tamago-go/](tamago-go/) | de drie runtime-patches voor de tamago-toolchain, met `apply.sh` |
-| [apps-release.sh](apps-release.sh) | bouwt de Go-apps (en publiceert ze naar de release `apps`); `tools/release.sh` roept het aan met `PUBLISH=0` |
+| [cloudflared/](cloudflared/) | cloudflared's own `tunnel run` as a slot app |
+| [tamago-go/](tamago-go/) | the three patches for the tamago toolchain (runtime and net), with `apply.sh` |
+| [apps-release.sh](apps-release.sh) | builds the Go apps (and publishes them to the `apps` release); `tools/release.sh` calls it with `PUBLISH=0` |

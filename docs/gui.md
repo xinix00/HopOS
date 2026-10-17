@@ -1,197 +1,202 @@
-# Het gui-vlak
+# The gui plane
 
-Wat HopOS v3 met een scherm, een toetsenbord en een muis doet, en wat niet.
+What HopOS v3 does with a screen, a keyboard and a mouse, and what it does not.
 
-## De beslissingen
+## The decisions
 
-1. **Geen GPU-driver.** De kern schrijft pixels in een beeld dat al loopt:
-   van de firmware (UEFI GOP, de VideoCore-mailbox van de Pi), van QEMU
-   (`ramfb`), of op de Radxa van onze eigen scanout-keten (VOP2 en HDMI,
-   want U-Boot laat daar geen beeld achter, gemeten 05-08).
-2. **De console is van de kern, het glas van de display-app.** Bij boot
-   staat de console op het scherm: de bunny als vaste kop, rechts drie
-   meetregels (kern-heap, datum, tijd, elke seconde), de log eronder. Vraagt
-   een job het glas, dan krijgt de display-app het venster in zijn kooi en
-   gaat de console eraf; stopt het slot (ook een crash), dan komt de console
-   terug. Eén houder tegelijk; de eerste wint.
-3. **Een grant alleen voor een device zonder DMA** (gui-ontwerp §7). Een
-   framebuffer is een pixelbuffer: geen registers, geen DMA, dus hij mag in
-   een kooi. Een xHCI is een bus-master en er is geen IOMMU: die blijft van
-   de kern, en de app krijgt de invoer als stroom (06-08).
-4. **Kaal is kaal.** Zonder de feature `gui` linkt de binary geen regel
-   display-code en is elk board headless.
+1. **No GPU driver.** The kernel writes pixels into a picture that is already
+   running: from the firmware (UEFI GOP, the Pi's VideoCore mailbox), from QEMU
+   (`ramfb`), or on the Radxa from our own scanout chain (VOP2 and HDMI,
+   because U-Boot leaves no picture there, measured 2026-08-05).
+2. **The console belongs to the kernel, the screen to the display app.** At
+   boot the console is on the screen: the bunny as a fixed header, three
+   gauge lines on the right (kernel heap, date, time, every second), the log
+   below. If a job asks for the screen, the display app gets the window in its
+   cage and the console goes off; if the slot stops (a crash too), the console
+   comes back. One holder at a time; the first one wins.
+3. **A grant only for a device without DMA** (gui design §7). A
+   framebuffer is a pixel buffer: no registers, no DMA, so it may go into
+   a cage. An xHCI is a bus master and there is no IOMMU: it stays with
+   the kernel, and the app gets the input as a stream (2026-08-06).
+4. **Bare is bare.** Without the feature `gui` the binary links not one line
+   of display code and every board is headless.
 
-## Bouwen
+## Building
 
-`--features gui` naast het board, bijvoorbeeld
+`--features gui` next to the board, for example
 `cargo build --release --target aarch64-unknown-none-softfloat -p hopos --features board-rk3566,gui`.
-De feature zet `gui` aan op het gekozen board (`board-x?/gui`) en linkt
-`driver-fb`, `gui-fbgrant` en de USB-invoer (`gui-usbin`, `driver-xhci`,
+The feature turns on `gui` on the chosen board (`board-x?/gui`) and links
+`driver-fb`, `gui-fbgrant` and the USB input (`gui-usbin`, `driver-xhci`,
 `driver-hid`, `driver-dwc3`).
 
-| Crate | Wat het bezit |
+| Crate | What it owns |
 | --- | --- |
-| `driver/fb` (`driver-fb`) | de console op een lineaire framebuffer: `Desc`, `Console` (kop, log, `header_status`), geen allocatie |
-| `kern::grants` | het `DeviceGrant`-primitief: één venster, één houder, `WindowMap` naar de stage-2, de adoptie na een flip, de haken (`Grants`) |
-| `gui/fbgrant` (`gui-fbgrant`) | het beleid: wie het glas krijgt, de `FB_*`-env, de console eraf en terug |
-| `gui/rkscan` (`gui-rkscan`) | de RK3566-keten: PD_VO, VOP2, DW-HDMI |
-| `driver/usb/xhci`, `driver/usb/hid`, `gui/usbin` | de USB-invoer: host, enumeratie, boot-HID, de bezorging aan de display-app |
-| `driver/usb/dwc3` (`driver-dwc3`) | een Synopsys DWC3-core in hostmodus (de RK3566), vóór de xHCI |
-| `board/<x>/src/usb.rs`, `Board::usb_hosts` | welke controllers een board heeft: venster, lijn, soort (xHCI of DWC3), en een eigen stuk DMA-geheugen; PCIe en firmware-handshake zijn dan gedaan |
-| `hopos/src/gui.rs` | de bedrading: console op het glas, meetregels, de USB-taak (`usb`), de grant-haken |
-| `hopos/src/net.rs` (`input`) | de input-listener op `10.100.0.1:7879`: de regels naar de houder van het glas |
-| `applib/src/fb.rs` (`applib::fb`) | de app-kant: de `FB_*`-env, het venster Normal-NC in de stage-1 van de app (`applib::mmu`), de regellezer van `INPUT_ADDR` |
-| `apps/display` | de display-app: achtergrond, klok, de laatste invoer en de cursor op het glas |
+| `driver/fb` (`driver-fb`) | the console on a linear framebuffer: `Desc`, `Console` (header, log, `header_status`), no allocation |
+| `kern::grants` | the `DeviceGrant` primitive: one window, one holder, `WindowMap` into stage 2, the adoption after a flip, the hooks (`Grants`) |
+| `gui/fbgrant` (`gui-fbgrant`) | the policy: who gets the screen, the `FB_*` env, the console off and back |
+| `gui/rkscan` (`gui-rkscan`) | the RK3566 chain: PD_VO, VOP2, DW-HDMI |
+| `driver/usb/xhci`, `driver/usb/hid`, `gui/usbin` | the USB input: host, enumeration, boot HID, delivery to the display app |
+| `driver/usb/dwc3` (`driver-dwc3`) | a Synopsys DWC3 core in host mode (the RK3566), in front of the xHCI |
+| `board/<x>/src/usb.rs`, `Board::usb_hosts` | which controllers a board has: window, line, kind (xHCI or DWC3), and its own piece of DMA memory; PCIe and the firmware handshake are done by then |
+| `hopos/src/gui.rs` | the wiring: console on the screen, gauge lines, the USB task (`usb`), the grant hooks |
+| `hopos/src/net.rs` (`input`) | the input listener on `10.100.0.1:7879`: the lines to the holder of the screen |
+| `applib/src/fb.rs` (`applib::fb`) | the app side: the `FB_*` env, the window Normal-NC in the app's stage 1 (`applib::mmu`), the line reader of `INPUT_ADDR` |
+| `apps/display` | the display app: background, clock, the latest input and the cursor on the screen |
 
 ## Per board
 
-| Board | Beeld | Waar het vandaan komt | Status |
+Status as in the table of ALLES.md (as of 2026-10-04).
+
+| Board | Picture | Where it comes from | Status |
 | --- | --- | --- | --- |
-| QEMU virt | `-device ramfb` | `board/qemuvirt/src/ramfb.rs`: fw_cfg `etc/ramfb`, 1280x800 op 0xC400_0000 | `GUI=1 sh tools/qemu-test.sh`: de console op het glas, screendump getoetst |
-| UEFI (EDK2, QEMU) | GOP | `board/uefi/src/gop.rs`, vóór `ExitBootServices`; met `-device ramfb` geeft EDK2 een GOP | `GUI=1 sh tools/qemu-uefi-test.sh`: GOP 800x600 op 0xfc7a_0000, de console erop, de hele keten groen |
-| Orion O6N | GOP van de eigen firmware | die van het UEFI-board (`board_uefi::On`, `board/uefi/src/gop.rs`) | nooit op ijzer |
-| Ampere Altra | GOP (BMC-VGA) | idem | nooit op ijzer |
-| Raspberry Pi 4 en 5 | HDMI via de firmware | `board/raspi/src/vcfb.rs`: DTB-simplefb, anders `FB_ALLOC` over de mailbox (1920x1080) | nooit op ijzer |
-| Radxa Zero 3E | HDMI via onze eigen keten | `board/rk3566/src/display.rs` over `gui-rkscan` | nooit op ijzer |
+| QEMU virt | `-device ramfb` | `board/qemuvirt/src/ramfb.rs`: fw_cfg `etc/ramfb`, 1280x800 at 0xC400_0000 | `GUI=1 sh tools/qemu-test.sh`: the console on the screen, screendump tested |
+| UEFI (EDK2, QEMU) | GOP | `board/uefi/src/gop.rs`, before `ExitBootServices`; with `-device ramfb` EDK2 provides a GOP | `GUI=1 sh tools/qemu-uefi-test.sh`: GOP 800x600 at 0xfc7a_0000, the console on it, the whole chain green |
+| Orion O6N | GOP from its own firmware | the one from the UEFI board (`board_uefi::On`, `board/uefi/src/gop.rs`) | console on the screen seen on hardware |
+| Ampere Altra | GOP (BMC VGA) | same | console on the screen seen on hardware (A4, 2026-10-03, GOP 1024x768) |
+| Raspberry Pi 4 and 5 | HDMI via the firmware | `board/raspi/src/vcfb.rs`: DTB simplefb, otherwise `FB_ALLOC` over the mailbox (1920x1080) | Pi 4: console on the screen seen on hardware. Pi 5: the firmware refuses every framebuffer since the reflash (0x80000001) |
+| Radxa Zero 3E | HDMI via our own chain | `board/rk3566/src/display.rs` over `gui-rkscan` | console on the screen seen on hardware |
 
-De USB-invoer per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
+The USB input per board (`Board::usb_hosts`, `board/<x>/src/usb.rs`):
 
-| Board | Controllers | Hoe het board ze vindt | DMA | Status |
+| Board | Controllers | How the board finds them | DMA | Status |
 | --- | --- | --- | --- | --- |
-| QEMU virt | `qemu-xhci` | PCIe-host van virt (ECAM 0x3f00_0000, `highmem-ecam=off`), klasse 0x0c0330 op bus 0; de BAR wijzen we zelf toe uit het 32-bit MMIO-venster (geen firmware) | bovenste 2 MB van `BLK_DMA`, 0x4fe0_0000 | `GUI=display sh tools/qemu-test.sh` groen |
-| UEFI (EDK2, QEMU) | elke xHCI op de MCFG-segmenten | klasse 0x0c0330, BAR 0 van de firmware, boven 1 TB via `map_device` | bovenste 2 MB van `BLK_DMA`, gelijk verdeeld | handmatig 29-09: twee xHCI's (de ESP-stick en `qemu-xhci`), toetsenbord, muis, opslag |
-| Orion O6N | tien native xHCI's (XHC0..5, USB0..3) | platformapparaten in de DSDT (`PNP0D10`), aan/uit en host/device uit het variabelen-RAM van de firmware (`GNVA`, `GNVL`); `usb_firmware.rs` leest de exacte vorm | bovenste 2 MB van `BLK_DMA` (de NVMe neemt de onderste 4), tien vaste stukken | nooit op ijzer |
-| Raspberry Pi 5 | twee xHCI's in de RP1 (`rp1-usb0`, `rp1-usb1`) | achter de PCIe-link die de NIC-probe traint; zonder link geen controller | 0x14a0_0000 (2 MB, `board_raspi::usb::USB_DMA`), `bus_off` 0x10_0000_0000 | nooit op ijzer |
-| Raspberry Pi 4 | de VL805 | de BCM2711-RC op (gen 2), BAR 0 op PCIe 0xf800_0000 = CPU 0x6_0000_0000 (gigabyte 24 als Device erbij), met de endpoint dicht, dan `NOTIFY_XHCI_RESET` over de mailbox als config 0x50 nul is, wachten tot er een versie staat (hoogstens 1 s, twee ketens), en pas dan memory-decode aan | 0x14a0_0000 (2 MB) | nooit op ijzer |
-| Radxa Zero 3E | twee DWC3-cores (`usbdrd30`, `usbhost30`) | vaste SoC-adressen; hostmodus via `driver-dwc3`, de klokken en PHY's van U-Boot | `USB_DMA` van het plan (0x06c0_0000), gehalveerd | nooit op ijzer |
-| Ampere Altra | (xHCI op PCIe, zoals UEFI) | niet bedraad: `board/altra` geeft `usb_hosts` niet door | | |
+| QEMU virt | `qemu-xhci` | the virt PCIe host (ECAM 0x3f00_0000, `highmem-ecam=off`), class 0x0c0330 on bus 0; we assign the BAR ourselves from the 32-bit MMIO window (no firmware) | top 2 MB of `BLK_DMA`, 0x4fe0_0000 | `GUI=display sh tools/qemu-test.sh` green |
+| UEFI (EDK2, QEMU) | every xHCI on the MCFG segments | class 0x0c0330, BAR 0 from the firmware, above 1 TB via `map_device` | top 2 MB of `BLK_DMA`, split evenly | by hand 2026-09-29: two xHCIs (the ESP stick and `qemu-xhci`), keyboard, mouse, storage |
+| Orion O6N | ten native xHCIs (XHC0..5, USB0..3) | platform devices in the DSDT (`PNP0D10`), on/off and host/device from the firmware's variable RAM (`GNVA`, `GNVL`); `usb_firmware.rs` reads the exact shape | top 2 MB of `BLK_DMA` (the NVMe takes the bottom 4), ten fixed pieces | seen on hardware |
+| Raspberry Pi 5 | two xHCIs in the RP1 (`rp1-usb0`, `rp1-usb1`) | behind the PCIe link that the NIC probe trains; no link, no controller | 0x14a0_0000 (2 MB, `board_raspi::usb::USB_DMA`), `bus_off` 0x10_0000_0000 | built, not seen (nothing plugged in) |
+| Raspberry Pi 4 | the VL805 | the BCM2711 RC up (gen 2), BAR 0 at PCIe 0xf800_0000 = CPU 0x6_0000_0000 (gigabyte 24 added as Device), with the endpoint closed, then `NOTIFY_XHCI_RESET` over the mailbox if config 0x50 is zero, wait until a version shows (at most 1 s, two chains), and only then memory decode on | 0x14a0_0000 (2 MB) | xHCI seen on hardware (P2g, 2026-10-03, enable slot with completion); HID and the display app still open |
+| Radxa Zero 3E | two DWC3 cores (`usbdrd30`, `usbhost30`) | fixed SoC addresses; host mode via `driver-dwc3`, the clocks and PHYs from U-Boot | `USB_DMA` from the plan (0x06c0_0000), halved | built, not seen (nothing plugged in) |
+| Ampere Altra | xHCI on PCIe, as on UEFI | the default of the UEFI board (`Platform::usb_hosts` in `board/uefi/src/on.rs`, every xHCI on the MCFG segments) | as UEFI | built, not seen (nothing plugged in) |
 
-### Wat je op het scherm hoort te zien
+### What you should see on the screen
 
-- **Radxa (HDMI).** 1920x1080p60 uit de eigen keten: PD_VO aan via de
-  PMU, de HPLL en de VOP2-klokken, de VOP-IOMMU uit, VP0 met Smart0 scant
-  `FB_RAM` (0x0700_0000, 8 MB, Normal-NC, het PA-plan van het board), dan
-  DW-HDMI met de PHY en de frame composer (DVI, geen infoframes).
-  De keten drijft altijd 1080p60 en leest geen EDID. De
-  console krijgt 16x16-cellen (120x67). Regels: `display:
-  1920x1080p60 on HDMI (sink attached: true) HOPOS_DISPLAY_UP`, dan `fb:
-  console on 1920x1080 ... HOPOS_FB_CONSOLE`. Faalt een laag, dan zegt de
-  regel welke, met de registers van die laag (`HOPOS_DISPLAY_FAIL`); de
-  console tekent dan in een buffer die niemand uitscant. `HOPOS_DISPLAY_NOLATCH` = VP0 nam de
-  config-done niet over.
-- **Pi 4 en Pi 5 (HDMI via de firmware).** De firmware zet het beeld aan;
-  wij vragen er een buffer van via de mailbox. Let op de diepte: GEMETEN
-  11-07 op de Pi 5 bleef de scanout op 16 bpp terwijl de depth-tag 32 zei;
-  de pitch beslist (`vcfb::from_mbox`). De buffer ligt buiten de
-  `/memory`-banken; `vcfb::plan_map` zet zijn 2 MB-blokken Normal-NC in de
-  tabel van de eerste gigabyte (alleen lege regels). Regels: `fb:
-  VideoCore framebuffer ... HOPOS_FB_UP`, `HOPOS_FB_CONSOLE`. Zonder
-  HDMI-kabel bij boot kan de firmware weigeren: dan `HOPOS_FB_NONE` en de
-  node draait headless (de ontdekking is één keer per boot, 19-07).
-- **O6N (GOP).** Wat de firmware in de GOP zet, meestal de resolutie van
-  het BIOS-scherm. Regels: `uefi: GOP WxH stride S format F @ ...
-  HOPOS_UEFI_GOP` vóór de exit, `HOPOS_FB_CONSOLE` erna. De buffer gaat
-  Normal-NC in de identity map (`gop::map`, op 4 KB precies). Nooit op
-  ijzer gezien; de O6N-console na de exit is zelf nog open (docs/boards.md).
+- **Radxa (HDMI).** 1920x1080p60 from our own chain: PD_VO on via the
+  PMU, the HPLL and the VOP2 clocks, the VOP IOMMU off, VP0 with Smart0 scans
+  `FB_RAM` (0x0700_0000, 8 MB, Normal-NC, the board's PA plan), then
+  DW-HDMI with the PHY and the frame composer (DVI, no infoframes).
+  The chain always drives 1080p60 and reads no EDID. The
+  console gets 16x16 cells (120x67). Lines: `display:
+  1920x1080p60 on HDMI (sink attached: true) HOPOS_DISPLAY_UP`, then `fb:
+  console on 1920x1080 ... HOPOS_FB_CONSOLE`. If a layer fails, the line
+  says which one, with the registers of that layer (`HOPOS_DISPLAY_FAIL`);
+  the console then draws into a buffer nobody scans out. `HOPOS_DISPLAY_NOLATCH` = VP0 did
+  not take over the config-done.
+- **Pi 4 and Pi 5 (HDMI via the firmware).** The firmware turns the picture on;
+  we request a buffer from it over the mailbox. Watch the depth: MEASURED
+  2026-07-11 on the Pi 5 the scanout stayed at 16 bpp while the depth tag said 32;
+  the pitch decides (`vcfb::from_mbox`). The buffer is outside the
+  `/memory` banks; `vcfb::plan_map` sets its 2 MB blocks Normal-NC in the
+  table of the first gigabyte (empty entries only). Lines: `fb:
+  VideoCore framebuffer ... HOPOS_FB_UP`, `HOPOS_FB_CONSOLE`. Without an
+  HDMI cable at boot the firmware may refuse: then `HOPOS_FB_NONE` and the
+  node runs headless (discovery is once per boot, 2026-07-19).
+- **O6N (GOP).** Whatever the firmware puts in the GOP, usually the resolution of
+  the BIOS screen. Lines: `uefi: GOP WxH stride S format F @ ...
+  HOPOS_UEFI_GOP` before the exit, `HOPOS_FB_CONSOLE` after it. The buffer goes
+  Normal-NC into the identity map (`gop::map`, exact to 4 KB).
 
-## De grant
+## The grant
 
-Een job vraagt het glas met `GUI=display` in zijn env; dat is wat de kern
-leest (`FB=1` werkt ook). Hop's `StartSpec` draagt geen eigen
-`gui`-veld (hop/runner, 29-09): de jobspec zet het met
-`"env":{"GUI":"display"}`, en Hop geeft de env ongewijzigd door. De kern
-geeft de houder in de env:
+A job asks for the screen with `GUI=display` in its env; that is what the
+kernel reads (`FB=1` works too). Hop's `StartSpec` has no `gui` field of its
+own (hop/runner, 2026-09-29): the jobspec sets it with
+`"env":{"GUI":"display"}`, and Hop passes the env through unchanged. The
+kernel gives the holder in the env:
 
-| Sleutel | Waarde |
+| Key | Value |
 | --- | --- |
-| `FB_BASE` | het IPA van de buffer in de kooi: `0x2000_0000` plus de offset in zijn 2 MB-blok (de buffer mag fysiek boven 4 GB liggen: de ramfb-vondst van 19-07, 0x1_bc7a_0000) |
+| `FB_BASE` | the IPA of the buffer in the cage: `0x2000_0000` plus the offset in its 2 MB block (the buffer may sit physically above 4 GB: the ramfb finding of 2026-07-19, 0x1_bc7a_0000) |
 | `FB_WIDTH`, `FB_HEIGHT` | pixels |
-| `FB_STRIDE` | bytes per regel |
-| `FB_BPP` | 32 of 16 |
-| `FB_SWAP` | `1` als rood en blauw ruilen (GOP-formaat RGB) |
-| `INPUT_ADDR` | waar HOP de invoer uitserveert, `10.100.0.1:7879`; alleen als het board USB-controllers noemt (en ingetrokken als er geen opkomt) |
+| `FB_STRIDE` | bytes per line |
+| `FB_BPP` | 32 or 16 |
+| `FB_SWAP` | `1` if red and blue swap (GOP format RGB) |
+| `INPUT_ADDR` | where HOP serves the input, `10.100.0.1:7879`; only if the board names USB controllers (and withdrawn if none comes up) |
 
-De sleutels, de poort, de pixelregel (`FB_SWAP`, r5g6b5 bij 16 bpp) en de
-JSON-regels van de invoer staan als contract in `abi::glass`; de grant,
-de deliverer, de console en applib lezen ze daar.
+The keys, the port, the pixel rule (`FB_SWAP`, r5g6b5 at 16 bpp) and the
+JSON lines of the input are a contract in `abi::glass`; the grant, the
+deliverer, the console and applib read them from there.
 
-De haken in de lifecycle (`kern::grants::Grants`, geïmplementeerd door
+The hooks in the lifecycle (`kern::grants::Grants`, implemented by
 `hopos::gui::GuiGrants`):
 
-| Stap | Haak | Plek |
+| Step | Hook | Place |
 | --- | --- | --- |
-| na de claim, vóór de env op de control-page | `env` | `Request::Env` aan de lifecycle-actor, vlak vóór `Stream::put_env` in `Stream::arm` (`kern/src/system.rs`), voor een start van Hop en voor de boot-plaatsing (`kern::system::place`) |
-| na de kooibouw, vóór de dispatch | `arm` | `Lifecycle::arm` (`kern/src/slots.rs`); faalt hij, dan is het een startfout: poorten dicht, grant terug |
-| bij de adoptie na een flip | `adopt` | `Lifecycle::adopt`, na alle eigendomsclaims en vóór de servicers |
-| na een bevestigde stop, en bij een abort | `release` | `Lifecycle::stop` (niet in quarantaine) en `Lifecycle::abort` |
+| after the claim, before the env on the control page | `env` | `Request::Env` to the lifecycle actor, just before `Stream::put_env` in `Stream::arm` (`kern/src/system.rs`), for a start from Hop and for the boot placement (`kern::system::place`) |
+| after the cage is built, before dispatch | `arm` | `Lifecycle::arm` (`kern/src/slots.rs`); if it fails, it is a start error: ports closed, grant back |
+| on adoption after a flip | `adopt` | `Lifecycle::adopt`, after all ownership claims and before the servicers |
+| after a confirmed stop, and on an abort | `release` | `Lifecycle::stop` (not in quarantine) and `Lifecycle::abort` |
 
-De actor bezit de aanbieder (`Lifecycle<…, G: Grants>`): `hopos/src/slots.rs`
-geeft `GuiGrants` mee in de gui-smaak en `NoGrants` kaal. Past de env met de
-`FB_*`-regels niet op de control-page (`CTRL_ENV_MAX`), dan gaat de grant
-terug en draait de app headless (`HOPOS_FB_ENV` of `HOPOS_GRANT_ENV`).
+The actor owns the provider (`Lifecycle<…, G: Grants>`): `hopos/src/slots.rs`
+passes `GuiGrants` in the gui flavor and `NoGrants` in a bare build. If the
+env with the `FB_*` lines does not fit on the control page (`CTRL_ENV_MAX`),
+the grant goes back and the app runs headless (`HOPOS_FB_ENV` or
+`HOPOS_GRANT_ENV`).
 
-Op QEMU: `GUI=display sh tools/qemu-test.sh` zet de display-app op de
-staging met `hopos.appenv=GUI=display,DISPLAY_QUIT=27` en de USB-apparaten
-erbij, en loopt de hele levensloop: per slot `HOPOS_FB_GRANT` en
-`HOPOS_FB_ARM`, de app op het glas en aan de invoer, en na Escape
-`HOPOS_FB_RELEASE` (de console terug) en een tweede houder in slot 2 (zie
-de checklist).
+On QEMU: `GUI=display sh tools/qemu-test.sh` puts the display app on the
+staging with `hopos.appenv=GUI=display,DISPLAY_QUIT=27` and the USB devices
+attached, and runs the whole life cycle: per slot `HOPOS_FB_GRANT` and
+`HOPOS_FB_ARM`, the app on the screen and on the input, and after Escape
+`HOPOS_FB_RELEASE` (the console back) and a second holder in slot 2 (see
+the checklist).
 
-## De display-app
+## The display app
 
-`apps/display` is een gewone app op `applib`, teruggebracht tot wat het glas en de invoer bewijzen: een
-achtergrond, een klok, de tellers, de laatste tien invoerregels en een
-cursor. Geen compositor, geen `/screen.png`, geen `/kvm`. Wat hij van
-`applib` gebruikt (`applib::fb`):
+`apps/display` is an ordinary app on `applib`, cut down to what proves the screen and the input: a
+background, a clock, the counters, the last ten input lines and a
+cursor. No compositor, no `/screen.png`, no `/kvm`. What it uses from
+`applib` (`applib::fb`):
 
-1. **De `FB_*`-env lezen** (`Glass::from_env`) en weigeren wat niet klopt:
-   een stride kleiner dan breedte maal bytes per pixel, een BPP anders dan
-   16 of 32, een venster buiten het glasvenster van de kooi.
-2. **Het venster in de stage-1 van de app** (`fb::map`): sinds 30-09 heeft
-   elke app een stage-1 (`applib::mmu`, gezet in `_start`: de
-   RAM-declaratie Normal-WB, de control-page Normal-NC, de ringen
-   Normal-WB, SCTLR M/C/I), en `map` zet het glas er als **Normal-NC** op
-   4 KB bij (`FB_BASE` staat niet op 2 MB), in dezelfde tabellen in de
-   64 KB onder het image (`LINK_TEXT_OFF`). Tot 30-09 legde `fb.rs` een
-   eigen tabel met SCTLR.C uit en de staart Device; waarom dat niet meer
-   hoeft en waarom de control-page NC blijft, staat in de moduledoc van
-   `applib::mmu`. De switcher bewaart het EL1-regime per bewoner, dus een
-   yield verliest de map niet. Zonder stage-1 (`HOPOS_APP_NO_MMU`) tekent
-   de app via Device, trager maar correct (`HOPOS_DISPLAY_NOMAP`); staat
-   de MMU aan maar kwam het glas er niet in, dan tekent hij niet.
-3. **De invoer**: een TCP-client naar `INPUT_ADDR` die regels leest
-   (`LineReader`, zonder allocatie), één JSON-event per regel, precies het
-   object dat `POST /input` van de browser-KVM aanneemt
+1. **Reading the `FB_*` env** (`Glass::from_env`) and refusing what is wrong:
+   a stride smaller than width times bytes per pixel, a BPP other than
+   16 or 32, a window outside the cage's screen window.
+2. **The window in the app's stage 1** (`fb::map`): since 2026-09-30 every
+   app has a stage 1 (`applib::mmu`, set up in `_start`: the RAM
+   declaration Normal-WB, the control page Normal-NC, the rings
+   Normal-WB, SCTLR M/C/I), and `map` adds the screen as **Normal-NC** at
+   4 KB (`FB_BASE` is not 2 MB aligned), in the same tables in the
+   64 KB below the image (`LINK_TEXT_OFF`). Until 2026-09-30 `fb.rs` built its
+   own table with SCTLR.C off and the tail as Device; why that is no longer
+   needed and why the control page stays NC is in the module doc of
+   `applib::mmu`. The switcher keeps the EL1 regime per resident, so a
+   yield does not lose the map. Without a stage 1 (`HOPOS_APP_NO_MMU`) the
+   app draws via Device, slower but correct (`HOPOS_DISPLAY_NOMAP`); if the
+   MMU is on but the screen did not get mapped, it does not draw.
+3. **The input**: a TCP client to `INPUT_ADDR` that reads lines
+   (`LineReader`, no allocation), one JSON event per line, exactly the
+   object that `POST /input` of the browser KVM accepts
    (`{"k":"key","c":..,"v":..}`, `{"k":"move","x":..,"y":..}`,
-   `{"k":"btn",...}`, `{"k":"wheel",...}`, `Input::parse`); een lege regel
-   is een keepalive (elke 5 s). Drie gemiste keepalives of een verbroken
-   stroom is opnieuw bellen met een oplopende pauze (na een kern-flip).
-4. **Een eigen tekenaar** (`apps/display/src/paint.rs`) in het formaat van
-   de env (16 of 32 bpp, `FB_SWAP`), met het font van de console van de
-   kern (`driver_fb::glyph`, `Desc::encode`).
+   `{"k":"btn",...}`, `{"k":"wheel",...}`, `Input::parse`); an empty line
+   is a keepalive (every 5 s). Three missed keepalives or a broken
+   stream means calling again with a growing pause (after a kernel flip),
+   `HOPOS_DISPLAY_RECONNECT`.
+4. **Its own painter** (`apps/display/src/paint.rs`) in the format of
+   the env (16 or 32 bpp, `FB_SWAP`), with the font of the kernel console
+   (`driver_fb::glyph`, `Desc::encode`).
 
-Twee taken met elk één eigenaar: de tekentaak bezit het glas (wacht op een
-gebeurtenis of op de volgende seconde van de klok), de invoertaak de
-verbinding; ertussen een SPSC-rij met waarden (vol is weggooien en
-tellen). De app blijft leven; alleen met `DISPLAY_QUIT=<code>` in de env
-stopt hij op die toets (voor de QEMU-poort, die zo de hele levensloop van
-de grant toetst; een jobspec zet hem niet).
+Two tasks, each with one owner: the paint task owns the screen (waits for an
+event or for the next second of the clock), the input task the
+connection; between them an SPSC queue of values (full means drop and
+count). The app stays alive; only with `DISPLAY_QUIT=<code>` in the env
+does it stop on that key (for the QEMU gate, which tests the whole life
+cycle of the grant that way; a jobspec does not set it). It does not wait on
+the stop doorbell: on a stop from the kernel the applib heartbeat ends it
+after the grace period (`HOPOS_APP_STOP`, then `HOPOS_APP_STOP_FORCED`).
 
 Markers: `display: window 0x20000000+... mapped Normal-NC in stage-1`,
 `display: glass WxH ... HOPOS_DISPLAY_UP w=W h=H`, `display: input stream
-from 10.100.0.1:7879 HOPOS_DISPLAY_CONN`, en bij veranderde tellers
-(hooguit vijf keer per seconde) `display: keys=.. moves=.. buttons=..
+from 10.100.0.1:7879 HOPOS_DISPLAY_CONN`, and when the counters change
+(at most five times per second) `display: keys=.. moves=.. buttons=..
 wheel=.. dropped=.. HOPOS_DISPLAY_INPUT keys=K moves=M`.
 
-Bouwen en draaien:
+Build and run:
 
 ```sh
 cargo build --release --target aarch64-unknown-none-softfloat -p display
-# QEMU met een venster: klik erin en typ.
+# QEMU with a window: click into it and type.
 GUI=display APP=display APPENV=GUI=display image/qemu-run.sh
 ```
 
-Met Hop (de jobspec van welcome, met het glas erbij):
+With Hop (the welcome jobspec, with the screen added):
 
 ```json
 {"name":"display","driver":"hop",
@@ -199,173 +204,181 @@ Met Hop (de jobspec van welcome, met het glas erbij):
  "memory_limit":33554432,"env":{"GUI":"display"}}
 ```
 
-## De USB-invoer
+## The USB input
 
-HOP bezit de controllers (een xHCI is een DMA-master en er is geen
-IOMMU), leest boot-protocol-rapporten van toetsenbord en muis en levert ze
-als JSON-regels aan de houder van het glas. De display-app belt, HOP
-luistert (`INPUT_ADDR` reist mee in de grant): zo hoeft HOP de app niet te
-vinden, en controleert hij op accept (en per regel opnieuw) dat de beller
-het slot van de houder is (de switch weigert een frame met andermans
-bron-MAC, 06-08).
+HOP owns the controllers (an xHCI is a DMA master and there is no
+IOMMU), reads boot protocol reports from keyboard and mouse and delivers them
+as JSON lines to the holder of the screen. The display app calls, HOP
+listens (`INPUT_ADDR` travels with the grant): that way HOP does not have to
+find the app, and it checks on accept (and again per line) that the caller
+is the holder's slot (the switch refuses a frame with someone else's
+source MAC, 2026-08-06).
 
-De keten, na het netwerk (`hopos::gui::start_usb_input`):
+The chain, after the network (`hopos::gui::start_usb_input`):
 
-1. `Board::usb_hosts` noemt de controllers: het venster, de lijn (nog
-   ongebruikt: de driver pollt), het soort (xHCI of DWC3) en een eigen stuk
-   DMA-geheugen (Normal-NC, buiten de kern-RAM). PCIe-link, BAR's en
-   firmware-handshake zijn dan al gedaan. Kaal is de lijst leeg.
-2. Het invoeradres gaat meteen in de grant (`FbGrant::use_input`), vóór
-   de USB-taak spawnt en dus vóór de eerste plaatsing: de bring-up slaapt
-   op de executor, en een display-app die intussen het glas kreeg, moet
-   het adres al hebben. Komt er geen controller op, dan trekt de taak het
-   weer in (`stop_input`, `HOPOS_USB_NONE`).
-3. De USB-taak bezit de `gui_usbin::Manager`. `Registry::bring_up` zet
-   eerst élke controller stil (probe, reset) en start ze pas daarna, zodat
-   een controller van de firmware of van de vorige kern nooit schrijft in
-   een stuk dat een ander net opbouwt; een DWC3 gaat eerst in hostmodus
-   (`driver-dwc3`). Dan de ronde van `Manager::step`: scannen (elke 500
-   ms), rapporten ophalen (elke 4 ms), slapen op het timerwiel.
-4. Elke wachtende hardwarestap van de driver (een poortreset tot 2 s, een
-   commando tot 1 s, de DWC3-reset van 225 ms) is `async` en slaapt op de
-   `Timer` van de taak (`sync::Timer`, in de binary het timerwiel van de
-   executor, `executor::ExecTimer`). Tot 29-09 spinde de driver op de klok en hield een
-   insteek de hele executor van de kern vast.
-5. Wat de taak leest, gaat als waarde door een SPSC-rij (256, vol is
-   weggooien en tellen) naar de input-listener in `net.rs`. Die luistert
-   op `10.100.0.1:7879` zodra de node-stack er is, laat alleen de houder
-   binnen, laat een nieuwe verbinding van de houder de oude verdringen, en
-   schrijft elke regel met een deadline van 1 s. Zonder verbinding vallen
-   de regels weg en tellen ze (`HOPOS_INPUT_DROP`, de eerste drie keer een
-   regel).
+1. `Board::usb_hosts` names the controllers: the window, the line (still
+   unused: the driver polls), the kind (xHCI or DWC3) and its own piece of
+   DMA memory (Normal-NC, outside kernel RAM). PCIe link, BARs and
+   firmware handshake are done by then. In a bare build the list is empty.
+2. The input address goes into the grant right away (`FbGrant::use_input`),
+   before the USB task spawns and so before the first placement: the bring-up
+   sleeps on the executor, and a display app that got the screen in the
+   meantime must already have the address. If no controller comes up, the
+   task withdraws it (`stop_input`, `HOPOS_USB_NONE`).
+3. The USB task owns the `gui_usbin::Manager`. `Registry::bring_up` first
+   quiesces every controller (probe, reset) and only then starts them, so
+   that a controller left by the firmware or the previous kernel never writes
+   into a piece that another one is just setting up; a DWC3 goes into host
+   mode first (`driver-dwc3`). Then the round of `Manager::step`: scan (every
+   500 ms), fetch reports (every 4 ms), sleep on the timer wheel.
+4. Every waiting hardware step of the driver (a port reset up to 2 s, a
+   command up to 1 s, the DWC3 reset of 225 ms) is `async` and sleeps on the
+   task's `Timer` (`sync::Timer`, in the binary the executor's timer wheel,
+   `executor::ExecTimer`). Until 2026-09-29 the driver spun on the clock, and
+   plugging something in held the kernel's whole executor.
+5. What the task reads goes as a value through an SPSC queue (256, full means
+   drop and count) to the input listener in `net.rs`. It listens
+   on `10.100.0.1:7879` as soon as the node stack is up, lets only the holder
+   in, lets a new connection from the holder replace the old one, and
+   writes every line with a deadline of 1 s. Without a connection the lines
+   are dropped and counted (`HOPOS_INPUT_DROP`, a line the first three
+   times).
 
-De les van 29-09 op QEMU: de driver schreef 64-bit registers hoog-eerst
-(omdat het lage woord laat latchen), maar `qemu-xhci` latcht
-CRCR en ERSTBA op het hoge woord (Linux schrijft laag-dan-hoog). De
-controller haalde zijn eerste commando van adres 0 en zette HCE; elke
-Enable Slot bleef zonder completion. `write64` schrijft nu hoog, laag,
-hoog: beide soorten latchen op het volledige adres.
+The 64-bit registers (CRCR, DCBAAP, ERSTBA, ERDP) are two 32-bit halves,
+written low then high (`Reg64` in `driver/usb/xhci/src/lib.rs`, like Linux
+`lo_hi_writeq`), never one native 64-bit access. The lesson of 2026-09-29 on
+QEMU: `qemu-xhci` latches CRCR and ERSTBA on the high word, and with the
+high word written first the controller fetched its first command from
+address 0 and set HCE. High, low, high then fixed QEMU, but lost the ring
+state on the CIX (the O6N). On 2026-10-03 the Pi 4's VL805 showed that it
+treats a native 64-bit access as one dword (CRCR read back the low word twice,
+Enable Slot got no completion). Low then high works on all three: QEMU
+latches on the high word, and that comes last.
 
 ## Checklist per board
 
-Elke stap met de consoleregel die erbij hoort.
+Each step with the console line that goes with it. On hardware so far
+(ALLES.md, as of 2026-10-04): the console on the screen on Pi 4, Radxa,
+Altra and O6N; the xHCI on Pi 4 and O6N. The boxes below are the detailed
+steps.
 
 **QEMU virt**
 
 - [x] `GUI=1 sh tools/qemu-test.sh`: `fb: ramfb 1280x800 @ 0xc4000000
   HOPOS_FB_UP`, `fb: console on 1280x800 ... (80x50 cells)
-  HOPOS_FB_CONSOLE`, en de screendump (via de monitor) heeft ruim 170.000
-  tekst- en 849.000 achtergrondpixels: de bunny, de meetregels en de log.
-  `SHOT_KEEP=pad.ppm` bewaart hem.
-- [x] USB (`GUI=display sh tools/qemu-test.sh`, 29-09, twee keer groen):
+  HOPOS_FB_CONSOLE`, and the screendump (via the monitor) has well over 170,000
+  text and 849,000 background pixels: the bunny, the gauge lines and the log.
+  `SHOT_KEEP=pad.ppm` keeps it.
+- [x] USB (`GUI=display sh tools/qemu-test.sh`, 2026-09-29, green twice):
   `usb: xHCI 1b36:000d at 00:01.0 on PCIe, registers 0x10000000+0x4000`,
   `usb: qemu-xhci xHCI 1.0, 64 slots, 8 ports`, `HOPOS_USB_UP`,
   `usb: qemu-xhci port 5: keyboard 0627:0001`, `port 6: mouse`,
   `input: listening on 10.100.0.1:7879 ... HOPOS_INPUT_UP`.
-- [x] De display-app: `slot 1: fb granted ... HOPOS_FB_GRANT`,
+- [x] The display app: `slot 1: fb granted ... HOPOS_FB_GRANT`,
   `HOPOS_FB_ARM`, `slot 1: display: window 0x20000000+0x3e8000 mapped
   Normal-NC in stage-1`, `HOPOS_DISPLAY_UP w=1280 h=800`, `input:
-  10.100.0.2 connected ... HOPOS_INPUT_CONN`, `HOPOS_DISPLAY_CONN`; dan
-  `sendkey a` en `mouse_move 40 30` via de monitor: `HOPOS_DISPLAY_INPUT
-  keys=1 moves=1`; de screendump heeft ruim 1.012.000 pixels in de
-  achtergrond van de app, 8.500 tekst, 55 cursor en geen console.
-- [x] De levensloop: `sendkey esc`, `HOPOS_DISPLAY_QUIT`, `HOPOS_SLOT_DONE
-  slot=1 exit=0`, `HOPOS_FB_RELEASE`; de kern plaatst hem opnieuw in slot
-  2: `HOPOS_FB_GRANT`, `input: 10.100.0.3 connected`, en na een toets en
-  een beweging `slot 2: ... HOPOS_DISPLAY_INPUT keys=1 moves=1`.
+  10.100.0.2 connected ... HOPOS_INPUT_CONN`, `HOPOS_DISPLAY_CONN`; then
+  `sendkey a` and `mouse_move 40 30` via the monitor: `HOPOS_DISPLAY_INPUT
+  keys=1 moves=1`; the screendump has well over 1,012,000 pixels in the
+  app's background, 8,500 text, 55 cursor and no console.
+- [x] The life cycle: `sendkey esc`, `HOPOS_DISPLAY_QUIT`, `HOPOS_SLOT_DONE
+  slot=1 exit=0`, `HOPOS_FB_RELEASE`; the kernel places it again in slot
+  2: `HOPOS_FB_GRANT`, `input: 10.100.0.3 connected`, and after a key and
+  a move `slot 2: ... HOPOS_DISPLAY_INPUT keys=1 moves=1`.
 
-**UEFI op QEMU (EDK2)**
+**UEFI on QEMU (EDK2)**
 
-- [x] `GUI=1 sh tools/qemu-uefi-test.sh` (`image/uefi-run.sh` geeft QEMU dan
+- [x] `GUI=1 sh tools/qemu-uefi-test.sh` (`image/uefi-run.sh` then gives QEMU
   `-device ramfb`): `uefi: GOP 800x600 stride 3200 format 1 @ 0xfc7a0000
-  HOPOS_UEFI_GOP` vóór de exit, `HOPOS_FB_CONSOLE` erna. De buffer valt
-  niet op 2 MB, dus `cpu::memattr` laat hem staan zoals `gop::map` hem zette
-  (Normal-NC op 4 KB); de regel `fb: left as the board mapped it` is dan
-  verwacht. Nog geen screendump-toets in dit script.
-- [x] USB, met de hand (29-09): `GUI=1 BOARD=uefi sh image/uefi-run.sh
+  HOPOS_UEFI_GOP` before the exit, `HOPOS_FB_CONSOLE` after it. The buffer is
+  not 2 MB aligned, so `cpu::memattr` leaves it as `gop::map` set it
+  (Normal-NC at 4 KB); the line `fb: left as the board mapped it` is then
+  expected. No screendump test in this script yet.
+- [x] USB, by hand (2026-09-29): `GUI=1 BOARD=uefi sh image/uefi-run.sh
   -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0 -device
   usb-mouse,bus=xhci.0`: `usb: xhci0: xHCI 1b36:000d at 00:01.0 on PCIe,
-  registers 0x800000c000+0x4000` (de ESP-stick) en `xhci1` (de
-  toetsenbord en muis), `HOPOS_USB_UP`, `xhci0 port 1: mass storage`,
-  `xhci1 port 5: keyboard`, `port 6: mouse`, `HOPOS_INPUT_UP`. Nog geen
-  toets in `qemu-uefi-test.sh`.
+  registers 0x800000c000+0x4000` (the ESP stick) and `xhci1` (the
+  keyboard and mouse), `HOPOS_USB_UP`, `xhci0 port 1: mass storage`,
+  `xhci1 port 5: keyboard`, `port 6: mouse`, `HOPOS_INPUT_UP`. No
+  test in `qemu-uefi-test.sh` yet.
 
 **Orion O6N**
 
-- [ ] HDMI of DP aan, boot van de stick met een gui-image:
-  `HOPOS_UEFI_GOP` met een plausibele resolutie.
-- [ ] De bunny en de log op het scherm; de tijd rechtsboven loopt.
-- [ ] Na de exit: loopt het beeld door? (De GOP-buffer is van de firmware;
-  een firmware die zijn scanout bij de exit stopt, is een bevinding.)
-- [ ] USB: `usb: N of 10 native xHCI hosts enabled by the firmware`, en
-  per host die uit staat een regel (`disabled by the firmware, or a
-  device-role port`). Weigert de parser de DSDT, dan zegt de regel
-  waarom (`unsupported CIX USB firmware description: ...`): een nieuwe
-  firmware is dan een nieuwe meting.
-- [ ] Per host: `usb: XHCn xHCI ...` en een PORTSC-regel; een toetsenbord
-  in een USB-A-poort geeft `keyboard ...` op de poort waar hij zit.
-- [ ] De display-app met Hop (`"env":{"GUI":"display"}`):
-  `HOPOS_DISPLAY_UP`, `HOPOS_DISPLAY_CONN`, typen geeft
-  `HOPOS_DISPLAY_INPUT`, en de cursor volgt de muis op het scherm.
+- [ ] HDMI or DP on, boot from the stick with a gui image:
+  `HOPOS_UEFI_GOP` with a plausible resolution.
+- [ ] The bunny and the log on the screen; the time at the top right runs.
+- [ ] After the exit: does the picture keep running? (The GOP buffer belongs to
+  the firmware; a firmware that stops its scanout at the exit is a finding.)
+- [ ] USB: `usb: N of 10 native xHCI hosts enabled by the firmware`, and
+  a line per host that is off (`disabled by the firmware, or a
+  device-role port`). If the parser refuses the DSDT, the line says
+  why (`unsupported CIX USB firmware description: ...`): a new
+  firmware is then a new measurement.
+- [ ] Per host: `usb: XHCn xHCI ...` and a PORTSC line; a keyboard
+  in a USB-A port gives `keyboard ...` on the port it is in.
+- [ ] The display app with Hop (`"env":{"GUI":"display"}`):
+  `HOPOS_DISPLAY_UP`, `HOPOS_DISPLAY_CONN`, typing gives
+  `HOPOS_DISPLAY_INPUT`, and the cursor follows the mouse on the screen.
 
-**Raspberry Pi 4 en 5**
+**Raspberry Pi 4 and 5**
 
-- [ ] HDMI in poort 0 vóór de stroom: `fb: VideoCore framebuffer ...
-  HOPOS_FB_UP` met 16 of 32 bpp.
-- [ ] De bunny en de log op het scherm; geen strepen (strepen = een
-  diepte-verwisseling, 11-07).
-- [ ] Geen bus-fault bij de eerste veeg (de freeze-jacht van 04-08: een
-  verkeerd gelezen adres).
-- [ ] Pi 5, USB: zonder `usb: the RP1 link is down` (de NIC-probe traint
-  hem); `usb: rp1-usb0 xHCI ...` en `rp1-usb1`, hun PORTSC-regels, en een
-  toetsenbord (06-08: een Logi Bolt gaf toetsenbord én muis op één
-  dongle) als `keyboard` en `mouse`.
-- [ ] Pi 4, USB, KOUD geboot: `usb: vl805 firmware 0x... loaded by the
-  VideoCore after N us (attempt 1, reply 0x...)` (of `already loaded` na
-  een warme flip), dan `usb: vl805 on PCIe (status 0xb0)`, de zelftest
-  `ok`, `usb: vl805 xHCI ...` en de PORTSC-regel. Een fout is
-  `HOPOS_USB_VL805` (de versie bleef 0; de endpoint blijft dan dicht en de
-  xHCI-registers onaangeroerd) en een SError zegt zijn stap met
-  `HOPOS_USB_SERROR`; de hele lijst staat in docs/boards-pi.md, stap 21.
-- [ ] De display-app met Hop: `HOPOS_DISPLAY_UP`, typen geeft
-  `HOPOS_DISPLAY_INPUT`; op 16 bpp (de Pi 5-diepte van 11-07) klopt de
-  kleur van de achtergrond (donkergroen).
+- [ ] HDMI in port 0 before power: `fb: VideoCore framebuffer ...
+  HOPOS_FB_UP` with 16 or 32 bpp.
+- [ ] The bunny and the log on the screen; no stripes (stripes = a
+  depth mix-up, 2026-07-11).
+- [ ] No bus fault on the first sweep (the freeze hunt of 2026-08-04: a
+  wrongly read address).
+- [ ] Pi 5, USB: without `usb: the RP1 link is down` (the NIC probe trains
+  it); `usb: rp1-usb0 xHCI ...` and `rp1-usb1`, their PORTSC lines, and a
+  keyboard (2026-08-06: a Logi Bolt gave keyboard and mouse on one
+  dongle) as `keyboard` and `mouse`.
+- [ ] Pi 4, USB, booted COLD: `usb: vl805 firmware 0x... loaded by the
+  VideoCore after N us (attempt 1, reply 0x...)` (or `already loaded` after
+  a warm flip), then `usb: vl805 on PCIe (status 0xb0)`, the self-test
+  `ok`, `usb: vl805 xHCI ...` and the PORTSC line. An error is
+  `HOPOS_USB_VL805` (the version stayed 0; the endpoint then stays closed and the
+  xHCI registers untouched) and an SError names its step with
+  `HOPOS_USB_SERROR`; the full list is in docs/boards-pi.md, step 21.
+- [ ] The display app with Hop: `HOPOS_DISPLAY_UP`, typing gives
+  `HOPOS_DISPLAY_INPUT`; at 16 bpp (the Pi 5 depth of 2026-07-11) the
+  background colour is right (dark green).
 
 **Radxa Zero 3E**
 
-- [ ] HDMI aan: `HOPOS_DISPLAY_UP` en `sink attached: true`.
-- [ ] Een beeld op 1080p60; de bunny en de log.
-- [ ] Zonder monitor: `sink attached: false`, geen hang.
-- [ ] USB: per core `usb: usbdrd30 dwc3 id=5533.... gctl=...` (GSNPSID nul
-  = niet geklokt: de CRU-gates en de PHY's zijn van U-Boot, en dan is dat
-  de meting), dan de xHCI-regel en PORTSC. Een toetsenbord in de USB-A
-  (`usbhost30`) geeft `keyboard`.
+- [ ] HDMI on: `HOPOS_DISPLAY_UP` and `sink attached: true`.
+- [ ] A picture at 1080p60; the bunny and the log.
+- [ ] Without a monitor: `sink attached: false`, no hang.
+- [ ] USB: per core `usb: usbdrd30 dwc3 id=5533.... gctl=...` (GSNPSID zero
+  = not clocked: the CRU gates and the PHYs are from U-Boot, and then that is
+  the measurement), then the xHCI line and PORTSC. A keyboard in the USB-A
+  (`usbhost30`) gives `keyboard`.
 
-**Elk board, met Hop**
+**Every board, with Hop**
 
-- [ ] Een job met `"env":{"GUI":"display"}`: `HOPOS_FB_GRANT` en de console
-  gaat van het glas; met de display-app `HOPOS_DISPLAY_UP` en, met USB,
+- [ ] A job with `"env":{"GUI":"display"}`: `HOPOS_FB_GRANT` and the console
+  leaves the screen; with the display app `HOPOS_DISPLAY_UP` and, with USB,
   `HOPOS_DISPLAY_CONN`.
-- [ ] De job stoppen: `HOPOS_FB_RELEASE` en de bunny komt terug; de
-  input-listener sluit de stroom van het oude slot bij de volgende regel of
-  keepalive (binnen 5 s), of zodra een nieuwe houder belt
+- [ ] Stopping the job: `HOPOS_FB_RELEASE` and the bunny comes back; the
+  input listener closes the old slot's stream on the next line or
+  keepalive (within 5 s), or as soon as a new holder calls
   (`HOPOS_INPUT_GONE`).
 
-## Niet gedaan
+## Not done
 
-- Alles buiten QEMU is gebouwd en niet gedraaid: de O6N-parser toetst
-  tegen de vastgelegde DSDT, de Pi's en de Radxa alleen tegen hun
-  datasheet.
-- Interrupts: elke controller heeft een `irq` in zijn `UsbHost`, maar de
-  driver pollt (elke 4 ms); de lijnen (RP1-MSI-X via de MIP, de
-  GIC-SPI's van de Radxa, de `_CRS` van de O6N) zijn nog niet bedraad.
-- Opslag op USB: de manager meldt een drive (`mass storage vid:pid`), maar
-  de binary heeft nog geen verzoekenrij voor `BulkReq` en geen
-  optical-driver erachter (`Sink::storage_attached` is leeg).
-- De toets van `INPUT_ADDR` na een kern-flip op ijzer: de display belt na
-  15 s stilte opnieuw; op QEMU is alleen de wissel van houder getoetst.
-- `tools/qemu-uefi-test.sh` heeft nog geen `GUI=display`-stand; de
-  UEFI-keten is met de hand gedraaid (zie de checklist).
-- De O6N-toets dat het variabelen-RAM van de firmware in de ACPI-RAM van de
-  EFI-geheugenkaart ligt; het UEFI-board geeft die kaart
-  niet door.
+- On hardware only the console on the screen (Pi 4, Radxa, Altra, O6N) and
+  the xHCI (Pi 4, O6N) are marked as seen in ALLES.md; the rest is built and
+  not run. The Pi 5 screen is blocked by its firmware (0x80000001 since the
+  reflash).
+- Interrupts: every controller has an `irq` in its `UsbHost`, but the
+  driver polls (every 4 ms); the lines (RP1 MSI-X via the MIP, the
+  GIC SPIs of the Radxa, the `_CRS` of the O6N) are not wired yet.
+- Storage on USB: the manager reports a drive (`mass storage vid:pid`), and
+  with the feature `media` the USB sink hands the bulk transfers to the
+  optical owner (`hopos/src/optical.rs`, see docs/media.md); without `media`
+  those hooks do nothing.
+- The test of `INPUT_ADDR` after a kernel flip on hardware: the display calls
+  again after 15 s of silence; on QEMU only the change of holder is tested.
+- `tools/qemu-uefi-test.sh` has no `GUI=display` mode yet; the
+  UEFI chain was run by hand (see the checklist).
+- The O6N check that the firmware's variable RAM lies in the ACPI RAM of the
+  EFI memory map; the UEFI board does not pass that map on.

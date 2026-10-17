@@ -1,50 +1,50 @@
 # Jobspecs
 
-De jobspecs van de apps die op de nodes draaien, overgenomen uit de wortel
-van de Go-boom (in git stond daar alleen `job-lumen.json`; de rest droeg
-geheimen en was genegeerd). Een spec gaat naar de leader van Hop:
+The jobspecs of the apps that run on the nodes, taken over from the root of
+the Go tree (only `job-lumen.json` was in git there; the rest carried secrets
+and was ignored). A spec goes to Hop's leader:
 
 ```sh
-cp jobs/job-stulp.json jobs/job-stulp.local.json   # de geheimen invullen
+cp jobs/job-stulp.json jobs/job-stulp.local.json   # fill in the secrets
 curl -X POST -d @jobs/job-stulp.local.json http://NODE:9080/v1/jobs
 ```
 
-| Spec | Wat | Artifact |
+| Spec | What | Artifact |
 | --- | --- | --- |
-| `job-cloudflared.json` | cloudflared's eigen `tunnel run` als slot-app (30 MB, 256 MB partitie) | release `apps` van xinix00/HopOS, Go (`-tamago.elf`) |
-| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release `apps` van xinix00/HopOS, Rust (`apps/cloudflared-lean`, alleen arm64) |
-| `job-spin.json` | de Spin-server met zijn volume `/spin` | release `rolling` van xinix00/Spin |
-| `job-stulp.json` | Stulp, de huisautomatisering, poort 80 en de attach-poort 7000 | release `apps` van xinix00/stulp |
-| `job-stulp-plugins.json` | de plugins van Stulp (Matter op 5540), hangen aan Stulp | release `apps` van xinix00/stulp |
-| `job-lumen.json` | Lumen, de media-app op de O6N, met de codec-firmware op `/firmware` | een lokale server, `http://192.168.1.208:8002` |
-| `job-webdav.json` | de WebDAV-server op de media-volumes | een lokale server, `http://10.100.0.1:8088` |
-| `hopos-media-o6n.cfg` | de config van de media-node: Lumen als init-job | (geen spec; `CFG=jobs/hopos-media-o6n.cfg MEDIA=1 BOARD=o6n sh image/uefi-run.sh`) |
+| `job-cloudflared.json` | cloudflared's own `tunnel run` as a slot app (30 MB, 256 MB partition) | release `apps` of xinix00/HopOS, Go (`-tamago.elf`) |
+| `job-cloudflared-lean.json` | the tunnel protocol itself on lean (a 530 kB image, 32 MiB partition, two connections, share group `huis`); `TUNNEL_URL` is `http://10.100.0.2:80` | release `apps` of xinix00/HopOS, Rust (`apps/cloudflared-lean`, arm64 only) |
+| `job-spin.json` | the Spin server with its volume `/spin` | release `rolling` of xinix00/Spin |
+| `job-stulp.json` | Stulp, the home automation, port 80 and the attach port 7000 | release `apps` of xinix00/stulp |
+| `job-stulp-plugins.json` | Stulp's plugins (Matter on 5540), attached to Stulp | release `apps` of xinix00/stulp |
+| `job-lumen.json` | Lumen, the media app on the O6N, with the codec firmware on `/firmware` | a local server, `http://192.168.1.208:8002` |
+| `job-webdav.json` | the WebDAV server on the media volumes | a local server, `http://10.100.0.1:8088` |
+| `hopos-media-o6n.cfg` | the media node's config: Lumen as init job | (no spec; `CFG=jobs/hopos-media-o6n.cfg MEDIA=1 BOARD=o6n sh image/uefi-run.sh`) |
 
-De inhoud is die van de Go-generatie, op de geheimen na: `TUNNEL_TOKEN`,
-`SPIN_MASTER_KEY`, `SPIN_WORKER_TOKEN`, `STULP_TOKEN` en
-`STULP_ATTACH_SECRET` staan hier als `<NAAM>`, want deze boom is publiek.
-Vul ze in een kopie in; `jobs/*.local.json` negeert git.
+The content is that of the Go generation, except for the secrets:
+`TUNNEL_TOKEN`, `SPIN_MASTER_KEY`, `SPIN_WORKER_TOKEN`, `STULP_TOKEN` and
+`STULP_ATTACH_SECRET` appear here as `<NAME>` (for example
+`"TUNNEL_TOKEN": "<TUNNEL_TOKEN>"`), because this tree is public. Fill them in
+a copy; git ignores `jobs/*.local.json`.
 
-De specs van Lumen en WebDAV wijzen naar een server op het eigen LAN (de
-Mac, of de node zelf op `10.100.0.1`), niet naar een release: zet het ELF
-daar neer voor je de spec stuurt. Lumen en de media-config pinnen de node
-op `hopos-1` (`affinity`, `hopos.node`).
+The Lumen and WebDAV specs point to a server on the local LAN (the Mac, or
+the node itself on `10.100.0.1`), not to a release: put the ELF there before
+you send the spec. Lumen and the media config pin the node to `hopos-1`
+(`affinity`, `hopos.node`).
 
-## Het naamschema van de releases
+## The release naming scheme
 
-Elke app van deze boom staat in de rollende release `apps` van
-xinix00/HopOS als `<app>-<arch>.elf`, met `<arch>` de `node.arch` van Hop
-(`arm64`, `riscv64`):
+Every app of this tree is in the rolling release `apps` of xinix00/HopOS as
+`<app>-<arch>.elf`, with `<arch>` Hop's `node.arch` (`arm64`, `riscv64`):
 
 ```
 https://github.com/xinix00/HopOS/releases/download/apps/welcome-arm64.elf
 https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64.elf
 ```
 
-`tools/release.sh` bouwt ze (de lijst `APPS` in `tools/lib.sh` plus decode
-voor arm64, `APPS_RISCV64` ook voor riscv64) en zegt hoe ze in `apps` komen; de URL verschuift dus niet
-per versie, en de headfull-laag van de config (`image/cfg/headfull.cfg`)
-start welcome van daar.
-De Go-apps (`go/apps-release.sh`, [go-apps.md](../docs/go-apps.md)) staan
-in dezelfde release als `<app>-<arch>-tamago.elf`; `job-cloudflared.json`
-wijst naar die vorm.
+`tools/release.sh` builds them (the list `APPS` in `tools/lib.sh` plus decode
+for arm64, `APPS_RISCV64` also for riscv64) and says how they get into
+`apps`; so the URL does not shift per version, and the headfull layer of the
+config (`image/cfg/headfull.cfg`) starts welcome from there.
+The Go apps (`go/apps-release.sh`, [go-apps.md](../docs/go-apps.md)) are in
+the same release as `<app>-<arch>-tamago.elf`; `job-cloudflared.json`
+points to that form.

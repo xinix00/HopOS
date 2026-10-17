@@ -1,42 +1,47 @@
-# Synchrone C-code als parkeervrije executor-taak
+# Synchronous C code as a non-parking executor task
 
-`applib::stacktask::Task` geeft één synchrone functie een eigen, volledig vooraf
-gereserveerde stack. Een callback gebruikt `Suspender::wait(future)`: bij
-`Pending` keert de oorspronkelijke executor terug en blijven de C-frames en
-hun geleende buffers bestaan. De executor blijft dus de netwerkpomp draaien
-die de system-API-antwoorden voor die callback moet afleveren. Er is geen
-geneste executor en er wordt geen extra core gereserveerd.
+`applib::stacktask::Task` gives one synchronous function a stack of its own,
+fully reserved up front. A callback uses `Suspender::wait(future)`: on
+`Pending` the original executor returns and the C frames and their borrowed
+buffers stay alive. So the executor keeps running the network pump that has
+to deliver the system API replies for that callback. There is no nested
+executor and no extra core is reserved.
 
-De eigenaar maakt, pollt en dropt de taak op dezelfde core. Het handvat is
-`!Send`/`!Sync`; state en stack behouden hun heapadres als het handvat verhuist.
-Alleen de kleine module met contextswitch en stackallocatie bevat unsafe.
-De Rust/C-functies hebben tijdens uitvoering gewone ABI-conforme stacks.
-ARM64 bewaart de callee-saved registers en, buiten de softfloat-ABI, FP-state;
-RISC-V bewaart ook de D-registers voor rv64gc/lp64d. De x86_64 SysV-variant
-bestaat, maar is hier nog niet op een x86_64-host gedraaid.
+The owner creates, polls and drops the task on the same core. The handle is
+`!Send`/`!Sync`; state and stack keep their heap address when the handle
+moves. Only the small module with the context switch and the stack
+allocation contains unsafe. The Rust/C functions have ordinary ABI-conformant
+stacks while running. ARM64 saves the callee-saved registers and, outside the
+softfloat ABI, the FP state; RISC-V also saves the D registers for
+rv64gc/lp64d. The x86_64 SysV variant exists, but has not been run on an
+x86_64 host here yet.
 
-`Task::new` is expliciet unsafe: de aanroeper moet aantonen dat het werk in de
-gekozen 64 KiB..16 MiB stack past. De slot-heap heeft geen guard pages. Een
-callback moet na `Cancelled` terugkeren; geen longjmp buiten de taak en geen
-bewaarde verwijzingen naar de private stack. Panics over de extern-C-ingang
-aborteren. Dit is geen vrijbrief voor onbeperkte recursie in externe C-code.
+`Task::new` is explicitly unsafe: the caller must show that the work fits in
+the chosen stack of 64 KiB..16 MiB (outside that range it is `Error::Size`).
+The slot heap has no guard pages. A callback must return after `Cancelled`;
+no longjmp out of the task and no kept references to the private stack.
+Panics across the extern-C entry abort. This is no licence for unbounded
+recursion in external C code.
 
-Drop geeft annulering door en hervat de taak tot de functie terugkeert. Zo
-worden zowel lokale Rust-waarden als C-handvatten op hun eigen stack opgeruimd
-vóór vrijgave. De stopbel van de app sluit daar zonder extra code op aan:
-`select(app.stopped(), task)` dropt de taak als de kern vraagt te stoppen, de
-C-kant ziet `Cancelled` bij zijn volgende `wait` (een lange CPU-query via de
-progresscallback met `wait(yield_now())`), en de app doet daarna zijn
-opruiming binnen de gratie (zie [apps.md](apps.md), De stop). Een future waarvan de I/O-bevestiging onbekend is, vereist
-daarnaast een vergiftigde I/O-eigenaar: alleen de C-stack opruimen maakt een
-onbekende write-uitkomst niet weer betrouwbaar.
+Drop passes on the cancellation and resumes the task until the function
+returns. That way both local Rust values and C handles on its own stack are
+cleaned up before release. The app's stop doorbell plugs into this without
+extra code: `select(app.stopped(), task)` drops the task when the kernel asks
+to stop, the C side sees `Cancelled` at its next `wait` (a long CPU query via
+the progress callback with `wait(yield_now())`), and the app then does its
+cleanup within the grace period (see [apps.md](apps.md), The stop). A future
+whose I/O acknowledgement is unknown additionally needs a poisoned I/O owner:
+only cleaning up the C stack does not make an unknown write outcome reliable
+again.
 
-De hosttests toetsen diepe lokale frames, herhaald parkeren, integer/FP-state,
-opruimen van geannuleerde futures en nooit gestarte taken. Replica's
-`tools/qemu-persist.py` draait de echte SQLite-C-engine via deze brug
-op ARM64: commit, rollback, SIGKILL, koude herstart, integriteitscontrole,
-annuleren van een lange CPU-query via SQLite's progresscallback en heropenen
-met dezelfde SQLite-heap. De complete RISC-V-app bouwt; deze proef claimt geen
-RISC-V-runtimebewijs. Replica pint de SDK op een gepubliceerde tag (sinds
-v3.0.0-alpha.16 met deze module en `sys::Client::sync` erin); er is geen
-kandidaatkopie of lokale patch meer.
+The host tests cover deep local frames, repeated parking, integer/FP state,
+cleanup of cancelled futures and tasks that never started. Replica's
+`tools/qemu-persist.py` runs the real SQLite C engine through this bridge on
+ARM64: commit, rollback, SIGKILL, cold restart, integrity check, cancelling a
+long CPU query via SQLite's progress callback, and reopening with the same
+SQLite heap. The complete RISC-V app builds; this test claims no RISC-V
+runtime proof. Replica pins the SDK to a published tag (since
+v3.0.0-alpha.16 with this module and `sys::Client::sync` in it); there is no
+candidate copy or local patch any more. Since the default storage became
+stateless (see [storage-sync.md](storage-sync.md)), a cold restart only finds
+the database again on a node with `hopos.storage=stateful`.

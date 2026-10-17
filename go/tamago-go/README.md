@@ -53,7 +53,7 @@ images. Already linked binaries retain their original runtime and network code.
 
 ## Validation and submission scope
 
-On 9 September 2026, applying both patches to pristine files from the recorded
+On 2026-09-09, applying patches 1 and 2 to pristine files from the recorded
 base reproduces all four changed files in the tested local toolchain byte for
 byte. Reapplication is a no-op. A conflicting second patch leaves the first
 unapplied. The currently patched checkout is also recognized as already applied.

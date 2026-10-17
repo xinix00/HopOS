@@ -1,197 +1,204 @@
-# Raspberry Pi 4 en 5 op HopOS v3
+# Raspberry Pi 4 and 5 on HopOS v3
 
-Alles over de Pi 4 (BCM2711) en de Pi 5 (BCM2712) hieronder is op de host
-getest en bouwt voor het target; de Pi 4-kern boot bovendien op QEMU `raspi4b` tot de
-executor-tik. Niets ervan heeft in v3 op ijzer gedraaid. De metingen
-(07-07 tot 21-09) staan in het commentaar van de code; deze checklist zegt
-per stap wat de console moet tonen en wat een afwijking betekent.
+Everything below for the Pi 4 (BCM2711) and the Pi 5 (BCM2712) is tested on
+the host and builds for the target; the Pi 4 kernel also boots on QEMU
+`raspi4b` up to the executor tick. Both Pi's run v3 on hardware: boot, EL2,
+cage, self-test, Hop as resident, warm kernel flip, watchdog, RNG200 and
+clock policy (P1, 2026-10-03; as of 2026-10-04 the Pi 4 is at P40 and the
+Pi 5 at Q40). The status per board is in [ALLES.md](../ALLES.md), the numbers
+in [measurements.md](measurements.md). The measurements (2026-07-07 to
+2026-09-21) are in the code comments; this checklist says per step what the
+console must show and what a deviation means.
 
-## Wat er is
+## What exists
 
-| Deel | Waar | Getest |
+| Part | Where | Tested |
 | --- | --- | --- |
-| Gedeeld Pi-board: de ingang op 0x80000 (EL2-init, cache-invalidate, event-stream), de DTB uit x0, de geheugenkaart uit de DTB (runtime bij de vaste tabel), de pool, de staging uit `/chosen/linux,initrd-*`, `hopos.*` uit de cmdline, de mailbox, de GIC-400 via `cpu::irq`, de CNTHP-lijn van de OS-core | `board/raspi` | 10 host-tests: kaart (1 en 8 GB Pi 4), pool, slot-plan, staging, cmdline, MAC, DTB-status |
-| Pi 4: adressen, A72-nummering (aff0), vaste tabellen (GB0 en GB3), GENET-probe | `board/rpi4` | 2 host-tests, const-asserties op de tabellen; QEMU `raspi4b` |
-| Pi 5: adressen, A76-nummering (aff1), vaste tabellen (GB0, 64, 65, 124), de RP1-keten en de NIC-interrupt via de MIP | `board/rpi5` | 2 host-tests, const-asserties op tabellen en adressen |
-| VideoCore-mailbox: temperatuur, klokken, board-MAC, framebuffer | `driver/vcmail` | 7 host-tests (bericht-indeling, respons-codes, de "pending"-regel, een rondgang met een nep-firmware) |
-| GIC-400 als `cpu::irq::Controller`, plus de kick van de OS-core: SGI 8 via GICD_SGIR, de GICC_HPPIR-peek, de EOI met de bron-core | `driver/gicv2`, `board/raspi` (`KICK_SGI`, `os_bell`, `kick_self`) | 5 host-tests op nep-GICD/GICC; QEMU `raspi4b`: `HOPOS_OS_SELFTEST ok` |
-| GENET v5 (Pi 4) | `driver/nic/genet` | 9 host-tests: reset met DMA-stopbevestiging, ringen die de hardwaretellers volgen, QTAG, PROD-wrap, volle ring, RX-pad en foute frames, MDIO |
-| Cadence GEM (Pi 5) | `driver/nic/gem` | 7 host-tests: ringen met de bus-offset, DBW uit DCFG1, AMP, TX-overdracht, RX en rearm, de expliciete ISR-ack |
-| Broadcom-STB PCIe-RC (Pi 5, en de BCM2711-variant) | `driver/brcmpcie` | 6 host-tests: window-codering, setup (UBUS, PLL, burst, VDM), BCM2711-reset, link-fout, endpoint en BAR's, RESCAL |
-| RNG200 (BCM2711 0xFE10_4000, BCM2712 0x10_7D20_8000): de warm-up van iproc-rng200, de continue toets, de NIST/lockout-herstart van Linux; zaait de DRBG van de kern (`cpu::drbg`, `trng::Kind::Soc`) in `discover`, alleen als de DTB-node `brcm,bcm2711-rng200` aan staat | `driver/rng200`, `board/raspi/src/rng.rs` | 6 host-tests op een nep-blok met FIFO (start-volgorde, warm-up-grens, afwezig blok, vastgelopen bron, gezondheid, lege buffer); QEMU: de node ontbreekt, het blok wordt niet aangeraakt |
-| PM-watchdog (BCM2711 0xFE10_0000, BCM2712 0x10_7D20_0000): 12 s in tikken van 1/65536 s, eerst FULL_RESET en dan de proef dat de teller loopt (op ijzer telt hij pas ná FULL_RESET, Pi 5 30-09); `hopos.wd=off` zet hem uit zoals Linux | `board/raspi/src/watchdog.rs`, `hopos/src/watchdog.rs` | 4 host-tests op een nep-PM-blok (tikken, een teller die na FULL_RESET stilstaat wordt weer gestopt en niet gewapend, lopende teller gewapend met behoud van RSTC-bits, erfenis van een flip zonder proef); QEMU: `hopos.wd=off` in de proef, want FULL_RESET reset daar meteen |
-| Klokknop: de ARM-klok via de mailbox (vol = firmware-max of `hopos.mhz`, stil = 600 MHz of het firmware-minimum) onder `driver_dvfs::run`, met dezelfde slot-tellers als de O6N | `board/raspi/src/clock.rs`, `hopos/src/telemetry.rs` | 3 host-tests op de standen (vloer, cap, één klok); QEMU: 700/700 MHz, één klok, geen knop |
-| Linkscript: raw image op 0x80000, de ingang vooraan | `hopos/link-raspi.ld` | de builds, `_pi_start == 0x80000` als link-assertie |
-| Kaart | `image/rpi4.sh`, `image/rpi5.sh` | leveren `kernel8.img` / `hop-agent5.img` en het kaart-image |
-| QEMU-rook | `tools/qemu-rpi4-test.sh` | groen: P2, bunny, DTB, kaart, mailbox, GIC-400, kooi, staging, de zelftest van de OS-core (timer, yield, kick naar zichzelf), drie tikken met `kicks=1`, en de twee weigeringen: RNG200 niet aangeraakt (`HOPOS_RNG_INSECURE`), PM-watchdog uit (`HOPOS_WD_OFF` met `hopos.wd=off`, want FULL_RESET reset daar meteen); met `GUI=1` de gui-smaak, waar de VL805-keten de RC niet aanraakt omdat QEMU hem uit de DTB haalt (`no enabled brcm,bcm2711-pcie`, `HOPOS_USB_NONE`) |
+| Shared Pi board: the entry at 0x80000 (EL2 init, cache invalidate, event stream), the DTB from x0, the memory map from the DTB (runtime, on top of the fixed table), the pool, the staging from `/chosen/linux,initrd-*`, `hopos.*` from the cmdline, the mailbox, the GIC-400 via `cpu::irq`, the CNTHP line of the OS core | `board/raspi` | 10 host tests: map (1 and 8 GB Pi 4), pool, slot plan, staging, cmdline, MAC, DTB status |
+| Pi 4: addresses, A72 numbering (aff0), fixed tables (GB0 and GB3), GENET probe | `board/rpi4` | 2 host tests, const assertions on the tables; QEMU `raspi4b` |
+| Pi 5: addresses, A76 numbering (aff1), fixed tables (GB0, 64, 65, 124), the RP1 chain and the NIC interrupt via the MIP | `board/rpi5` | 2 host tests, const assertions on tables and addresses |
+| VideoCore mailbox: temperature, clocks, board MAC, framebuffer | `driver/vcmail` | 7 host tests (message layout, response codes, the "pending" rule, a round trip with a fake firmware) |
+| GIC-400 as `cpu::irq::Controller`, plus the kick of the OS core: SGI 8 via GICD_SGIR, the GICC_HPPIR peek, the EOI with the source core | `driver/gicv2`, `board/raspi` (`KICK_SGI`, `os_bell`, `kick_self`) | 5 host tests on fake GICD/GICC; QEMU `raspi4b`: `HOPOS_OS_SELFTEST ok` |
+| GENET v5 (Pi 4) | `driver/nic/genet` | 9 host tests: reset with DMA stop confirmation, rings that follow the hardware counters, QTAG, PROD wrap, full ring, RX path and bad frames, MDIO |
+| Cadence GEM (Pi 5) | `driver/nic/gem` | 7 host tests: rings with the bus offset, DBW from DCFG1, AMP, TX handoff, RX and rearm, the explicit ISR ack |
+| Broadcom STB PCIe RC (Pi 5, and the BCM2711 variant) | `driver/brcmpcie` | 6 host tests: window encoding, setup (UBUS, PLL, burst, VDM), BCM2711 reset, link failure, endpoint and BARs, RESCAL |
+| RNG200 (BCM2711 0xFE10_4000, BCM2712 0x10_7D20_8000): the warm-up of iproc-rng200, the continuous test, the NIST/lockout restart from Linux; seeds the kernel DRBG (`cpu::drbg`, `trng::Kind::Soc`) in `discover`, only if the DTB node `brcm,bcm2711-rng200` is enabled | `driver/rng200`, `board/raspi/src/rng.rs` | 6 host tests on a fake block with FIFO (start order, warm-up bound, absent block, stuck source, health, empty buffer); QEMU: the node is missing, the block is not touched |
+| PM watchdog (BCM2711 0xFE10_0000, BCM2712 0x10_7D20_0000): 12 s in ticks of 1/65536 s, first FULL_RESET and then the check that the counter runs (on hardware it only counts after FULL_RESET, Pi 5 2026-09-30); `hopos.wd=off` turns it off like Linux | `board/raspi/src/watchdog.rs`, `hopos/src/watchdog.rs` | 4 host tests on a fake PM block (ticks, a counter that stands still after FULL_RESET is stopped again and not armed, running counter armed with RSTC bits preserved, inheritance from a flip without check); QEMU: `hopos.wd=off` in the test, because FULL_RESET resets there at once |
+| Clock knob: the ARM clock via the mailbox (full = firmware max or `hopos.mhz`, quiet = 600 MHz or the firmware minimum) under `driver_dvfs::run`, with the same slot counters as the O6N | `board/raspi/src/clock.rs`, `hopos/src/telemetry.rs` | 3 host tests on the modes (floor, cap, one clock); QEMU: 700/700 MHz, one clock, no knob |
+| Linker script: raw image at 0x80000, the entry at the front | `hopos/link-raspi.ld` | the builds, `_pi_start == 0x80000` as link assertion |
+| Card | `image/rpi4.sh`, `image/rpi5.sh` (both via `image/raspi.sh`) | deliver `kernel8.img` / `hop-agent5.img` and the card image |
+| QEMU smoke test | `tools/qemu-rpi4-test.sh` | green: P2, bunny, DTB, map, mailbox, GIC-400, cage, staging, the OS core self-test (timer, yield, kick to itself), three ticks with `kicks=1`, and the two refusals: RNG200 not touched (`HOPOS_RNG_INSECURE`), PM watchdog off (`HOPOS_WD_OFF` with `hopos.wd=off`, because FULL_RESET resets there at once); with `GUI=1` the gui flavor, where the VL805 chain does not touch the RC because QEMU removes it from the DTB (`no enabled brcm,bcm2711-pcie`, `HOPOS_USB_NONE`) |
 
-## Het plan (beide Pi's gelijk)
+## The plan (both Pi's the same)
 
-| Bereik | Wat | Mapping |
+| Range | What | Mapping |
 | --- | --- | --- |
-| 0x0000_0000 tot 0x0008_0000 | TF-A (BL31 of de armstub): niet van ons, ook geen cache-onderhoud | Normal (vaste tabel) |
-| 0x0008_0000 tot 0x0800_0000 | kern-RAM: image, stack, heap | Normal WB |
-| 0x0800_0000 tot 0x1000_0000 | laadvenster: DTB 0x0F00_0000, boot-scratch 0x0F10_0000, rolwoord +0x100, staging 0x0F20_0000 (14 MB) | Normal WB |
-| 0x1000_0000 tot 0x1400_0000 | control-pages en kooi-regio | Device |
-| 0x1400_0000 tot 0x1500_0000 | DMA: NIC 8 MB, mailbox-buffer 0x1480_0000 | Normal-NC, op de framebuffers van de NIC na: Normal-WB en XN, de driver veegt ze (Pi 4 0x1400_0000 tot 0x1420_0000, de GENET; Pi 5 0x1420_0000 tot 0x1460_0000, de GEM; de descriptors van de GEM eronder blijven NC) |
-| vanaf 0x1500_0000 | de pool: DTB `/memory` min `/memreserve/`, runtime gemapt | Normal WB |
+| 0x0000_0000 to 0x0008_0000 | TF-A (BL31 or the armstub): not ours, no cache maintenance either | Normal (fixed table) |
+| 0x0008_0000 to 0x0800_0000 | kernel RAM: image, stack, heap | Normal WB |
+| 0x0800_0000 to 0x1000_0000 | load window: DTB 0x0F00_0000, boot scratch 0x0F10_0000, role word +0x100, staging 0x0F20_0000 (14 MB) | Normal WB |
+| 0x1000_0000 to 0x1400_0000 | control pages and cage region | Device |
+| 0x1400_0000 to 0x1500_0000 | DMA: NIC 8 MB, mailbox buffer 0x1480_0000 | Normal-NC, except the NIC's frame buffers: Normal-WB and XN, the driver sweeps them (Pi 4 0x1400_0000 to 0x1420_0000, the GENET; Pi 5 0x1420_0000 to 0x1460_0000, the GEM; the GEM's descriptors below them stay NC) |
+| from 0x1500_0000 | the pool: DTB `/memory` minus `/memreserve/`, mapped at runtime | Normal WB |
 
-## Bouwen en flashen
+## Building and flashing
 
 ```sh
-sh image/rpi4.sh            # Hop uit ../hop/hop; APP=appspike voor het ABI-bewijs
-sh image/rpi5.sh            # GUI=1 voor de gui-smaak, CFG= voor een eigen config
+sh image/rpi4.sh            # Hop from ../hop/hop; APP=appspike for the ABI proof
+sh image/rpi5.sh            # GUI=1 for the gui flavor, CFG= for your own config
 diskutil unmountDisk /dev/diskN
-sudo dd if=target/hopos-rpi4.img of=/dev/rdiskN bs=4m    # of hopos-rpi5.img
+sudo dd if=target/hopos-rpi4.img of=/dev/rdiskN bs=4m    # or hopos-rpi5.img
 ```
 
-De kaart bouwt `tools/mkcard`. Zonder kaart-image (de firmware
-ontbreekt): kopieer `target/sd-rpi4/*` (of `sd-rpi5/*`) op de FAT-partitie
-van een bestaande Pi-kaart. De firmware staat in `image/firmware/rpi4` en
-`image/firmware/rpi5` (herkomst en sha256 in hun `LEESMIJ.txt`). Pi 4: `start4.elf`,
-`fixup4.dat`, `bcm2711-rpi-4-b.dtb` en een zelfgebouwde TF-A `bl31.bin`
-(VERPLICHT: de stock armstub8 heeft geen PSCI). Pi 5:
-`bcm2712-rpi-5-b.dtb` en `overlays/bcm2712d0.dtbo`.
+`tools/mkcard` builds the card. Without a card image (the firmware is
+missing): copy `target/sd-rpi4/*` (or `sd-rpi5/*`) onto the FAT partition of
+an existing Pi card. The firmware is in `image/firmware/rpi4` and
+`image/firmware/rpi5` (origin and sha256 in their `LEESMIJ.txt`). Pi 4:
+`start4.elf`, `fixup4.dat`, `bcm2711-rpi-4-b.dtb` and a self-built TF-A
+`bl31.bin` (REQUIRED: the stock armstub8 has no PSCI). Pi 5:
+`bcm2712-rpi-5-b.dtb` and `overlays/bcm2712d0.dtbo`.
 
-`hopos.cfg` staat niet als bestand op de kaart. Het
-`initramfs`-kanaal draagt het image van Hop (`hop.elf`), en de config staat
-in het venster van de kern ([boards.md](boards.md), "Het config-venster"):
-het script zet `CFG=` (standaard de lagen `image/cfg/default.cfg`,
-`rpi4.cfg` of `rpi5.cfg`, en `headless.cfg` of `headfull.cfg`) erin.
-`cmdline.txt` draagt `hopos.stage=hop|app` (standaard hop) en `EXTRA=`; daar
-mogen ook `hopos.cores=N` en `hopos.oscore=` (op de Pi altijd core 0), maar
-een sleutel in het venster wint.
+`hopos.cfg` is not a file on the card. The `initramfs` channel carries Hop's
+image (`hop.elf`), and the config is in the kernel's window
+([boards.md](boards.md), "The config (all boards)"): the script puts `CFG=`
+in it (by default the layers `image/cfg/default.cfg`, `rpi4.cfg` or
+`rpi5.cfg`, and `headless.cfg` or `headfull.cfg`). Since 3.0.11
+`default.cfg` sets `hopos.storage=stateless`; the Pi's have no disk, so this
+changes nothing there. `cmdline.txt` carries `hopos.stage=hop|app` (default
+hop) and `EXTRA=`; `hopos.cores=N` and `hopos.oscore=` (on the Pi always
+core 0) may go there too, but a key in the window wins.
 
-UART: Pi 4 op de header (pin 8 TXD, 10 RXD, 6 GND, 3V3), `screen
-/dev/tty.usbserial-* 115200`. Pi 5 op de 3-pins debug-connector tussen de
-HDMI-poorten, `screen /dev/tty.usbmodem* 115200`.
+UART: Pi 4 on the header (pin 8 TXD, 10 RXD, 6 GND, 3V3), `screen
+/dev/tty.usbserial-* 115200`. Pi 5 on the 3-pin debug connector between the
+HDMI ports, `screen /dev/tty.usbmodem* 115200`.
 
-## De checklist voor morgen
+## The checklist
 
-Per stap: wat er moet staan, en wat het betekent als het er niet staat.
+Per step: what must be there, and what it means if it is not.
 
-1. **Bootloader-log** (`uart_2ndstage=1`). Niets: kabel, poort, of
-   `BOOT_UART=1` in de EEPROM-config.
-2. **`P2`**: de Pi-ingang draait op EL2. Wel bootloader-log maar geen P:
-   het laden faalt (config.txt, DTB, armstub; Pi 5: `os_check=0`). `P1`:
-   geen EL2 van de firmware; de kern meldt `HOPOS_BOOT_EL` en parkeert.
-3. **De bunny en `runtime rustc`**: MMU aan met de vaste tabel, BSS, stack,
-   `kmain`. P2 en dan niets: de MMU-stap (tabellen in `.data.pagetables`,
-   TCR/MAIR van `cpu::boot`) of een fault vóór de console; een
-   `exception: ... HOPOS_EXCEPTION`-regel noemt ESR, ELR en FAR.
+1. **Bootloader log** (`uart_2ndstage=1`). Nothing: cable, port, or
+   `BOOT_UART=1` in the EEPROM config.
+2. **`P2`**: the Pi entry runs at EL2. Bootloader log but no P: loading
+   fails (config.txt, DTB, armstub; Pi 5: `os_check=0`). `P1`: no EL2 from
+   the firmware; the kernel reports `HOPOS_BOOT_EL` and parks.
+3. **The bunny and `runtime rustc`**: MMU on with the fixed table, BSS,
+   stack, `kmain`. P2 and then nothing: the MMU step (tables in
+   `.data.pagetables`, TCR/MAIR from `cpu::boot`) or a fault before the
+   console; an `exception: ... HOPOS_EXCEPTION` line names ESR, ELR and FAR.
 4. **`fdt: N bytes at 0xf000000, model "Raspberry Pi 4 Model B", serial
-   "1000000..."`**. Een ander adres: `device_tree_address` niet gehonoreerd
-   (de kern accepteert alles tussen 0x80000 en 0x1000_0000). `WARNING
-   HOPOS_RAM_CHECK_SKIPPED`: x0 was geen DTB.
-5. **`stage: N KB at 0xf200000, role hop`**. `no initramfs`: de
-   `initramfs`-regel in config.txt of `hop.elf` op de kaart ontbreekt.
-6. **`mem: B banks, M MB mapped from the DTB, pool P MB`**. Verwacht: Pi 4
-   8 GB rond 7,5 GB, Pi 5 8 GB rond 7,9 GB. Een fault direct na deze regel:
-   de runtime-mapping (de TLB-invalidate in `board_raspi::arch`); noteer
-   ESR/FAR.
-7. **`vcmail: T C, ARM F MHz (max X MHz)`**. `HOPOS_VCMAIL_FAIL`: de
-   mailbox-buffer (0x1480_0000, Normal-NC) of de basis; de rest boot door.
-   Pi 5 met `arm_freq=1500`: max 1500.
-8. **`boot: HopOS v3.0.0 on rpi4, EL2, 4 cores (big), N MB DRAM
-   HOPOS_BOOT`**.
-9. **`irq: GIC-400: GICD ... CTLR 0x1 ... cpu mask 0x1`**. CTLR 0 of mask
-   0: TF-A liet de GIC anders achter; noteer de regel.
-10. **Pi 4 NIC**: `net: genet rev 0x6000..., PHY at 1 (0x600d:...)`, dan
-    `net: genet up, 1000 Mbps full duplex, polled`, `HOPOS_NIC_UP` en een
-    DHCP-lease. `not a v5` of `no PHY`: noteer; `no link within 8 s`:
-    kabel.
+   "1000000..."`**. A different address: `device_tree_address` not honored
+   (the kernel accepts anything between 0x80000 and 0x1000_0000). `WARNING
+   HOPOS_RAM_CHECK_SKIPPED`: x0 was not a DTB.
+5. **`stage: N KB at 0xf200000, role hop`**. `no initramfs`: the
+   `initramfs` line in config.txt or `hop.elf` on the card is missing.
+6. **`mem: B banks, M MB mapped from the DTB, pool P MB`**. Expected: Pi 4
+   8 GB around 7.5 GB, Pi 5 8 GB around 7.9 GB. A fault right after this
+   line: the runtime mapping (the TLB invalidate in `board_raspi::arch`);
+   note ESR/FAR.
+7. **`vcmail: T C, ARM F MHz (max X MHz)`**. `HOPOS_VCMAIL_FAIL`: the
+   mailbox buffer (0x1480_0000, Normal-NC) or the base; the rest boots on.
+   Pi 5 with `arm_freq=1500`: max 1500.
+8. **`boot: HopOS v3.0.13 on rpi4, EL2, 4 cores (big), N MB DRAM
+   HOPOS_BOOT`** (the version of the build).
+9. **`irq: GIC-400: GICD ... CTLR 0x1 ... cpu mask 0x1`**. CTLR 0 or mask
+   0: TF-A left the GIC differently; note the line.
+10. **Pi 4 NIC**: `net: genet rev 0x6000..., PHY at 1 (0x600d:...)`, then
+    `net: genet up, 1000 Mbps full duplex, polled`, `HOPOS_NIC_UP` and a
+    DHCP lease. `not a v5` or `no PHY`: note it; `no link within 8 s`:
+    cable.
 11. **Pi 5 NIC**: `net: pcie2 link up (status 0x..b0), RP1 1de4:0001`,
     `net: rp1 up, PHY at 1`, `net: gem up, 1000 Mbps full duplex, RX on
-    INTID 166`. De lijn is een flank (een MSI via de MIP): het board
-    registreert hem als `Trigger::Edge` en de dispatcher zet GICD_ICFGR
-    vóór de enable (`cpu::irq::enable_as`). `PCIe bring-up failed` met de status in de regel ervoor:
-    RESCAL, PLL of training (de bewezen probe6-reeks).
-    `RX polled: ...`: de NIC werkt, de MSI-X-weg niet; noteer de reden.
-12. **`slots: cage up HOPOS_CAGE_UP`** en `core 1..3 mailbox Ok(Cold)`.
+    INTID 166`. The line is an edge (an MSI via the MIP): the board
+    registers it as `Trigger::Edge` and the dispatcher sets GICD_ICFGR
+    before the enable (`cpu::irq::enable_as`). `PCIe bring-up failed` with
+    the status in the line before it: RESCAL, PLL or training (the proven
+    probe6 sequence). `RX polled: ...`: the NIC works, the MSI-X path does
+    not; note the reason.
+12. **`slots: cage up HOPOS_CAGE_UP`** and `core 1..3 mailbox Ok(Cold)`.
 13. **`oscore: cpu 0 self-test timer=(Timer, ~1000 us) yield=(Yield, ..
-    us) kick=(Ipi, .. us) HOPOS_OS_SELFTEST ok`**. Op QEMU `raspi4b`
-    gemeten 29-09: timer 1344 us op een termijn van 1 ms, yield 22 us, kick
-    8 us. `kick=(Timer, ~200000 us)`: de SGI kwam niet aan of de peek
-    zag hem niet; noteer de `irq: GIC-400`-regel (CTLR, cpu mask). Sinds
-    30-09 handelt elke proef eerst af wat al bij de GIC wacht, doet hij het
-    tot drie keer opnieuw als een device-lijn hem onderbrak, en noemt een
-    onderbroken proef de lijn: `(Irq, 0 us, vec 9, INTID 166, INTID 166
-    pending before entry, try 3)`. Les van de eerste Pi 5-boot (30-09): drie
-    keer `Irq` na 0 us was de NIC-lijn (of een firmware-lijn, `other=1`)
-    die tussen `probe_nic` en de zelftest één keer vuurde; de vector zette
-    de vlag en keerde gemaskeerd terug, maar de dispatch-taak draait pas
-    als de executor loopt, dus de lijn stond pending bij elke proef. Staat
-    er ná drie pogingen nog een INTID, dan is die lijn echt blijvend: een
-    level-lijn zonder ack meldt de dispatch daarna als `HOPOS_IRQ_STUCK`
-    en zet hem uit.
-14. **De eerste plaatsing**: `cage: slot 1 core 1 cold: PSCI CPU_ON
-    mpidr=0x1` (Pi 5: `0x100`) `-> Ok(())` en `HOPOS_SLOT_START`. Hangt
-    het na `cage: slot 1 built`: geen PSCI (Pi 4: `bl31.bin` ontbreekt of
-    `armstub=` staat er niet). `Err(AlreadyOn)` op de Pi 5: de armstub
-    zette de cores al aan; dan een upstream-TF-A als armstub.
+    us) kick=(Ipi, .. us) HOPOS_OS_SELFTEST ok`**. Measured on QEMU
+    `raspi4b` 2026-09-29: timer 1344 us on a 1 ms deadline, yield 22 us,
+    kick 8 us. `kick=(Timer, ~200000 us)`: the SGI did not arrive or the
+    peek did not see it; note the `irq: GIC-400` line (CTLR, cpu mask).
+    Since 2026-09-30 each probe first handles what is already waiting at
+    the GIC, retries up to three times if a device line interrupted it, and
+    an interrupted probe names the line: `(Irq, 0 us, vec 9, INTID 166,
+    INTID 166 pending before entry, try 3)`. Lesson of the first Pi 5 boot
+    (2026-09-30): three times `Irq` after 0 us was the NIC line (or a
+    firmware line, `other=1`) that fired once between `probe_nic` and the
+    self-test; the vector set the flag and returned masked, but the dispatch
+    task only runs once the executor runs, so the line was pending at every
+    probe. If an INTID is still there after three tries, that line is really
+    stuck: a level line without ack is then reported by the dispatch as
+    `HOPOS_IRQ_STUCK` and turned off.
+14. **The first placement**: `cage: slot 1 core 1 cold: PSCI CPU_ON
+    mpidr=0x1` (Pi 5: `0x100`) `-> Ok(())` and `HOPOS_SLOT_START`. If it
+    hangs after `cage: slot 1 built`: no PSCI (Pi 4: `bl31.bin` is missing
+    or `armstub=` is not there). `Err(AlreadyOn)` on the Pi 5: the armstub
+    already turned the cores on; then use an upstream TF-A as armstub.
 15. **Hop**: `slot 1: applib: stage-1 on: RAM write-back, control page
-    Normal-NC, rings write-back, 16 KB of tables HOPOS_APP_MMU` als eerste
-    regel, dan zijn regels via de servicer, `HOPOS_NODE_IP`, en `curl
-    http://<ip>:8080/health`. Een fault van Hop op EL1 (een alignment-fault,
-    een ongedefinieerde instructie) staat sinds 30-09 als `slot 1: Hop
+    Normal-NC, rings write-back, 16 KB of tables HOPOS_APP_MMU` as the first
+    line, then its lines via the servicer, `HOPOS_NODE_IP`, and `curl
+    http://<ip>:8080/health`. A fault of Hop at EL1 (an alignment fault, an
+    undefined instruction) shows since 2026-09-30 as `slot 1: Hop
     faulted at EL1 vec=4 esr=0x96000021 (data abort, alignment fault)
-    elr=0x5... far=0x... HOPOS_HOP_FAULT`: de échte ESR, ELR en FAR uit de
-    vectortabel van applib. Staat er `Hop faulted vec=8 esr=0x82000005
-    (instruction abort, translation fault) far=0x200`, dan sprong hij naar
-    een lege VBAR_EL1: een Hop gebouwd tegen een applib van vóór 30-09
-    (`image/rpi5.sh` bouwt hem via `tools/hop-build.sh` tegen deze
-    werkboom; `HOP_PATCH=0` neemt de tag van de hop-repo). `HOPOS_APP_NO_MMU`:
-    de stage-1 is geweigerd en elke ongealigneerde toegang faultt.
-16. **`HOPOS_TICK`** elke seconde, `sleeps` loopt op: de WFE-slaap met de
-    event-stream van EL2 werkt. Staat `sleeps` op 0 of loopt de tik achter:
-    de event-stream (CNTHCTL_EL2 in `pi_entry!`).
-17. **Minuten laten draaien met verkeer** (Pi 5): de C1-stepping kan stil
-    bevriezen onder RX-DMA plus fabric-werk; noteer de stepping en de tijd tot de freeze.
-18. **RNG200** (in de log direct na stap 7): `trng: RNG200 at
+    elr=0x5... far=0x... HOPOS_HOP_FAULT`: the real ESR, ELR and FAR from
+    applib's vector table. If it says `Hop faulted vec=8 esr=0x82000005
+    (instruction abort, translation fault) far=0x200`, it jumped to an empty
+    VBAR_EL1: a Hop built against an applib from before 2026-09-30
+    (`image/rpi5.sh` builds it via `tools/hop-build.sh` against this work
+    tree; `HOP_PATCH=0` takes the tag of the hop repo). `HOPOS_APP_NO_MMU`:
+    the stage-1 was refused and every unaligned access faults.
+16. **`HOPOS_TICK`** every second, `sleeps` goes up: the WFE sleep with the
+    EL2 event stream works. If `sleeps` stays at 0 or the tick lags behind:
+    the event stream (CNTHCTL_EL2 in `pi_entry!`).
+17. **Let it run for minutes with traffic** (Pi 5): the C1 stepping can
+    freeze silently under RX DMA plus fabric work; note the stepping and the
+    time to the freeze.
+18. **RNG200** (in the log right after step 7): `trng: RNG200 at
     0x107d208000 (BCM2712) online, the kernel DRBG is seeded from rng200
-    HOPOS_RNG200_UP` (Pi 4: `0xfe104000 (BCM2711)`). De Pi 4 mag hier tot
-    twee seconden staan: de eerste FIFO-woorden na de warm-up komen op de
-    BCM2711 traag (11-07). `trng: WARNING RNG200 ... HOPOS_RNG_INSECURE`
-    noemt de reden: `no such node in the DTB` (de DTB mist de node, of een
-    overlay haalde hem weg), `RNG_CTRL reads 0x... after enabling RBGEN`
-    (het blok antwoordt niet), `FIFO stayed empty for 2000 ms after the
-    warm-up` (noteer: Pi 4 of Pi 5), `two equal words in a row` of
-    `RNG_INT_STATUS ...` (de bron is stuk). Een `HOPOS_EXCEPTION` met FAR
-    0x107d208000 of 0xfe104000: het adres klopt niet met de DTB.
-19. **Klok** (na `irq: GIC-400`): `dvfs: ARM via the mailbox, full 1500
+    HOPOS_RNG200_UP` (Pi 4: `0xfe104000 (BCM2711)`). The Pi 4 may sit here
+    for up to two seconds: the first FIFO words after the warm-up come
+    slowly on the BCM2711 (2026-07-11). `trng: WARNING RNG200 ...
+    HOPOS_RNG_INSECURE` names the reason: `no such node in the DTB` (the DTB
+    lacks the node, or an overlay removed it), `RNG_CTRL reads 0x... after
+    enabling RBGEN` (the block does not answer), `FIFO stayed empty for 2000
+    ms after the warm-up` (note: Pi 4 or Pi 5), `two equal words in a row`
+    or `RNG_INT_STATUS ...` (the source is broken). A `HOPOS_EXCEPTION` with
+    FAR 0x107d208000 or 0xfe104000: the address does not match the DTB.
+19. **Clock** (after `irq: GIC-400`): `dvfs: ARM via the mailbox, full 1500
     MHz, quiet 800 MHz (firmware min/max 800/1500), policy Auto, cap 0,
-    ... HOPOS_CLOCK_UP`, daarna `dvfs: -> 1500 MHz (full, boot)
-    HOPOS_CLOCK_EDGE`, na 30 s zonder last `dvfs: -> 800 MHz (quiet, idle
-    30s) HOPOS_CLOCK_EDGE`, en elke 10 s `dvfs: clock ... temp ... HOPOS_CLOCK`.
-    De getallen volgen config.txt (`image/rpi5.sh` zet `arm_freq=1500` en
-    sinds 30-09 `arm_freq_min=800`). `the firmware leaves one ARM clock,
-    1500 MHz ... HOPOS_CLOCK_NONE`: de kaart draagt een config.txt zonder
-    `arm_freq_min`; zet de regel erbij of flash opnieuw. Meldt de
-    firmware bij een flank een ander getal dan gevraagd, dan staat dat
-    getal in de flankregel (de firmware klemt, de knop liegt niet).
-    `hopos.clock=max|quiet|firmware` en `hopos.mhz=N` in cmdline.txt
-    werken zoals op de O6N.
-20. **Watchdog** (na de zelftest): `watchdog: hardware reset armed (BCM PM
+    ... HOPOS_CLOCK_UP`, then `dvfs: -> 1500 MHz (full, boot)
+    HOPOS_CLOCK_EDGE`, after 30 s without load `dvfs: -> 800 MHz (quiet,
+    idle 30s) HOPOS_CLOCK_EDGE`, and every 10 s `dvfs: clock ... temp ...
+    HOPOS_CLOCK`. The numbers follow config.txt (`image/rpi5.sh` sets
+    `arm_freq=1500` and since 2026-09-30 `arm_freq_min=800`). `the firmware
+    leaves one ARM clock, 1500 MHz ... HOPOS_CLOCK_NONE`: the card carries a
+    config.txt without `arm_freq_min`; add the line or flash again. If the
+    firmware reports a different number than requested on an edge, that
+    number is in the edge line (the firmware clamps, the knob does not lie).
+    `hopos.clock=max|quiet|firmware` and `hopos.mhz=N` in cmdline.txt work
+    as on the O6N.
+20. **Watchdog** (after the self-test): `watchdog: hardware reset armed (BCM PM
     watchdog at 0x107d200000, 12.0 s (786432 ticks of 1/65536 s)) - boot
-    guard: blind pets until the node proves liveness HOPOS_WD_ARMED`, na
-    DHCP en de heartbeat van Hop `HOPOS_CANARY_LIVE`. Staat er `watchdog: PM_WDOG
+    guard: blind pets until the node proves liveness HOPOS_WD_ARMED`, after
+    DHCP and Hop's heartbeat `HOPOS_CANARY_LIVE`. If it says `watchdog: PM_WDOG
     reads 0x... 2 ms after FULL_RESET with 0xc0000 loaded: the counter
-    does not run` en `HOPOS_WD_NONE`, dan telt dit PM-blok ook gewapend
-    niet (WRCFG is dan weer clear); noteer de gelezen waarde. Op de Pi 5
-    (30-09) bleek dat de teller pas telt ná FULL_RESET, vandaar de
-    volgorde wapenen-dan-proeven. De echte toets: `hopos.wd`
-    niet zetten, Hop stoppen of de kabel eruit, en binnen ~12 s na de
-    eerste `HOPOS_CANARY_MISS` hoort de Pi zelf te herstarten.
-21. **VL805, de USB van de Pi 4** (gui-smaak, na de NIC en vóór de
-    zelftest; `board/rpi4/src/usb.rs`). De proef is een KOUDE boot: op
-    30-09 gaf die `firmware loaded by the VideoCore, version now 0x0`, een
-    SError in de zelftest (`vec 11`) en `timeout on HCRST clear`, terwijl
-    de warme flips van diezelfde dag werkten. De keten is sindsdien die
-    van Linux: de RC op met SCB0_SIZE naar het inbound-venster, de link,
-    de BAR's met de endpoint nog dicht, `NOTIFY_XHCI_RESET`, 1 ms stil,
-    dan om de 10 ms config 0x50 tot er een versie staat (hoogstens 1 s),
-    en pas dan memory-decode aan en de host naar de USB-taak. Verwacht,
-    koud en warm:
+    does not run` and `HOPOS_WD_NONE`, this PM block does not count even
+    when armed (WRCFG is clear again then); note the value read. On the Pi 5
+    (2026-09-30) it turned out the counter only counts after FULL_RESET,
+    hence the order arm-then-check. The real test: do not set `hopos.wd`,
+    stop Hop or pull the cable, and within ~12 s after the first
+    `HOPOS_CANARY_MISS` the Pi should restart by itself.
+21. **VL805, the USB of the Pi 4** (gui flavor, after the NIC and before
+    the self-test; `board/rpi4/src/usb.rs`). The test is a COLD boot: on
+    2026-09-30 it gave `firmware loaded by the VideoCore, version now 0x0`,
+    an SError in the self-test (`vec 11`) and `timeout on HCRST clear`, while
+    the warm flips of that same day worked. Since then the chain is Linux's:
+    the RC up with SCB0_SIZE to the inbound window, the link, the BARs with
+    the endpoint still closed, `NOTIFY_XHCI_RESET`, 1 ms quiet, then every
+    10 ms config 0x50 until a version is there (at most 1 s), and only then
+    memory decode on and the host to the USB task. Expect, cold and warm
+    (cold proven on hardware, P1g):
 
     ```
     usb: vl805 firmware 0x...... loaded by the VideoCore after N us (attempt 1, reply 0x0)
@@ -201,98 +208,109 @@ Per stap: wat er moet staan, en wat het betekent als het er niet staat.
     usb: vl805 xHCI 1.0, 32 slots, 5 ports, 32-byte contexts
     ```
 
-    Noteer N: dat is de meting die de wachttijd moet dragen (Linux rekent
-    op minder dan 1 ms). Een warme flip die een draaiende VL805 erft, zegt
-    `usb: vl805 firmware 0x... already loaded (attempt 1)`. Wat het
-    betekent als het anders gaat:
+    Note N: that is the measurement the wait time must carry (Linux counts
+    on less than 1 ms). A warm flip that inherits a running VL805 says
+    `usb: vl805 firmware 0x... already loaded (attempt 1)`. What it means if
+    it goes differently:
 
     - `usb: vl805 firmware still 0x0 N us after NOTIFY_XHCI_RESET
       (attempt 1, reply 0x..., MISC_CTRL 0x..., status 0x...)
-      HOPOS_USB_VL805` en daarna een regel met `(attempt 2)`: de eerste
-      keten kreeg geen firmware, de tweede begint weer bij PERST#. Staat de
-      tweede er met `loaded`, dan werkt USB, maar noteer beide regels:
-      alleen de tweede poging werkt, net als op de warme flips.
+      HOPOS_USB_VL805` and then a line with `(attempt 2)`: the first chain
+      got no firmware, the second starts again at PERST#. If the second
+      says `loaded`, USB works, but note both lines: only the second
+      attempt works, just as on the warm flips.
     - `usb: vl805: no firmware after 2 attempts, the xHCI registers stay
-      untouched HOPOS_USB_VL805` en `usb: no host controllers on this board
-      HOPOS_USB_NONE`: geen USB, maar ook geen SError en geen HCRST-timeout
-      meer. MISC_CTRL [31:27] hoort 0x11 (17, 4 GB) te zijn; de `reply` is
-      wat de firmware in de tag terugschreef.
-    - `usb: vl805: SError pending after <stap>; the first EL1 entry will
-      take it HOPOS_USB_SERROR`: die stap gaf de asynchrone abort die de
-      zelftest daarna als `vec 11` ziet (`the PCIe bring-up`,
-      `NOTIFY_XHCI_RESET` of `a config read of the VL805 version`). Zegt
-      hij `the boot, before any PCIe access`, dan was het niet de VL805.
-    - `usb: vl805 firmware handshake: <reden> (attempt N) HOPOS_USB_VL805`:
-      de mailbox nam de notify niet (`NOTIFY_XHCI_RESET refused by the
-      firmware`: een start4.elf zonder de tag).
+      untouched HOPOS_USB_VL805` and `usb: no host controllers on this board
+      HOPOS_USB_NONE`: no USB, but no SError and no HCRST timeout any more
+      either. MISC_CTRL [31:27] should be 0x11 (17, 4 GB); the `reply` is
+      what the firmware wrote back into the tag.
+    - `usb: vl805: SError pending after <step>; the first EL1 entry will
+      take it HOPOS_USB_SERROR`: that step caused the asynchronous abort that
+      the self-test then sees as `vec 11` (`the PCIe bring-up`,
+      `NOTIFY_XHCI_RESET` or `a config read of the VL805 version`). If it
+      says `the boot, before any PCIe access`, it was not the VL805.
+    - `usb: vl805 firmware handshake: <reason> (attempt N) HOPOS_USB_VL805`:
+      the mailbox did not take the notify (`NOTIFY_XHCI_RESET refused by the
+      firmware`: a start4.elf without the tag).
     - `usb: vl805: no enabled brcm,bcm2711-pcie in the DTB, PCIe not
-      touched`: de DTB mist de RC (QEMU, of een overlay).
+      touched`: the DTB lacks the RC (QEMU, or an overlay).
 
-## De eerste Pi 5-boot (30-09)
+## The first Pi 5 boot (2026-09-30)
 
-Na een gave boot tot `HOPOS_HOP_START` twee fouten, beide in deze boom
-gefikst en op de host en QEMU getoetst, nog niet op ijzer:
+After a clean boot up to `HOPOS_HOP_START`, two faults, both fixed in this
+tree and tested on the host and QEMU at the time, since then green on
+hardware (P1, 2026-10-03):
 
-- **De zelftest van de OS-core** gaf `timer`, `yield` én `kick` op 0 us
-  terug, de eerste twee als `Irq`. Niet een lijn die permanent aanstond:
-  `set_edge(166)` werd al vóór de enable gezet, de tik telde 58 NIC-
-  interrupts per seconde (LAN-ruis, geen storm) en `os(irq=0)`. Wel een
-  lijn die al pending stond toen de zelftest begon, in de boot, vóór de
-  executor ooit de dispatch draaide (stap 13). De soort van een lijn is
-  nu deel van de registratie (`cpu::irq::Trigger`), en een level-lijn
-  zonder ack die binnen één ronde blijft terugkomen gaat uit
+- **The OS core self-test** returned `timer`, `yield` and `kick` at 0 us,
+  the first two as `Irq`. Not a line that was permanently on:
+  `set_edge(166)` was already set before the enable, the tick counted 58 NIC
+  interrupts per second (LAN noise, no storm) and `os(irq=0)`. It was a
+  line that was already pending when the self-test started, in the boot,
+  before the executor had ever run the dispatch (step 13). The kind of a
+  line is now part of the registration (`cpu::irq::Trigger`), and a level
+  line without ack that keeps coming back within one round is turned off
   (`HOPOS_IRQ_STUCK`).
-- **Hop viel op EL1** (`esr=0x82000005 far=0x200`: de instructie-abort op
-  `VBAR_EL1 + 0x200`, dus de tweede fault). Een app draaide met de MMU
-  uit, dus op Device, en de A76 geeft op Device een alignment-fault bij
-  elke ongealigneerde toegang; QEMU-TCG toetst dat niet onder stage 2.
-  Sinds 30-09 zet `_start` van elke app een stage-1 aan (`applib::mmu`)
-  en vangt een vectortabel elke fault op EL1 (`CTRL_APP_FAULT_*`,
+- **Hop faulted at EL1** (`esr=0x82000005 far=0x200`: the instruction abort
+  at `VBAR_EL1 + 0x200`, so the second fault). An app ran with the MMU off,
+  so on Device memory, and the A76 gives an alignment fault on Device for
+  every unaligned access; QEMU TCG does not check that under stage 2. Since
+  2026-09-30 `_start` of every app turns on a stage-1 (`applib::mmu`) and a
+  vector table catches every fault at EL1 (`CTRL_APP_FAULT_*`,
   `tools/qemu-test-fault.sh`).
 
-## Bekende gaten
+## Known gaps
 
-- **De kick van de OS-core op ijzer** (29-09 gebouwd, alleen de kick naar
-  zichzelf bewezen, op QEMU `raspi4b`): het board geeft de rotatie SGI 8 als
-  32-bit GICD_SGIR-woord `(1 << (16 + cpu)) | 8` plus de PA van GICD_SGIR
-  (Pi 4 0xff84_1f00, Pi 5 0x10_7fff_9f00), en de switcher van een app-core
-  schrijft dat woord met de MMU uit. Waarom 8 en niet de 7 van Rockchip:
-  zie `board_raspi::KICK_SGI`. Nog te bewijzen, in deze volgorde:
-  1. de zelftest op ijzer (stap 13), Pi 4 en Pi 5;
-  2. de kick van een app-core: een app die HVC #6 doet (applib na een
-     TX-publicatie) of idle yieldt terwijl Hop op de OS-core draait. De
-     `HOPOS_TICK`-regel moet `ipi=` en `kicks=` zien oplopen; blijft `ipi`
-     0 en loopt `timer` op, dan bereikt de MMIO-schrijf van de app-core de
-     distributor niet (Device-attribuut met de MMU uit is het verwachte;
-     een ontbrekende `dsb` of een GICD die TF-A als Secure-only liet, niet);
-  3. de Pi 5: de GIC-400 zit achter de 40-bit-adressering (0x10_7fff_9000);
-     de switcher schrijft met een 64-bit adres, dus dat zou moeten werken,
-     maar het is de eerste MMIO van een app-core buiten de onderste 4 GB;
-  4. dat TF-A op beide Pi's de SGI's in Group 1 laat (de `plat/rpi`-BL31
-     heeft geen beveiligde interrupts): een kick die stil verdwijnt terwijl
-     GICD_CTLR 0x1 is, wijst hierop; dan een andere INTID proberen.
-- **App-cores na CPU_ON**: de Pi-ingang zet EL2 (VTTBR, CPTR, MDCR, HSTR)
-  alleen op core 0. Een app-core komt via PSCI direct in de trampoline van
-  `cpu::el2`; als die registers daar garbage zijn (UNKNOWN na reset), zit
-  de reparatie in `cpu::el2`, niet in het board.
-- **`cpu::idle` zet de event-stream in CNTKCTL_EL1**; onder E2H=0 geldt
-  voor EL2 CNTHCTL_EL2. De Pi-ingang zet die voor core 0 (1,2 ms op
-  54 MHz); andere EL2-boards (O6N, Altra) hebben hetzelfde nodig.
-- **GENET-interrupt** (Pi 4, SPI 157/158): niet bedraad, gepold.
-- **Framebuffer-console**: in de gui-smaak (`GUI=1 sh image/rpi5.sh`, of
-  `GUI=1 sh image/flip-bundle.sh rpi5` op een draaiende node), via `FB_ALLOC`
-  op de mailbox (board/raspi/src/vcfb.rs). Gemeten 30-09 op de Pi 5:
-  1920x1080, 16 bpp, `HOPOS_FB_CONSOLE`, en beide RP1-xHCI's `HOPOS_USB_UP`.
-  Kaal meldt de kern alleen of de firmware er een gaf.
-- **RNG200, PM-watchdog, klokknop** (30-09 geport, stap 18 tot 20): op de
-  host en op QEMU bewezen tot hun weigering, niet op ijzer. Nog te zien: dat
-  de RNG200 op beide Pi's binnen de warm-up levert, dat de PM-teller vóór
-  FULL_RESET al loopt (anders weigert de proef op ijzer ook), en dat een
-  node die geen aai meer krijgt echt reset. De DRBG van de kern is
-  gezaaid, maar nog niemand trekt eruit: het zaad voor de slots staat in
-  `ALLES.md` (Overal).
-- **NVMe (Pi 5 pcie1)**: bewust niet geport. `arm_freq=1500` is de
-  thermische cap op de Pi 5; het klokbeleid volgt hem.
-- **QEMU `raspi4b`** heeft geen GENET en geen PSCI; `tools/qemu-rpi4-test.sh`
-  bewijst de boot tot de tik en de overgang van de OS-core met de kick naar
-  zichzelf, niet het net, een app-core of een kick van een andere core.
+- **The OS core kick on hardware** (built 2026-09-29, first proven only as
+  the kick to itself, on QEMU `raspi4b`; hardware IRQs including the kick
+  are green on both Pi's since P1, 2026-10-03): the board gives the rotation
+  SGI 8 as a 32-bit GICD_SGIR word `(1 << (16 + cpu)) | 8` plus the PA of
+  GICD_SGIR (Pi 4 0xff84_1f00, Pi 5 0x10_7fff_9f00), and the switcher of an
+  app core writes that word with the MMU off. Why 8 and not Rockchip's 7:
+  see `board_raspi::KICK_SGI`. What had to be proven, in this order:
+  1. the self-test on hardware (step 13), Pi 4 and Pi 5;
+  2. the kick from an app core: an app that does HVC #6 (applib after a
+     TX publication) or idles with a yield while Hop runs on the OS core.
+     The `HOPOS_TICK` line must show `ipi=` and `kicks=` going up; if `ipi`
+     stays 0 and `timer` goes up, the MMIO write from the app core does not
+     reach the distributor (the Device attribute with the MMU off is the
+     expected one; a missing `dsb` or a GICD that TF-A left Secure-only is
+     not);
+  3. the Pi 5: the GIC-400 sits behind the 40-bit addressing
+     (0x10_7fff_9000); the switcher writes with a 64-bit address, so that
+     should work, but it is the first MMIO from an app core outside the
+     lowest 4 GB;
+  4. that TF-A leaves the SGIs in Group 1 on both Pi's (the `plat/rpi` BL31
+     has no secure interrupts): a kick that silently disappears while
+     GICD_CTLR is 0x1 points to this; then try a different INTID.
+
+  Open (Pi 4, 2026-10-04): on the WFE path of the OS core, 4 of 25 runs
+  with a vitals against the applib of HEAD had one dial of 0.75 to 1.3 ms:
+  the kernel picked up the SYN one event-stream period after the app's
+  kick (see ALLES.md).
+- **App cores after CPU_ON**: the Pi entry sets EL2 (VTTBR, CPTR, MDCR, HSTR)
+  only on core 0. An app core comes via PSCI directly into the trampoline of
+  `cpu::el2`; if those registers are garbage there (UNKNOWN after reset),
+  the fix belongs in `cpu::el2`, not in the board.
+- **`cpu::idle` sets the event stream in CNTKCTL_EL1**; under E2H=0,
+  CNTHCTL_EL2 applies to EL2. The Pi entry sets that for core 0 (1.2 ms at
+  54 MHz); other EL2 boards (O6N, Altra) need the same.
+- **GENET interrupt** (Pi 4, SPI 157/158): not wired, polled (as in Go).
+- **Framebuffer console**: in the gui flavor (`GUI=1 sh image/rpi5.sh`, or
+  `GUI=1 sh image/flip-bundle.sh rpi5` on a running node), via `FB_ALLOC`
+  on the mailbox (board/raspi/src/vcfb.rs). Measured 2026-09-30 on the Pi 5:
+  1920x1080, 16 bpp, `HOPOS_FB_CONSOLE`, and both RP1 xHCIs `HOPOS_USB_UP`.
+  Since a reflash the Pi 5 firmware refuses every framebuffer (0x80000001);
+  on the Pi 4 the screen works, and its VL805 xHCI too (P2g, 2026-10-03).
+  Without the gui flavor the kernel only reports whether the firmware gave
+  one.
+- **RNG200, PM watchdog, clock knob** (ported 2026-09-30, steps 18 to 20):
+  proven on the host and on QEMU up to their refusal, and on hardware on both
+  Pi's since P1 (2026-10-03: hardware RNG for the kernel and the slots,
+  watchdog with canary, clock policy). Still to see: that a node that no
+  longer gets a pet really resets.
+- **NVMe (Pi 5 pcie1)**: deliberately not ported; the Pi's have no disk.
+  `arm_freq=1500` is the thermal cap on the Pi 5; the clock policy follows
+  it.
+- **QEMU `raspi4b`** has no GENET and no PSCI; `tools/qemu-rpi4-test.sh`
+  proves the boot up to the tick and the OS core transition with the kick to
+  itself, not the network, an app core or a kick from another core.

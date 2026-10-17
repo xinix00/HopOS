@@ -1,43 +1,59 @@
-# Gedeelde allocator, 1 oktober 2026
+# Shared allocator, 2026-10-01
 
-`heap` bevat de allocator met vrije lijsten en grenslabels die eerder in
-`applib::heap` stond. Apps leveren hun SMP-core-identiteit; `board::heap`
-gebruikt dezelfde implementatie voor de kern. Alleen de primaire kernexecutor
-alloceert; ISR's en geparkeerde secundaire cores doen dat niet.
+`heap` contains the allocator with free lists and boundary tags that used to
+live in `applib::heap`. Apps supply their SMP core identity (the trait
+`heap::CoreId`); `board::heap` uses the same implementation for the kernel.
+Only the primary kernel executor allocates; ISRs and parked secondary cores
+do not.
 
-Aanleiding: tijdens de Lumen-proef op de O6N stopte OP_SYNC met
-`out of memory (483328 bytes)`. De oude kernallocator nam uitsluitend het
-laatst uitgegeven blok terug. Bij door elkaar lopende metadata-, netwerk- en
-I/O-allocaties bleef vrijgegeven geheugen bezet. De TCP-console viel daarna
-ook uit. Alleen meer kern-RAM geven lost die groei niet op.
+Cause: during the Lumen test on the O6N, OP_SYNC stopped with
+`out of memory (483328 bytes)`. The old kernel allocator only took back the
+most recently handed-out block. With interleaved metadata, network and I/O
+allocations, freed memory stayed occupied. The TCP console then failed too.
+Only giving the kernel more RAM does not solve that growth.
 
-De gedeelde allocator voegt aangrenzende vrije blokken samen en respecteert
-het bestaande RAM-plafond. Uitlijning is begrensd op 4096 bytes, zoals in de
-app-allocator. Er is geen tweede kopie van het algoritme. Het publieke
-`applib::heap::Heap`-contract blijft via een type-alias bestaan; de globale
-allocator blijft eigendom van de betreffende binary.
+The shared allocator merges adjacent free blocks and respects the existing
+RAM ceiling. Alignment is capped at 4096 bytes (`MAX_ALIGN`), as in the app
+allocator. There is no second copy of the algorithm. The public
+`applib::heap::Heap` contract stays as a type alias; the global allocator
+stays owned by the binary in question.
 
-Validatie: tien allocatortests, inclusief 80.000 deterministische gemengde
-bewerkingen, vier gelijktijdige threads en vrijgave door een andere thread.
-De board-regressietest herhaalt 2.000 metadata/netwerkcycli in 4 MiB; na elke
-cyclus is alles terug en alle 6.000 allocaties slagen. Board en applib-tests
-slagen, evenals Clippy. Lumen draait met deze kernel en app in QEMU: 43
-controles voor HTTP, WebDAV, beheer en persistentie na recreate slagen.
-Ook 187 kern-tests plus twee doc-tests slagen. De QEMU-warmflip behoudt Hop,
-een bestaande uitgaande TCP-verbinding, alle vier NAT-flows en de HopFS-generatie;
-na de flip kan hij opnieuw een app plaatsen. De rebootproef vindt de zwarte doos.
-Die flipproef gebruikte `HOP_PATCH=0 HOP_DIR=/tmp/lumen-hop-hardware` om de
-bekende Hop-ELF te behouden; de reguliere patch-helper heeft met deze oude Hop-pin
-een Lean-versiemismatch en is niet voor deze proef gebruikt.
+Validation: ten allocator tests, including 80,000 deterministic mixed
+operations, four concurrent threads and freeing from another thread. The
+board regression test repeats 2,000 metadata/network cycles in 4 MiB; after
+every cycle everything is back and all 6,000 allocations succeed. Board and
+applib tests pass, as does Clippy. Lumen runs with this kernel and app in
+QEMU: 43 checks for HTTP, WebDAV, management and persistence after recreate
+pass. 187 kernel tests plus two doc tests also pass. The QEMU warm flip keeps
+Hop, an existing outgoing TCP connection, all four NAT flows and the HopFS
+generation; after the flip it can place an app again. The reboot test finds
+the black box. That flip test used `HOP_PATCH=0 HOP_DIR=/tmp/lumen-hop-hardware`
+to keep the known Hop ELF; the regular patch helper has a lean version
+mismatch with this old Hop pin and was not used for this test.
 
-Op de fysieke O6N had de oude kernel zijn heap al uitgeput toen de fix klaar
-was. Na een fysieke herstart zijn de bundels `lumen-heap` en vervolgens
-`lumen-heap-recover` bevestigd geland. Lumen-kandidaat 15 hervat vanaf een
-geverifieerd checkpoint en schrijft weer nieuwe beelden naar de NVMe.
-De tweede flip liet de bestaande VPU-herstelroutine een vastgelopen sessie
-opruimen. Langdurige hardwarevalidatie van de geheugenfix loopt nog.
+On the physical O6N the old kernel had already exhausted its heap when the
+fix was ready. After a physical restart the bundles `lumen-heap` and then
+`lumen-heap-recover` were confirmed landed. Lumen candidate 15 resumes from a
+verified checkpoint and writes new images to the NVMe again. The second flip
+let the existing VPU recovery routine clean up a stuck session. Long-running
+hardware validation of the memory fix is still in progress.
 
-Herhalen:
+## Size classes, 2026-10-03
+
+With only one free list per power of two (32 to 63 bytes in one list), a
+request for 48 bytes walked past every free 32-byte block. JSON work leaves
+thousands of those behind: Stulp measured 505 ns per free plus allocation
+with 4547 free blocks on the host, and on the LicheeRV that became a 250 ms
+bootstrap and half-second callbacks. Since 2026-10-03 every size up to and
+including `SMALL_LIMIT` (1 KiB) has an exact class (a multiple of the 16-byte
+grain), so the first block in its list always fits; above that there is one
+class per bit position. `alloc` searches first-fit in the class of the
+request and above it takes the first block that fits via a bitmap of
+non-empty classes. That made the same case 53 ns
+([apps.md](apps.md), "The allocator counts"). The heap crate now has eleven
+tests.
+
+Reproduce:
 
 ```sh
 cargo test -p heap -p board -p applib

@@ -1,75 +1,76 @@
 # cloudflared-lean
 
-Een node achter NAT publiek bereikbaar via een Cloudflare-tunnel, zonder
-inkomende poort. De app belt uit naar de edge van Cloudflare en praat het
-tunnelprotocol zelf, op applib en de lean-crates. Voor de volledige
-cloudflared (zijn eigen CLI in een slot) zie `go/cloudflared`.
+Makes a node behind NAT publicly reachable through a Cloudflare tunnel,
+without an inbound port. The app dials out to Cloudflare's edge and speaks the
+tunnel protocol itself, on applib and the lean crates. For the full
+cloudflared (its own CLI in a slot) see `go/cloudflared`.
 
 ```
-4,44 MB RAM   cloudflared-lean in Go (TamaGo, gemeten 19-08)
-  530 kB      dit image, geladen deel (.text, .rodata, .data; release, 30-09)
+4.44 MB RAM   cloudflared-lean in Go (TamaGo, measured 2026-08-19)
+  530 kB      this image, loaded part (.text, .rodata, .data; release, 2026-09-30)
 ```
 
-## Wat het is
+## What it is
 
-| laag | wie | doet |
+| layer | who | does |
 | --- | --- | --- |
-| TCP | `applib::appnet` | de eigen netstack van het slot (leannet) |
-| TLS 1.3 | leanhttps over leantls | SNI `h2.cftunnel.com`, geen ALPN, keten tegen Cloudflare's eigen drie CA's (`src/cfroots.pem`) |
-| HTTP/2 als server | leanh2 | de edge is de client: hij stuurt de preface, pingt en opent de streams |
-| registratie | `src/register.rs`, `src/capnp.rs` | Cap'n Proto op de control-stream: bootstrap, `registerConnection`, het antwoord |
-| ingress | `src/ingress.rs`, `src/regex.rs` | de routeertabel: hostname exact of `*.x`, pad als reguliere expressie, eerste regel wint |
-| oorsprong | leanhttp, `src/origin.rs` | elk verzoek als HTTP/1.1 naar de lokale dienst, de koppen terug in de bundel die de edge eist |
+| TCP | `applib::appnet` | the slot's own netstack (leannet) |
+| TLS 1.3 | leanhttps over leantls | SNI `h2.cftunnel.com`, no ALPN, chain checked against Cloudflare's own three CAs (`src/cfroots.pem`) |
+| HTTP/2 as server | leanh2 | the edge is the client: it sends the preface, pings and opens the streams |
+| registration | `src/register.rs`, `src/capnp.rs` | Cap'n Proto on the control stream: bootstrap, `registerConnection`, the reply |
+| ingress | `src/ingress.rs`, `src/regex.rs` | the routing table: hostname exact or `*.x`, path as a regular expression, first rule wins |
+| origin | leanhttp, `src/origin.rs` | each request as HTTP/1.1 to the local service, the headers back in the bundle the edge expects |
 
-De vier dingen die het protocol anders doet dan je zou denken (de edge is de
-HTTP/2-client, geen ALPN, een niet-publiek certificaat, geen stream zonder
-PING-antwoord) staan in de README van de Go-voorganger en in de `//!`-koppen
-van `edge.rs` en `tunnel.rs`. Op 30-09 is de protocolkern (TLS met de
-ketentoets, leanh2 als server, de control-stream, de registratie) vanaf de
-host tegen `region1.v2.argotunnel.com:7844` gedraaid met een verzonnen token:
-de edge antwoordde netjes `Unauthorized: Invalid tunnel secret` met "niet
-opnieuw". Met een echt token is hij nog niet gedraaid (dat kan alleen op ijzer
-met het token van het dashboard).
+The four things the protocol does differently than you would expect (the edge
+is the HTTP/2 client, no ALPN, a non-public certificate, no stream without a
+PING reply) are in the README of the Go predecessor and in the `//!` headers
+of `edge.rs` and `tunnel.rs`. On 2026-09-30 the protocol core (TLS with the
+chain test, leanh2 as server, the control stream, the registration) ran from
+the host against `region1.v2.argotunnel.com:7844` with a made-up token: the
+edge replied cleanly with `Unauthorized: Invalid tunnel secret` and "do not
+retry". It has not yet run with a real token (that can only be done on
+hardware with the token from the dashboard).
 
-Een remote-managed tunnel krijgt zijn ingress van het dashboard geduwd (een
-stream met `update-configuration`); de tabel wisselt dan in zijn geheel om, of
-blijft staan als de push kapot is (de edge hoort waarom). Vóór de eerste push
-geldt `TUNNEL_INGRESS` of één regel naar `TUNNEL_URL`.
+A remote-managed tunnel gets its ingress pushed from the dashboard (a stream
+with `update-configuration`); the table is then swapped as a whole, or stays
+as it was if the push is broken (the edge is told why). Before the first push
+`TUNNEL_INGRESS` applies, or a single rule to `TUNNEL_URL`.
 
-## De env
+## The env
 
-| sleutel | standaard | wat |
+| key | default | what |
 | --- | --- | --- |
-| `TUNNEL_TOKEN` | (verplicht) | het token van de named tunnel uit het dashboard (Zero Trust, Networks, Tunnels, "Install connector": de lange base64 na `--token`) |
-| `DNS` | (geen) | de DNS-server van het slot, voor de edge-namen en voor diensten met een naam; zonder `DNS` alleen IP-adressen (zie `TUNNEL_EDGE`) |
-| `TUNNEL_URL` | `http://$HOPOS_HOST`, anders `http_status:503` | waar verkeer heen gaat vóór de eerste push |
-| `TUNNEL_INGRESS` | (geen) | een eigen tabel als JSON, in de vorm van het dashboard: `{"ingress":[{"hostname":"…","path":"…","service":"http://…"},{"service":"http_status:404"}]}`; wint van `TUNNEL_URL`, en elke push wint van deze |
-| `TUNNEL_CONNECTIONS` | `4` | aantal edge-verbindingen, 1 tot 8 (cloudflared's standaard is 4) |
-| `TUNNEL_EDGE` | `region1.v2.argotunnel.com,region2.v2.argotunnel.com` | de edge, als namen of IPv4-adressen met komma's; verbinding `i` begint bij naam `i` en schuift door bij elke nieuwe poging |
+| `TUNNEL_TOKEN` | (required) | the token of the named tunnel from the dashboard (Zero Trust, Networks, Tunnels, "Install connector": the long base64 after `--token`) |
+| `DNS` | (none) | the slot's DNS server, for the edge names and for services with a name; without `DNS` only IP addresses (see `TUNNEL_EDGE`) |
+| `TUNNEL_URL` | `http://$HOPOS_HOST`, otherwise `http_status:503` | where traffic goes before the first push |
+| `TUNNEL_INGRESS` | (none) | a custom table as JSON, in the dashboard's form: `{"ingress":[{"hostname":"…","path":"…","service":"http://…"},{"service":"http_status:404"}]}`; wins over `TUNNEL_URL`, and every push wins over this |
+| `TUNNEL_CONNECTIONS` | `4` | number of edge connections, 1 to 8 (cloudflared's default is 4) |
+| `TUNNEL_EDGE` | `region1.v2.argotunnel.com,region2.v2.argotunnel.com` | the edge, as names or IPv4 addresses separated by commas; connection `i` starts at name `i` and moves on with every new attempt |
 
-Het token is een geheim: het staat alleen in de jobspec die naar de node gaat,
-nooit in deze repo, en de app zet het nooit in een logregel.
+The token is a secret: it is only in the jobspec that goes to the node, never
+in this repo, and the app never puts it in a log line.
 
-De dienst in een regel is `http://host[:poort][/voorvoegsel]` (de host een
-IPv4-adres of een naam via `DNS`), of `http_status:<code>`. Een dienst in een
-ander slot op dezelfde node is `http://10.100.0.<slot+1>:<poort>`; een dienst
-op het LAN zijn eigen adres.
+The service in a rule is `http://host[:port][/prefix]` (the host an IPv4
+address or a name via `DNS`), or `http_status:<code>`. A service in another
+slot on the same node is `http://10.100.0.<slot+1>:<port>`; a service on the
+LAN uses its own address.
 
 ## Markers
 
-| marker | wanneer |
+| marker | when |
 | --- | --- |
-| `HOPOS_CFTUNNEL_UP edge=<ip>:7844 conn=<uuid> colo=<code> index=<i> up=<n>` | een verbinding is geregistreerd; `conn` is de verbindings-id van de edge |
-| `HOPOS_CFTUNNEL_REQ n=<n>` | een doorgegeven verzoek (methode, host, pad zonder query, dienst, status): de eerste zestien elk, daarna elk honderdste |
-| `HOPOS_CFTUNNEL_REQ_FAIL n=<n>` | een verzoek dat niet bij de dienst aankwam (zelfde ritme) |
-| `HOPOS_CFTUNNEL_CONFIG version=<v> rules=<n>` | de tabel van de start, en elke toegepaste push, met de regels eronder |
-| `HOPOS_CFTUNNEL_CONFIG_FAIL version=<v>` | een geweigerde push; `v` is de versie die blijft staan |
-| `HOPOS_CFTUNNEL_RETRY index=<i> up=<n>` | een verbinding viel of kwam niet op, met de reden en de wachttijd |
-| `HOPOS_CFTUNNEL_GIVEUP index=<i>` | de edge zei "niet opnieuw" (een ingetrokken of verkeerd token) |
-| `HOPOS_CFTUNNEL_FAIL <reden>` | de app stopt: de env is onbruikbaar, of de edge weigerde elke verbinding met "niet opnieuw" |
-| `HOPOS_APP_RNG source=<bron>` | eenmalig, van applib: waar de willekeur van TLS vandaan komt (`hardware` of `jitter`, het zaad van de kern gemengd met eigen jitter); `HOPOS_APP_RNG_NONE` als de kern geen zaad legt |
+| `HOPOS_CFTUNNEL_UP edge=<ip>:7844 conn=<uuid> colo=<code> index=<i> up=<n>` | a connection is registered; `conn` is the edge's connection id |
+| `HOPOS_CFTUNNEL_REQ n=<n>` | a forwarded request (method, host, path without query, service, status): each of the first sixteen, then every hundredth |
+| `HOPOS_CFTUNNEL_REQ_FAIL n=<n>` | a request that did not reach the service (same rhythm) |
+| `HOPOS_CFTUNNEL_CONFIG version=<v> rules=<n>` | the table at start, and every applied push, with the rules below it |
+| `HOPOS_CFTUNNEL_CONFIG_FAIL version=<v>` | a rejected push; `v` is the version that stays |
+| `HOPOS_CFTUNNEL_RETRY index=<i> up=<n>` | a connection dropped or did not come up, with the reason and the wait |
+| `HOPOS_CFTUNNEL_GIVEUP index=<i>` | the edge said "do not retry" (a revoked or wrong token) |
+| `HOPOS_CFTUNNEL_STOP` | the kernel asked the app to stop (graceful stop, `HOPOS_APP_STOP`): every connection closes and none is reopened |
+| `HOPOS_CFTUNNEL_FAIL <reason>` | the app stops: the env is unusable, or the edge refused every connection with "do not retry" |
+| `HOPOS_APP_RNG source=<source>` | once, from applib: where the TLS randomness comes from (`hardware` or `jitter`, the kernel's seed mixed with its own jitter); `HOPOS_APP_RNG_NONE` if the kernel provides no seed |
 
-## Bouwen en toetsen
+## Build and test
 
 ```sh
 cargo test -p cloudflared-lean
@@ -78,27 +79,27 @@ cargo build --release --target aarch64-unknown-none-softfloat -p cloudflared-lea
 rust-objcopy --strip-debug target/aarch64-unknown-none-softfloat/release/cloudflared-lean cloudflared-lean.elf
 ```
 
-De host-toetsen leggen de protocollagen vast: de registratieberichten en de
-antwoorden byte voor byte tegen wat de Go-voorganger maakte, het token en de
-Cap'n Proto-rondgang uit de Go-toetsen, de ingress-regels uit de Go-toetsen,
-de kopbundel tegen Go, en de drie CA's door leantls.
+The host tests pin down the protocol layers: the registration messages and
+replies byte for byte against what the Go predecessor produced, the token and
+the Cap'n Proto round trip from the Go tests, the ingress rules from the Go
+tests, the header bundle against Go, and the three CAs through leantls.
 
-## Op de O6N
+## On the O6N
 
-De O6N staat op `192.168.1.205`, Hop luistert op `:9080`. Zonder `hop`-CLI gaat
-de jobspec met `curl` naar de leader (de bench-node draait met
-`hopos.insecure=1`; met `hopos.apikey` vraagt de API een
-`X-Hop-Auth`-handtekening die curl niet zelf zet).
+The O6N is at `192.168.1.205`, Hop listens on `:9080`. Without the `hop` CLI
+the jobspec goes to the leader with `curl` (the bench node runs with
+`hopos.insecure=1`; with `hopos.apikey` the API requires an `X-Hop-Auth`
+signature that curl does not set by itself).
 
-1. Zet het image op een HTTP-server die de node kan bereiken, bijvoorbeeld op
-   de laptop naast het board:
+1. Put the image on an HTTP server the node can reach, for example on the
+   laptop next to the board:
 
    ```sh
    python3 -m http.server 8000 --bind 0.0.0.0
    ```
 
-2. Plaats hem (`LAPTOP` is het adres van de laptop, het token uit het
-   dashboard, `DNS` de resolver van het LAN of een publieke):
+2. Place it (`LAPTOP` is the laptop's address, the token from the dashboard,
+   `DNS` the LAN's resolver or a public one):
 
    ```sh
    curl -X POST -H 'Content-Type: application/json' \
@@ -110,54 +111,55 @@ de jobspec met `curl` naar de leader (de bench-node draait met
      http://192.168.1.205:9080/v1/jobs
    ```
 
-   Geen `ports`: er komt niets binnen, de tunnel belt uit. 32 MiB is ruim (het
-   image is een halve megabyte; de rest is de netstack, vier verbindingen en
-   hun HTTP/2-vensters). `TUNNEL_URL` hier wijst naar welcome in slot 2; zet
-   het op de dienst die je wilt laten zien, of laat het dashboard de ingress
-   duwen.
+   No `ports`: nothing comes in, the tunnel dials out. 32 MiB is plenty (the
+   image is half a megabyte; the rest is the netstack, four connections and
+   their HTTP/2 windows). `TUNNEL_URL` here points to welcome in slot 2; set
+   it to the service you want to expose, or let the dashboard push the
+   ingress.
 
-3. Op de console: `HOPOS_CFTUNNEL_CONFIG version=0`, dan vier keer
-   `HOPOS_CFTUNNEL_UP edge=…:7844 conn=… colo=AMS`, en na een push van het
-   dashboard `HOPOS_CFTUNNEL_CONFIG version=<n>` met de regels. Een bezoek aan
-   de publieke hostname geeft `HOPOS_CFTUNNEL_REQ n=1`.
+3. On the console: `HOPOS_CFTUNNEL_CONFIG version=0`, then four times
+   `HOPOS_CFTUNNEL_UP edge=…:7844 conn=… colo=AMS`, and after a push from the
+   dashboard `HOPOS_CFTUNNEL_CONFIG version=<n>` with the rules. A visit to
+   the public hostname gives `HOPOS_CFTUNNEL_REQ n=1`.
 
-4. Weg: `curl -X DELETE http://192.168.1.205:9080/v1/jobs/cloudflared-lean`.
-   De edge ziet de verbindingen vallen en haalt ze uit de rotatie.
+4. Remove: `curl -X DELETE http://192.168.1.205:9080/v1/jobs/cloudflared-lean`.
+   The app gets a graceful stop (`HOPOS_APP_STOP`, then `HOPOS_CFTUNNEL_STOP`)
+   and closes every connection; the edge sees them drop and takes them out
+   of rotation.
 
-Een verkeerd token geeft per verbinding `HOPOS_CFTUNNEL_GIVEUP` (de edge zegt
-`Unauthorized: Invalid tunnel secret`) en daarna `HOPOS_CFTUNNEL_FAIL`. Staat
-de wandklok van de kern nog niet (geen SNTP), dan zegt `HOPOS_CFTUNNEL_RETRY`
-dat het certificaat van de edge nog niet te toetsen is, en probeert hij het
-met terugval opnieuw.
+A wrong token gives `HOPOS_CFTUNNEL_GIVEUP` per connection (the edge says
+`Unauthorized: Invalid tunnel secret`) and then `HOPOS_CFTUNNEL_FAIL`. If the
+kernel's wall clock is not set yet (no SNTP), `HOPOS_CFTUNNEL_RETRY` says the
+edge's certificate cannot be checked yet, and it retries with backoff.
 
-## Wat het (nog) niet draagt
+## What it does not (yet) carry
 
-Bewust weigeren met een reden is duidelijker dan half werken:
+Refusing deliberately with a reason is clearer than half working:
 
-- **Websockets**: een 502 met een reden; het pad bestaat in leanh2, maar
-  zonder toets tegen een echte websocket-oorsprong beloven we het niet (als in
-  Go).
-- **Kale TCP-stromen** (WARP, `cloudflared access`): 502 (als in Go).
-- **https-oorsprongen**: vraagt leanhttps plus een keuze over
-  certificaatverificatie (als in Go).
-- **De quic-transport**, metrics, auto-update, diagnostiek (als in Go).
-- **Het SRV-record** `_v2-origintunneld._tcp.argotunnel.com`: de resolver van
-  applib vraagt alleen A-records, en één adres per naam. De twee vaste
-  regionamen zijn waar het SRV-record naar wijst; een nieuwe poging vraagt
-  opnieuw en krijgt dan vaak een ander adres.
-- **Een nette afmelding** (`unregisterConnection`): de kern stopt een slot met
-  de kill-vlag, zonder afscheidsronde, dus er is geen moment om hem te sturen.
-  De Go-voorganger had hem wel, maar riep hem nergens aan.
-- **Een stiltetermijn op de body van de dienst**: na de antwoordkop wacht de
-  tunnel zo lang als de dienst erover doet (als in Go); een dienst die midden
-  in een body stilvalt, houdt die ene stream vast.
+- **Websockets**: a 502 with a reason; the path exists in leanh2, but without
+  a test against a real websocket origin we do not promise it (as in Go).
+- **Raw TCP streams** (WARP, `cloudflared access`): 502 (as in Go).
+- **https origins**: needs leanhttps plus a decision about certificate
+  verification (as in Go).
+- **The quic transport**, metrics, auto-update, diagnostics (as in Go).
+- **The SRV record** `_v2-origintunneld._tcp.argotunnel.com`: applib's
+  resolver only asks for A records, and one address per name. The two fixed
+  region names are what the SRV record points to; a new attempt asks again
+  and then often gets a different address.
+- **A clean unregistration** (`unregisterConnection`): on a graceful stop the
+  app closes each connection (`HOPOS_CFTUNNEL_STOP`), but does not send
+  `unregisterConnection` first. The Go predecessor had it, but never called
+  it.
+- **An idle timeout on the service's body**: after the response header the
+  tunnel waits as long as the service takes (as in Go); a service that goes
+  quiet in the middle of a body holds that one stream.
 
-## Herkomst
+## Origin
 
-Deze code is nieuw. Wat eruit is overgenomen zijn feiten, niet regels: de
-kopnamen, de interface- en methode-id's van `RegistrationServer`, de
-struct-layouts en de drie CA-certificaten, alle uit de gepinde
-[cloudflared](https://github.com/cloudflare/cloudflared) (Apache 2.0) en
-capnproto2's `rpc.capnp`, via de Go-voorganger. De naam is
-`cloudflared-lean` en niet `cloudflared`: Apache 2.0 geeft geen merkrechten,
-en dit is niet hun build.
+This code is new. What was taken over are facts, not lines: the header names,
+the interface and method ids of `RegistrationServer`, the struct layouts and
+the three CA certificates, all from the pinned
+[cloudflared](https://github.com/cloudflare/cloudflared) (Apache 2.0) and
+capnproto2's `rpc.capnp`, via the Go predecessor. The name is
+`cloudflared-lean` and not `cloudflared`: Apache 2.0 grants no trademark
+rights, and this is not their build.

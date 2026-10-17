@@ -156,8 +156,11 @@ Remaining unknowns, in order:
    HOP's masquerade. quic-go already warns it cannot grow its receive buffer
    (`wanted 7168 kiB, got 0`), which is harmless on http2.
    `TUNNEL_TRANSPORT_PROTOCOL=quic` to try it.
-2. **Graceful shutdown.** HOP's kill is abrupt (kill flag → `EXITED` → CPU_OFF),
-   so `graceShutdownC` never closes and the connector does not deregister; the
+2. **Graceful shutdown.** Since 2026-10-05 the kernel gives a stopping app a
+   grace period (the milliseconds in `CTRL_KILL`; Rust apps hear it as
+   `HOPOS_APP_STOP`), but the Go SDK does not know that doorbell: it reads the
+   kill flag as "not 0" and stops at once (see [docs/go-apps.md](../../docs/go-apps.md)).
+   So `graceShutdownC` never closes and the connector does not deregister; the
    edge notices by itself.
 3. **Trust store** worked out: there is no `/etc/ssl`, so `x509.SystemCertPool()`
    is empty and the app imports `golang.org/x/crypto/x509roots/fallback` — the

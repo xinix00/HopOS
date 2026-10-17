@@ -1,310 +1,340 @@
-# Mac mini M4 op HopOS v3
+# Mac mini M4 on HopOS v3
 
-De Mac mini M4 (Apple t8132, J773g, Mac16,10: 6 E-cores "sawtooth" in
-cluster 0, 4 P-cores "everest" in cluster 1, 24 GB vanaf 1 TiB, een Broadcom
-57762 achter een Apple-PCIe-rootpoort, de SSD achter de ANS-coprocessor).
-Alles hieronder is op de host getest en bouwt voor het target
-(`image/apple-m4.sh` levert het raw image). Er is geen QEMU-model van de M4;
-niets ervan heeft in v3 op ijzer gedraaid. De gedateerde lessen (28-08 tot
-04-09) staan in het commentaar van de code.
+The Mac mini M4 (Apple t8132, J773g, Mac16,10: 6 E-cores "sawtooth" in
+cluster 0, 4 P-cores "everest" in cluster 1, 24 GB from 1 TiB, a Broadcom
+57762 behind an Apple PCIe root port, the SSD behind the ANS coprocessor).
+Everything below is tested on the host and builds for the target
+(`image/apple-m4.sh` produces the raw image). There is no QEMU model of the
+M4; none of it has run on hardware in v3. The dated lessons (2026-08-28 to
+2026-09-04) are in the comments of the code.
 
-## Wat er is
+## What exists
 
-| Deel | Waar | Getest |
+| Part | Where | Tested |
 | --- | --- | --- |
-| ADT-lezer: nodes, properties, paden, `-`/`_` gelijk, de ranges-vertaling, diepte begrensd | `fw/src/adt.rs` | 9 host-tests (plus afkapping op elke byte en een te diepe boom) |
-| boot_args-lezer: RAM-contract, framebuffer, het ADT-adres met de virt-naar-fys-omrekening modulo 2^64 (30-08) | `fw/src/xnuboot.rs` | 3 host-tests met de getallen van 29-08 en de twee vormen van virt_base |
-| GPT: tabel lezen, het grootste gat TUSSEN of NA de partities | `fw/src/gpt.rs` | 5 host-tests (de echte M4-tabel van 30-08) |
-| AIC als `cpu::irq::Controller` (claim = ack, complete = masker open, het 4-bit doel), plus de fast IPI (kick, ack) | `driver/aic` | 6 host-tests op een nep-registerblok |
-| tg3 (BCM57762): reset, MAC, MDIO/PHY, ringen, `netdev::Device`, INTx met tagged status (ack = mailbox dicht, heropenen op de tag bij een lege ring, HOSTCC_MODE_NOW) | `driver/nic/tg3` | 24 host-tests, o.a. de drie lessen van 29-08 (INDIR_ACCESS, PCI_COMMAND, NIC_ADDR van de std-ring), FCS, en ack/heropenen op de tag |
-| RTKit-mailbox (ASC) en de SART v3 | `driver/rtkit` | 16 host-tests tegen een nep-coprocessor |
-| SMC: sleutels, floats, sensoren, de warmste | `driver/smc` | 7 host-tests |
-| ANS-NVMe: het ANS-transport onder de NVMe-core (lineaire SQ, TCB's, NVMMU, coprocessor), de GPT als capaciteit, het schrijfvenster, nette shutdown | `driver/nvme/src/apple.rs` | 7 host-tests op de nep-controller van de core: de vier ANS-lessen, secure-bar, CID en TCB per slot met de invalidatie, weigering buiten of zonder venster, 512-naar-4K, een omgevallen coprocessor; tickets en read-ahead in de core-toetsen |
-| Board: bootstub, VHE-ingang, 48-bit-map met PXN, console, boot_args en ADT, cores met klasse, de CPU_ON-haak, AIC, timer-FIQ, fast IPI, PCIe-bring-up, tg3 met zijn INTx-lijn, ANS, SMC, watchdogs, p-states en hun wachter, het config-venster, slot-plan met voorproef | `board/apple` | 23 host-tests (map en PXN, plan, pool uit het contract, tunables, os-core-keuze, config-venster, watchdog-alarm, p-state-plafond, `hopos.cages`, `hopos.nicirq`) |
-| OS-core-rotatie voor `AppleVhe`: de fast IPI als bel, de ack op EL2, de FIQ als `Back::Timer`/`Back::Ipi`; de Apple-kick in de switcher; de CPU_ON-haak en de SCTLR-wis in `cpu::smp`; de VHE-bewuste event-stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host-tests (het kick-woord, de vectorindex, de haak, de stream-bits); de gedeelde paden op QEMU (virt, UEFI, UEFI+VHE) |
-| Linkscript: raw image op 0x101_0000_0000, stub op 0, kern op 0x10000 | `hopos/link-apple.ld` | link-asserties; `image/apple-m4.sh` toetst het parameterblok |
-| Loader (m1n1-proxy), meetcyclus, console, installer | `image/apple/` | de meetbank |
+| ADT reader: nodes, properties, paths, `-`/`_` equal, the ranges translation, depth bounded | `fw/src/adt.rs` | 9 host tests (plus truncation at every byte and a tree that is too deep) |
+| boot_args reader: RAM contract, framebuffer, the ADT address with the virt-to-phys conversion modulo 2^64 (2026-08-30) | `fw/src/xnuboot.rs` | 3 host tests with the numbers of 2026-08-29 and the two forms of virt_base |
+| GPT: read the table, the largest gap BETWEEN or AFTER the partitions | `fw/src/gpt.rs` | 5 host tests (the real M4 table of 2026-08-30) |
+| AIC as `cpu::irq::Controller` (claim = ack, complete = unmask, the 4-bit target), plus the fast IPI (kick, ack) | `driver/aic` | 6 host tests on a fake register block |
+| tg3 (BCM57762): reset, MAC, MDIO/PHY, rings, `netdev::Device`, INTx with tagged status (ack = mailbox closed, reopen on the tag on an empty ring, HOSTCC_MODE_NOW) | `driver/nic/tg3` | 24 host tests, among them the three lessons of 2026-08-29 (INDIR_ACCESS, PCI_COMMAND, NIC_ADDR of the std ring), FCS, and ack/reopen on the tag |
+| RTKit mailbox (ASC) and the SART v3 | `driver/rtkit` | 16 host tests against a fake coprocessor |
+| SMC: keys, floats, sensors, the hottest | `driver/smc` | 7 host tests |
+| ANS NVMe: the ANS transport under the NVMe core (linear SQ, TCBs, NVMMU, coprocessor), the GPT as capacity, the write window, clean shutdown | `driver/nvme/src/apple.rs` | 7 host tests on the core's fake controller: the four ANS lessons, secure bar, CID and TCB per slot with the invalidation, refusal outside or without a window, 512-to-4K, a fallen-over coprocessor; tickets and read-ahead in the core tests |
+| Board: boot stub, VHE entry, 48-bit map with PXN, console, boot_args and ADT, cores with class, the CPU_ON hook, AIC, timer FIQ, fast IPI, PCIe bring-up, tg3 with its INTx line, ANS, SMC, watchdogs, p-states and their watcher, the config window, slot plan with preflight | `board/apple` | 23 host tests (map and PXN, plan, pool from the contract, tunables, OS core choice, config window, watchdog alarm, p-state ceiling, `hopos.cages`, `hopos.nicirq`) |
+| OS core rotation for `AppleVhe`: the fast IPI as doorbell, the ack at EL2, the FIQ as `Back::Timer`/`Back::Ipi`; the Apple kick in the switcher; the CPU_ON hook and the SCTLR wipe in `cpu::smp`; the VHE-aware event stream | `cpu/src/el2`, `cpu/src/smp.rs`, `cpu/src/idle.rs` | host tests (the kick word, the vector index, the hook, the stream bits); the shared paths on QEMU (virt, UEFI, UEFI+VHE) |
+| Link script: raw image at 0x101_0000_0000, stub at 0, kernel at 0x10000 | `hopos/link-apple.ld` | link assertions; `image/apple-m4.sh` checks the parameter block |
+| Loader (m1n1 proxy), measurement cycle, console, installer | `image/apple/` | the test bench |
 
-## Het plan
+## The plan
 
-| Bereik | Wat | Mapping |
+| Range | What | Mapping |
 | --- | --- | --- |
-| 0x100_0000_0000 tot `top_of_kernel_data` | iBoot: boot_args, ADT, trust cache, m1n1 met zijn spin-table | Device (2 MB) |
-| `top_of_kernel_data` tot 0x101_0000_0000 | pool, laag deel | Device (2 MB) |
-| 0x101_0000_0000 + 256 MB | kern-RAM: stub, scratch 0xE000, param-blok 0xE100, config 0xF000, kern 0x10000, BSS (met de tabellen), stack, heap | Normal WB |
-| + 16 MB | DMA: tg3 8 MB, ANS 4 MB + RTKit-buffers 3 MB + SMC 1 MB | Normal-NC |
-| + 16 MB | control-pages, kooien, flip-recorder, zwarte doos | Device |
-| + 64 MB | boot-scratch, handoff, staging (met magic) | Normal WB |
-| 0x101_1600_0000 tot `phys_base + mem_size` | pool, hoog deel | Device (2 MB) |
-| alles onder 512 GB | MMIO (AIC, dockchannel, APCIe, ANS, PMGR) | Device (1 GB) |
+| 0x100_0000_0000 to `top_of_kernel_data` | iBoot: boot_args, ADT, trust cache, m1n1 with its spin table | Device (2 MB) |
+| `top_of_kernel_data` to 0x101_0000_0000 | pool, low part | Device (2 MB) |
+| 0x101_0000_0000 + 256 MB | kernel RAM: stub, scratch 0xE000, param block 0xE100, config 0xF000, kernel 0x10000, BSS (with the tables), stack, heap | Normal WB |
+| + 16 MB | DMA: tg3 8 MB, ANS 4 MB + RTKit buffers 3 MB + SMC 1 MB | Normal-NC |
+| + 16 MB | control pages, cages, flip recorder, black box | Device |
+| + 64 MB | boot scratch, handoff, staging (with magic) | Normal WB |
+| 0x101_1600_0000 to `phys_base + mem_size` | pool, high part | Device (2 MB) |
+| everything below 512 GB | MMIO (AIC, dockchannel, APCIe, ANS, PMGR) | Device (1 GB) |
 
-Nooit een 1 GB-blok boven 2^40: dat geeft op dit silicium een "address size
-fault, level 0" (28-08). De pool komt uit iBoot's contract (29-08: 23,7 GB in
-twee regio's); zonder boot_args 1 GB boven het venster, luid.
+Never a 1 GB block above 2^40: on this silicon that gives an "address size
+fault, level 0" (2026-08-28). The pool comes from iBoot's contract
+(2026-08-29: 23.7 GB in two regions); without boot_args 1 GB above the
+window, loudly.
 
-## Bouwen en laden
+## Building and loading
 
 ```sh
 sh image/apple-m4.sh                         # target/apple-m4/hopos-apple.img
-CFG=hopos-m4.cfg sh image/apple-m4.sh        # met hopos.cfg in het venster van het image
-APP=appspike sh image/apple-m4.sh            # plus stage.elf voor de staging
+CFG=hopos-m4.cfg sh image/apple-m4.sh        # with hopos.cfg in the window of the image
+APP=appspike sh image/apple-m4.sh            # plus stage.elf for the staging
 PYTHON=~/Git/m1n1/venv/bin/python3 CFG=hopos-m4.cfg \
   sh image/apple/boot-cycle.sh target/apple-m4/hopos-apple.img 90
-STAGE=target/apple-m4/stage.elf ROLE=app ...  # een image in de staging
-AT=0x10080000000 ...                          # de stub laten verplaatsen
-image/apple/console.py /dev/cu.kis-100000-ch-0 60   # zonder m1n1
+STAGE=target/apple-m4/stage.elf ROLE=app ...  # an image in the staging
+AT=0x10080000000 ...                          # let the stub relocate
+image/apple/console.py /dev/cu.kis-100000-ch-0 60   # without m1n1
 ```
 
-De meetbank (dossier, "Meetbank-recept"): `macvdmtool reboot serial`, laden
-over m1n1's USB-gadget, `macvdmtool debugusb`, booten en de console over de
-dockchannel (`/dev/cu.kis-100000-ch-0`). Chrome en Spotify houden het
-Debug-USB-device vast: dicht voor je begint (29-08). De loader springt met
-`P_VECTOR` naar offset 0x800 met x0 = het échte boot_args-blok: dezelfde
-overdracht als na `kmutil configure-boot --raw --entry-point 2048`.
+Without `CFG=` the script puts the three layers in the window
+(`image/cfg/default.cfg`, `apple.cfg` and `headless.cfg`, see
+[boards.md](boards.md), "The config"); `CFG="a.cfg b.cfg"` is a list of
+layers, the last value wins; `CFG=` with no path leaves the window empty.
+`EMBED=<ELF>` bakes a stripped app ELF (Hop) into the kernel image itself,
+placed as Hop in slot 1. The release (`tools/release.sh`) does both:
+`hopos-apple-headless.img.gz` is not a boot medium but a FAT stick (label
+`HOPOS`, as in Go, tag v2.2.8) with `hopos-apple.img` (config and Hop baked
+in), `install.sh` and a README; install from Recovery with `sh
+/Volumes/HOPOS/install.sh go`. The M4 has no gui feature, so headless only.
 
-`hopos.cfg`-sleutels van dit board: `hopos.oscore=small|big|N`,
-`hopos.pstate=off|E,P` (het plafond per cluster, standaard 5,6),
-`hopos.disk=off`, `hopos.smc=1`, `hopos.cages=on|off` (zonder waarde:
-kooien als de voorproef slaagt), `hopos.wd=off`.
+The test bench (dossier, "Meetbank-recept"): `macvdmtool reboot serial`,
+load over m1n1's USB gadget, `macvdmtool debugusb`, boot, and the console
+over the dockchannel (`/dev/cu.kis-100000-ch-0`). Chrome and Spotify hold on
+to the Debug USB device: close them before you start (2026-08-29). The
+loader jumps with `P_VECTOR` to offset 0x800 with x0 = the real boot_args
+block: the same handoff as after `kmutil configure-boot --raw
+--entry-point 2048`.
 
-De config reist in het image, in het venster van elke kern
-([boards.md](boards.md), "Het config-venster"): `CFG=hopos-m4.cfg sh
-image/apple-m4.sh` of `hop image hopos-apple.img --config hopos-m4.cfg`.
-Zonder loader (na de installatie) is dat de enige config. De loader zet
-zijn `CFG=` in hetzelfde venster en als tekst op 0xF000; `BARE=1` laat
-alles staan (zo boot de node na `kmutil`). 0xF000 is de terugval bij een
-leeg venster: de tekst van de loader, of het venster van 4 KB dat
-`image/apple-m4.sh` daar tot 04-10 bakte. De bootregel zegt waar de config
-vandaan kwam: `cfg: hopos.cfg from the window in the image`, `... from the
-0xF000 window`, `... from the loader`, of `cfg: no hopos.cfg ...
-HOPOS_CFG_NONE`.
-`APP=hop` zonder `CFG=` is luid (25-09: een agent zonder config draaide
-als `hopos-<random>` met een open API).
+`hopos.cfg` keys of this board: `hopos.oscore=small|mid|big|N`,
+`hopos.pstate=off|E,P` (the ceiling per cluster, default 5,6),
+`hopos.disk=off`, `hopos.smc=1`, `hopos.cages=on|off` (without a value:
+cages if the preflight passes; `image/cfg/default.cfg` sets `on`, so with
+the default layers the preflight is skipped), `hopos.wd=off`.
 
-Een kern-flip legt de nieuwe kern plat over het image, en een bundel
-draagt normaal een leeg venster. Daarom geeft de draaiende kern zijn
-venster mee aan het gestagede beeld (`board::cfgwin::carry`,
-`HOPOS_FLIP_CFG`), en daarnaast 0xF000 (`fwinfo::carry_config`); zonder
-dat booten geflipte kernen zonder `hopos.pstate=off` en adopteren ze niet
-(01-10). Een kern die dat nog niet kan (alles vóór 01-10), krijgt de
-config ín de bundel: `CFG=hopos-m4.cfg sh image/flip-bundle.sh apple`.
+The config travels in the image, in the window of every kernel
+([boards.md](boards.md), "The config window"): `CFG=hopos-m4.cfg sh
+image/apple-m4.sh` or `hop image hopos-apple.img --config hopos-m4.cfg`.
+Without a loader (after the installation) that is the only config. The
+loader puts its `CFG=` in the same window and as text at 0xF000; `BARE=1`
+leaves everything as it is (that is how the node boots after `kmutil`).
+0xF000 is the fallback for an empty window: the loader's text, or the 4 KB
+window that `image/apple-m4.sh` baked there until 2026-10-04. The boot line
+says where the config came from: `cfg: hopos.cfg from the window in the
+image`, `... from the 0xF000 window`, `... from the loader`, or `cfg: no
+hopos.cfg ... HOPOS_CFG_NONE`. `APP=hop` with an empty `CFG=` is loud
+(2026-09-25: an agent without config ran as `hopos-<random>` with an open
+API).
 
-De p-state-tune draait in `start_interrupts` (niet in `discover`: daar
-komen de regels niet op 5555) als recept in stappen met na elke stap een
-SError-toets; bij de eerste SError stopt hij (`HOPOS_APPLE_PSTATE_SERROR`).
-Op de t8132 laat de schrijf naar P-cluster +0x440f8 een SError achter die
-blijft hangen (en +0x48400 bestaat niet); E neemt het woord wel. Zonder die
-twee: E 5/8 (2172 MHz), P 6/20 (2352 MHz), geen SError (01-10, stempel M7).
+A kernel flip lays the new kernel flat over the image, and a bundle
+normally carries an empty window. So the running kernel hands its window to
+the staged image (`board::cfgwin::carry`, `HOPOS_FLIP_CFG`), and 0xF000 as
+well (`fwinfo::carry_config`); without that, flipped kernels boot without
+`hopos.pstate=off` and do not adopt (2026-10-01). A kernel that cannot do
+that yet (everything before 2026-10-01) gets the config inside the bundle:
+`CFG=hopos-m4.cfg sh image/flip-bundle.sh apple` (or
+`CFG=headless sh image/flip-bundle.sh apple` for the three layers).
 
-## Wat de kern voor Apple draagt (29-09)
+The p-state tune runs in `start_interrupts` (not in `discover`: the lines
+do not reach 5555 there) as a recipe in steps with an SError check after
+each step; at the first SError it stops (`HOPOS_APPLE_PSTATE_SERROR`). On
+the t8132 the write to P cluster +0x440f8 leaves an SError behind that stays
+pending (and +0x48400 does not exist); E accepts the word. Without those
+two: E 5/8 (2172 MHz), P 6/20 (2352 MHz), no SError (2026-10-01, stamp M7).
 
-Alles hieronder is gebouwd en op de host getest, en de gedeelde paden
-(`cpu::el2::oscore`, `cpu::idle`, `cpu::smp`) zijn op QEMU bewezen tegen
-regressie (virt, UEFI, en UEFI onder VHE met neoverse-n1: `HOPOS_OS_SELFTEST
-ok`). Op de M4 zelf heeft het nog niet gedraaid: dat is de checklist.
+## What the kernel carries for Apple (2026-09-29)
 
-1. **De EL2-smaak in de lijm.** `hopos/src/cage.rs` kiest `AppleVhe` op dit
-   board en toetst bij het bouwen dat `board_apple::FLAVOR` dezelfde is.
-2. **`OsCore` voor `AppleVhe`** (`cpu/src/el2/oscore.rs`): de kick is
-   `Bell::apple(mpidr)`: het IPI_RR-doel `core | cluster << 16` met bit 63
-   als "scherp" (het doel van E-core 0 is 0, en 0 is "niet kicken"). De
-   switcher van een app-core wist dat bit en schrijft `msr
-   s3_5_c15_c0_1` in plaats van ICC_SGI1R (bij een yield en bij HVC #6).
-   De peek (`pending`) leest IPI_SR_EL1 bit 0 zonder ack; de kern ackt
-   zelf, op EL2, als de beurt als `Back::Ipi` terugkomt (04-09). De
-   timer en de kick komen als FIQ: `fiq/lower-a64` (index 10) keert als
-   `Back::Timer` (de CNTHP ging af) of `Back::Ipi` terug, een IRQ (de AIC)
-   als `Back::Irq`. FMO, IMO en AMO staan in het HCR van elke bewoner.
-3. **Een CPU_ON van het board in `cpu::smp`.** `cpu::smp::set_cpu_on`
-   (gezet in `discover`) laat `start_one` (de verhuizing naar de OS-core)
-   en de koude start van een kooi (`cage.rs`) via `board_apple::cores::cpu_on_mpidr` lopen: m1n1's
-   spin-table, of PMGR plus de brievenbus als wij het bootobject zijn. De
-   ingangen die zo'n core krijgt (`hopos_smp_entry`, en de trampolines van
-   de Apple-switcher) zetten eerst DAIF dicht en SCTLR_EL2.M/C/I uit, zonder
-   set/way-onderhoud: m1n1 roept een vrijgegeven core aan als functie met
-   zijn MMU nog aan (29-08).
-4. **De voorproef.** Het slot-plan (`board_apple::slots::plan`) draait bij
-   zijn eerste aanroep, op de OS-core en vóór er één kooi bestaat, dezelfde
-   drie beurten als de zelftest van de kern (de CNTHP, een yield, de fast
-   IPI naar zichzelf): `slots: OS-core preflight ... HOPOS_APPLE_PREFLIGHT
-   ok`. Rood (`HOPOS_APPLE_PREFLIGHT_FAIL`) = het plan weigert luid
-   (`HOPOS_SLOT_PLAN`) en de node draait door zonder kooien, zoals vóór
-   29-09. `hopos.cages=on` slaat de voorproef over, `hopos.cages=off`
-   weigert altijd. De `hopos.cages=on`-rem van vóór 29-09 is weg.
-5. **De keuze van de slaap per core** (onveranderd): het board meet de
-   timer-FIQ (`HOPOS_APPLE_IDLE`) en kiest WFI of WFE. Een OS-core die de
-   kern zelf opbracht (`hopos.oscore=small`), krijgt op t8132 geen
-   timer-FIQ (29-08): daar zakt de voorproef op de timer-beurt, en dat is
-   de bedoeling.
-6. **`cpu::idle::ArmSleeper::new` onder E2H = 1** vervangt in CNTHCTL_EL2
-   alleen de bits van de event-stream (`merge_event_stream`): EL1PCTEN en
-   EL1PTEN blijven staan. Het herstel in het board is weg (board-uefi houdt
-   het zijne, het is daar nu een no-op).
-7. **Het PXN-gat.** `board/apple/src/mmu.rs` zet op elk blok dat XN is ook
-   PXN (bit 53): onder E2H = 1 is bit 54 alleen UXN, en de kern mocht
-   instructies halen uit Device (MMIO, de firmware, het kooi-venster) en
-   uit de DMA-regio.
-8. **De watchdog** (`hopos/src/watchdog.rs`, de `hw`-module van Apple):
-   `board_apple::wdt::{arm, pet, off}` op de primaire van `/arm-io/wdt`,
-   30 s op 24 MHz (de klok staat niet in de boom: de regel zegt het).
-9. **De klok en de temperatuur** (`hopos/src/telemetry.rs`): de wachter op
-   de p-states (`board_apple::wdt::PStateWatch`) meldt
-   elke sprong (`HOPOS_APPLE_PSTATE`). De temperatuur staat met
-   `hopos.smc=1` één keer in de bootlog (`HOPOS_APPLE_TEMP`); niet
-   standaard, want op v2 kwam het INITIALIZE-antwoord nooit (31-08) en
-   een half opgestarte RTKit-coprocessor die niemand pollt loopt vol. Op de
-   tik staat hij niet (elke meting praat de SMC wakker en weer in slaap).
-10. **De wekker van de app-cores** (02-10, `hopos/src/cage.rs`, Go's
-    `kern/slots/waker.go`): een app-core idlet met een yield
-    (`APP_IDLE_MODE = IDLE_YIELD`) en slaapt in de WFI van de switcher,
-    want WFE op EL1 slaapt op de M4 niet (02-09). Elke ms kickt de kern
-    elke draaiende app-core met een geyielde bewoner die due is (wektijd,
-    kick of RX); een RX-schrijf van de switch kickt de core van het slot
-    zelf (en de geyielde secundairen), niet meer mpidr 0. Marker
-    `HOPOS_WAKER_UP`; met `hopos.tick=1` staan de tellers op de tik
-    (`waker(rounds= seen= kicks= rx=)`). Go 02-09: een app-core van 74 %
-    cpu en 1,3 M rondes/s naar 0 % en 47 wekken/s.
+Everything below is built and tested on the host, and the shared paths
+(`cpu::el2::oscore`, `cpu::idle`, `cpu::smp`) are proven on QEMU against
+regression (virt, UEFI, and UEFI under VHE with neoverse-n1:
+`HOPOS_OS_SELFTEST ok`). It has not run on the M4 itself yet: that is the
+checklist.
 
-## Checklist voor de M4
+1. **The EL2 flavor in the glue.** `hopos/src/cage.rs` picks `AppleVhe` on
+   this board and checks at build time that `board_apple::FLAVOR` is the
+   same.
+2. **`OsCore` for `AppleVhe`** (`cpu/src/el2/oscore.rs`): the kick is
+   `Bell::apple(mpidr)`: the IPI_RR target `core | cluster << 16` with bit
+   63 as "armed" (the target of E-core 0 is 0, and 0 means "do not kick").
+   The switcher of an app core clears that bit and writes `msr
+   s3_5_c15_c0_1` instead of ICC_SGI1R (on a yield and on HVC #6). The peek
+   (`pending`) reads IPI_SR_EL1 bit 0 without an ack; the kernel acks
+   itself, at EL2, when the turn comes back as `Back::Ipi` (2026-09-04). The
+   timer and the kick come as FIQ: `fiq/lower-a64` (index 10) returns as
+   `Back::Timer` (the CNTHP fired) or `Back::Ipi`, an IRQ (the AIC) as
+   `Back::Irq`. FMO, IMO and AMO are set in the HCR of every resident.
+3. **A CPU_ON from the board in `cpu::smp`.** `cpu::smp::set_cpu_on` (set
+   in `discover`) routes `start_one` (the move to the OS core) and the cold
+   start of a cage (`cage.rs`) through `board_apple::cores::cpu_on_mpidr`:
+   m1n1's spin table, or PMGR plus the mailbox when we are the boot object.
+   The entries such a core gets (`hopos_smp_entry`, and the trampolines of
+   the Apple switcher) first close DAIF and turn SCTLR_EL2.M/C/I off,
+   without set/way maintenance: m1n1 calls a released core as a function
+   with its MMU still on (2026-08-29).
+4. **The preflight.** The slot plan (`board_apple::slots::plan`) runs on its
+   first call, on the OS core and before a single cage exists, the same
+   three turns as the kernel's self-test (the CNTHP, a yield, the fast IPI
+   to itself): `slots: OS-core preflight ... HOPOS_APPLE_PREFLIGHT ok`. Red
+   (`HOPOS_APPLE_PREFLIGHT_FAIL`) = the plan refuses loudly
+   (`HOPOS_SLOT_PLAN`) and the node runs on without cages, as before
+   2026-09-29. `hopos.cages=on` skips the preflight, `hopos.cages=off`
+   always refuses. The `hopos.cages=on` brake from before 2026-09-29 is
+   gone.
+5. **The choice of sleep per core** (unchanged): the board measures the
+   timer FIQ (`HOPOS_APPLE_IDLE`) and picks WFI or WFE. An OS core that the
+   kernel brought up itself (`hopos.oscore=small`) gets no timer FIQ on
+   t8132 (2026-08-29): there the preflight fails on the timer turn, and
+   that is intended.
+6. **`cpu::idle::ArmSleeper::new` under E2H = 1** replaces only the event
+   stream bits in CNTHCTL_EL2 (`merge_event_stream`): EL1PCTEN and EL1PTEN
+   stay. The restore in the board is gone (board-uefi keeps its own, it is a
+   no-op there now).
+7. **The PXN hole.** `board/apple/src/mmu.rs` sets PXN (bit 53) on every
+   block that is XN as well: under E2H = 1 bit 54 is only UXN, and the
+   kernel was allowed to fetch instructions from Device (MMIO, the firmware,
+   the cage window) and from the DMA region.
+8. **The watchdog** (`hopos/src/watchdog.rs`, the `hw` module of Apple):
+   `board_apple::wdt::{arm, pet, off}` on the primary of `/arm-io/wdt`,
+   30 s at 24 MHz (the clock is not in the tree: the line says so).
+9. **The clock and the temperature** (`hopos/src/telemetry.rs`): the
+   watcher on the p-states (`board_apple::wdt::PStateWatch`) reports every
+   jump (`HOPOS_APPLE_PSTATE`). With `hopos.smc=1` the temperature is in the
+   boot log once (`HOPOS_APPLE_TEMP`); not by default, because on v2 the
+   INITIALIZE answer never came (2026-08-31) and a half-started RTKit
+   coprocessor that nobody polls fills up. It is not on the tick (every
+   measurement talks the SMC awake and back to sleep).
+10. **The waker of the app cores** (2026-10-02, `hopos/src/cage.rs`, Go's
+    `kern/slots/waker.go`): an app core idles with a yield
+    (`APP_IDLE_MODE = IDLE_YIELD`) and sleeps in the WFI of the switcher,
+    because WFE at EL1 does not sleep on the M4 (2026-09-02). Every ms the
+    kernel kicks every running app core with a yielded resident that is due
+    (wake time, kick or RX); an RX write from the switch kicks the core of
+    the slot itself (and the yielded secondaries), no longer mpidr 0.
+    Marker `HOPOS_WAKER_UP`; with `hopos.tick=1` the counters are on the
+    tick (`waker(rounds= seen= kicks= rx=)`). Go 2026-09-02: an app core
+    from 74 % cpu and 1.3 M rounds/s to 0 % and 47 wakes/s.
 
-Per stap wat de console (dockchannel) hoort te tonen, en wat een afwijking
-betekent. Onder m1n1 eerst; pas daarna installeren. Bouw met een config:
-`CFG=hopos-m4.cfg sh image/apple-m4.sh`.
+## Checklist for the M4
 
-1. **Eerste licht** vóór de MMU: `hopos x000001000xxxxxxx` (x0 = boot_args).
-   Niets: de stub draaide niet (verkeerde offset in de loader) of de
-   dockchannel staat elders. x0 = 0: m1n1 gaf geen boot_args (P_VECTOR).
-2. **De bunny en `runtime ...`**: de MMU, VBAR en de heap staan. Stil na
-   regel 1: de map (`mmu::build`) of het VHE-regime; een
-   `exception: ... HOPOS_EXCEPTION` met FAR in het DRAM wijst naar de map.
-   Nieuw 29-09: PXN op elk XN-blok; een instructie-abort (EC 0x21) met een
-   PC buiten de kern-RAM is dan een sprong die vroeger stil "werkte".
+Per step what the console (dockchannel) should show, and what a deviation
+means. Under m1n1 first; only install after that. Build with a config:
+`CFG=hopos-m4.cfg sh image/apple-m4.sh` (or the default layers without
+`CFG=`).
+
+1. **First light** before the MMU: `hopos x000001000xxxxxxx` (x0 =
+   boot_args). Nothing: the stub did not run (wrong offset in the loader) or
+   the dockchannel is elsewhere. x0 = 0: m1n1 gave no boot_args (P_VECTOR).
+2. **The bunny and `runtime ...`**: the MMU, VBAR and the heap are up.
+   Silent after line 1: the map (`mmu::build`) or the VHE regime; an
+   `exception: ... HOPOS_EXCEPTION` with FAR in the DRAM points at the map.
+   New on 2026-09-29: PXN on every XN block; an instruction abort (EC 0x21)
+   with a PC outside the kernel RAM is then a jump that used to "work"
+   silently.
 3. `xnuboot: rev 3.x RAM 0x10001374000+24053 MB ... HOPOS_APPLE_BOOTARGS`
-   en `adt: ... 10 cores (6 E + 4 P), this is core 6, serial ...`.
+   and `adt: ... 10 cores (6 E + 4 P), this is core 6, serial ...`.
 4. `watchdog: firmware watchdogs silenced: reg[0] ... (N window(s), ...)`.
-   Zonder deze regel reset de node natief na 1:43 (31-08).
-5. `cores: via m1n1's spin-table (...)` onder m1n1; `cores: ours` na de
-   installatie. `cfg: hopos.cfg from the window in the image, N bytes
-   HOPOS_CFG` (of `from the loader`); `HOPOS_CFG_NONE` = een leeg venster.
-   `cpufreq: cluster 0 (E): pstate 1 (900 MHz) -> 5/...`. Met `hopos.smc=1`:
-   `smc: die 41.5 C at boot HOPOS_APPLE_TEMP`; `HOPOS_APPLE_SMC_FAIL` of een
-   `smc: ...`-fout is de meting van 31-08 opnieuw (geen shmem-adres), en
-   dan hoort de boot gewoon door te gaan (hooguit ~8 s later).
-6. **Met `hopos.oscore=small`**: `oscore: moving the kern from core 6 to
-   core 0 ... HOPOS_OSCORE_MOVE`, dan `oscore: the kern runs on core 0
-   HOPOS_OSCORE_UP`. Stil daarna: de nieuwe core kwam niet uit m1n1's
-   spin-table of niet door `hopos_smp_entry` (SCTLR-wis, dan het regime);
-   een `cores: cpu 0 ... not started` zegt waarom. Een "address size fault,
-   level 0" in het lage DRAM op die core is het open raadsel van 29-08
-   (alleen onder m1n1; opnieuw na de installatie). Zonder `hopos.oscore`
-   blijft de kern op core 6 en is er geen regel.
-7. `boot: HopOS v3.0.0 on apple-m4, EL2, 10 cores (big), 24576 MB DRAM
+   Without this line the node resets natively after 1:43 (2026-08-31).
+5. `cores: via m1n1's spin-table (...)` under m1n1; `cores: ours` after the
+   installation. `cfg: hopos.cfg from the window in the image, N bytes
+   HOPOS_CFG` (or `from the loader`); `HOPOS_CFG_NONE` = an empty window.
+   `cpufreq: cluster 0 (E): pstate 1 (900 MHz) -> 5/...`. With
+   `hopos.smc=1`: `smc: die 41.5 C at boot HOPOS_APPLE_TEMP`;
+   `HOPOS_APPLE_SMC_FAIL` or a `smc: ...` error is the measurement of
+   2026-08-31 again (no shmem address), and then the boot should simply
+   continue (at most ~8 s later).
+6. **With `hopos.oscore=small`**: `oscore: moving the kern from core 6 to
+   core 0 ... HOPOS_OSCORE_MOVE`, then `oscore: the kern runs on core 0
+   HOPOS_OSCORE_UP`. Silent after that: the new core did not come out of
+   m1n1's spin table or did not get through `hopos_smp_entry` (SCTLR wipe,
+   then the regime); a `cores: cpu 0 ... not started` says why. An "address
+   size fault, level 0" in the low DRAM on that core is the open puzzle of
+   2026-08-29 (only under m1n1; retry after the installation). Without
+   `hopos.oscore` the kernel stays on core 6 and there is no line.
+7. `boot: HopOS v3.0.13 on apple-m4, EL2, 10 cores (big), 24576 MB DRAM
    HOPOS_BOOT`.
 8. `disk: ans 0x481600000 nvmmu 0x485cc0000 nvme 0x4c5cc0000 sart
-   0x485c50000 (v3) secure-bar true`, dan de GPT-regels
-   (`iBootSystemContainer`, de APFS-container, `RecoveryOSContainer`), en
-   `HOPOS_ANS_UP` met het venster, of `HOPOS_ANS_FULL` als macOS nog niet
-   gekrompen is (dan geen hopfs, en dat is goed). Komt de ANS niet ready:
-   `resetting the ANS power domain and retrying` hoort er één keer te staan.
+   0x485c50000 (v3) secure-bar true`, then the GPT lines
+   (`iBootSystemContainer`, the APFS container, `RecoveryOSContainer`), and
+   `HOPOS_ANS_UP` with the window, or `HOPOS_ANS_FULL` if macOS has not been
+   shrunk yet (then no hopfs, and that is fine). If the ANS does not come
+   ready: `resetting the ANS power domain and retrying` should appear once.
+   With the default `hopos.storage=stateless` hopfs on the window starts
+   empty at a cold boot (`HOPOS_FS_STATELESS`); `hopos.storage=stateful`
+   keeps the tree.
 9. `irq: AIC v... at 0x381000000: ... target N reaches this core, fast IPI
-   and timer FIQ`. `no AIC target reaches this core`: de doel-meting via
-   ISR_EL1 werkt niet op dit silicium; de node draait door op de vangrail.
+   and timer FIQ`. `no AIC target reaches this core`: the target
+   measurement via ISR_EL1 does not work on this silicon; the node runs on
+   the guard.
 10. `watchdog: hardware reset armed (Apple WDT at 0x..., 30000 ms timeout
-    at 24 MHz ...) HOPOS_WD_ARMED`. `no /arm-io/wdt` of `refuses to arm`:
-    onbewaakt, luid. Reset de node binnen 30 s na deze regel, dan aait de
-    taak niet (de executor staat) of telt de teller niet op 24 MHz (dan
-    schaalt de timeout: meet de tijd tot de reset). `dvfs: the APSC governs
-    ... HOPOS_APPLE_PSTATE_WATCH`, en daarna alleen regels als een cluster
-    springt (`cpufreq: cluster 1 (P) 6 -> 3 HOPOS_APPLE_PSTATE`). Geen enkele
-    sprong in minuten idle: de APSC klokt niet terug (het antwoord op de
-    vraag van 01-09).
-11. `apcie: config 0x1cb0000000 ...`, per stap een regel (een uitgestelde
-    abort landt bij de stap die hem veroorzaakte), `apcie: brought up by
-    HopOS, 6 power gate(s), 263 tunable(s), 2 of 3 port(s)` (29-08), `apcie:
-    link up, endpoint 02:00.0 14e4:1682`, `tg3: ASIC 0x57766 ...`, `tg3:
-    LINK UP, 1000 Mb/s full duplex`, `net: tg3 INTx on AIC irq 1253 (port
-    2 block 1249 + INTA 4), first interrupt after N us ... HOPOS_NIC_IRQ`,
-    `HOPOS_NIC_UP mac=1c:f6:4c:54:fa:90`. Onder m1n1 kan de eerste regel
-    `apcie: already up` zijn. `net: tg3 polled, AIC irq ...: the forced
-    interrupt did not arrive within 50 ms, port INTSTAT ...`: de lijn kwam
-    niet aan (bits 3:0 van INTSTAT zijn INTA tot INTD, Linux
-    `PORT_INT_INTx`, gelezen vóór de NIC weer dichtgaat; staat bit 0, dan
-    zag de poort INTA en klopt het AIC-nummer niet, en `hopos.nicirq=<n>`
-    probeert een ander). De zelftest is Go's
-    "gevonden door aflevering" (19-09). Daarna: `HOPOS_NET_PUMP` zegt `irq
-    line, 10 ms guard`, en `hopos.nicirq=off` is de A/B tegen pollen.
-12. **DHCP** (`HOPOS_NET_UP`) en de tik: `HOPOS_TICK n sleeps=...`.
-    Wekken per seconde rond 954 (29-08): `HOPOS_APPLE_IDLE` moet dan `Wfi`
-    zeggen. Veel meer: WFE op de event-stream; controleer EVNTIS (ECV).
-13. **De voorproef en de kooien**: `slots: OS-core preflight on mpidr
+    at 24 MHz ...) HOPOS_WD_ARMED`. `no /arm-io/wdt` or `refuses to arm`:
+    unguarded, loudly. If the node resets within 30 s after this line, the
+    task does not pet (the executor is stuck) or the counter does not count
+    at 24 MHz (then the timeout scales: measure the time until the reset).
+    `dvfs: the APSC governs ... HOPOS_APPLE_PSTATE_WATCH`, and after that
+    only lines when a cluster jumps (`cpufreq: cluster 1 (P) 6 -> 3
+    HOPOS_APPLE_PSTATE`). Not a single jump in minutes of idle: the APSC
+    does not clock down (the answer to the question of 2026-09-01).
+11. `apcie: config 0x1cb0000000 ...`, a line per step (a deferred abort
+    lands at the step that caused it), `apcie: brought up by HopOS, 6 power
+    gate(s), 263 tunable(s), 2 of 3 port(s)` (2026-08-29), `apcie: link up,
+    endpoint 02:00.0 14e4:1682`, `tg3: ASIC 0x57766 ...`, `tg3: LINK UP,
+    1000 Mb/s full duplex`, `net: tg3 INTx on AIC irq 1253 (port 2 block
+    1249 + INTA 4), first interrupt after N us ... HOPOS_NIC_IRQ`,
+    `HOPOS_NIC_UP mac=1c:f6:4c:54:fa:90`. Under m1n1 the first line can be
+    `apcie: already up`. `net: tg3 polled, AIC irq ...: the forced interrupt
+    did not arrive within 50 ms, port INTSTAT ...`: the line did not arrive
+    (bits 3:0 of INTSTAT are INTA to INTD, Linux `PORT_INT_INTx`, read
+    before the NIC closes again; if bit 0 is set, the port saw INTA and the
+    AIC number is wrong, and `hopos.nicirq=<n>` tries another one). The
+    self-test is Go's "found by delivery" (2026-09-19). After that:
+    `HOPOS_NET_PUMP` says `irq line, 10 ms guard`, and `hopos.nicirq=off` is
+    the A/B against polling.
+12. **DHCP** (`HOPOS_NET_UP`) and the tick: `HOPOS_TICK n sleeps=...`.
+    Wakes per second around 954 (2026-08-29): `HOPOS_APPLE_IDLE` must then
+    say `Wfi`. Many more: WFE on the event stream; check EVNTIS (ECV).
+13. **The preflight and the cages**: `slots: OS-core preflight on mpidr
     0x80010100: timer=Some(Timer) yield=Some(Yield) kick=Some(Ipi)
-    HOPOS_APPLE_PREFLIGHT ok`, dan `slots: cage up HOPOS_CAGE_UP ...` en
-    `oscore: cpu 6 self-test timer=... yield=... kick=... HOPOS_OS_SELFTEST
-    ok`. Wat een rode beurt betekent:
-    - `timer=Some(Yield)`: de CNTHP-FIQ bereikte deze core niet (de spinner
-      gaf na twee termijnen zelf op). Op een core die de kern zelf opbracht
-      is dat verwacht (29-08); op core 6 onder m1n1 is het nieuw: kijk of
-      FMO in HCR_EL2 staat en of `HOPOS_APPLE_IDLE` `fiq-at-core=true` zei.
-    - `kick=Some(Timer)` of `Some(Yield)`: de fast IPI naar zichzelf kwam
-      niet als FIQ binnen; `kick=Some(Irq)`: hij kwam, maar IPI_SR_EL1 bit
-      0 stond niet (dan is de peek fout, niet de kick).
-    - `yield=...` niet `Yield`: de overgang zelf (het `_EL12`-regime, VBAR
-      van de os-vectoren); een `HOPOS_EXCEPTION` met ELR in
-      `hopos_os_vhe_enter` is dat pad.
-    - Een hang zonder regel: de beurt kwam nooit terug. Dan ging een FIQ
-      niet naar EL2 (FMO) én gaf de spinner niet op (CNTVCT van EL1 trapt:
-      CNTHCTL_EL2).
-    Daarna de koude start van een app-core: `cage: slot 1 core 1 cold:
-    CPU_ON mpidr=0x80000000 entry=... -> Ok(())`. `Err(Other(-9))` of
-    `Err(InvalidParams)` met een `cores: cpu N ... not started`-regel: geen
-    spin-table-adres voor die core (loader) of RVBAR niet van ons. Een app
-    die niet start na `Ok`: de trampoline (SCTLR-wis, dan VBAR en stage-2);
-    m1n1's exception-handler vangt dat onder de loader op de console.
-14. **Installeren** (1TR, fysiek; `image/apple/install.sh`): `kmutil
+    HOPOS_APPLE_PREFLIGHT ok` (not with `hopos.cages=on`, the default
+    layer), then `slots: cage up HOPOS_CAGE_UP ...` and `oscore: cpu 6
+    self-test timer=... yield=... kick=... HOPOS_OS_SELFTEST ok`. What a red
+    turn means:
+    - `timer=Some(Yield)`: the CNTHP FIQ did not reach this core (the
+      spinner gave up by itself after two periods). On a core the kernel
+      brought up itself that is expected (2026-08-29); on core 6 under m1n1
+      it is new: check that FMO is set in HCR_EL2 and that
+      `HOPOS_APPLE_IDLE` said `fiq-at-core=true`.
+    - `kick=Some(Timer)` or `Some(Yield)`: the fast IPI to itself did not
+      come in as FIQ; `kick=Some(Irq)`: it came, but IPI_SR_EL1 bit 0 was
+      not set (then the peek is wrong, not the kick).
+    - `yield=...` not `Yield`: the transition itself (the `_EL12` regime,
+      VBAR of the os vectors); a `HOPOS_EXCEPTION` with ELR in
+      `hopos_os_vhe_enter` is that path.
+    - A hang without a line: the turn never came back. Then a FIQ did not
+      go to EL2 (FMO) and the spinner did not give up either (CNTVCT from
+      EL1 traps: CNTHCTL_EL2).
+    Then the cold start of an app core: `cage: slot 1 core 1 cold: CPU_ON
+    mpidr=0x80000000 entry=... -> Ok(())`. `Err(Other(-9))` or
+    `Err(InvalidParams)` with a `cores: cpu N ... not started` line: no
+    spin table address for that core (loader) or RVBAR is not ours. An app
+    that does not start after `Ok`: the trampoline (SCTLR wipe, then VBAR
+    and stage 2); m1n1's exception handler catches that on the console
+    under the loader.
+14. **Installing** (1TR, physically; `image/apple/install.sh`): `kmutil
     configure-boot -c hopos-apple.img --raw --entry-point 2048
-    --lowest-virtual-address 0 -v "/Volumes/Macintosh HD"`. Daarna moet
-    stap 5 `cores: ours` en `cfg: hopos.cfg from the window in the image` zeggen:
-    dat zijn de metingen dat RVBAR naar ons image wijst en dat de config
-    zonder loader meekwam. Stap 13 loopt dan via PMGR en de brievenbus.
-    Terug: dezelfde regel met `m1n1.bin`.
+    --lowest-virtual-address 0 -v "/Volumes/Macintosh HD"`. After that step
+    5 must say `cores: ours` and `cfg: hopos.cfg from the window in the
+    image`: those are the measurements that RVBAR points to our image and
+    that the config came along without a loader. Step 13 then goes through
+    PMGR and the mailbox. Back: the same line with `m1n1.bin`.
 
-## Op ijzer gezien op M1 (03-10)
+## Seen on hardware at M1 (2026-10-03)
 
-- **De scrub van de Device-gemapte pool**: dezelfde Go-app (tamago,
-  `cloudflared-arm64-tamago.elf` van de rollende release `apps`, 64 MiB,
-  met een opzettelijk ongeldig `TUNNEL_TOKEN`) drie keer na elkaar
-  geplaatst met een `DELETE` ertussen, elke keer in dezelfde partitie
-  (`part=0x10068000000+0x4000000`, slot 4, core 4; de eerste keer `cold:
-  CPU_ON`, daarna `dispatched to parked core 4`). Alle drie dezelfde regels
-  (`mem: Go memory limit 27MB`, `appnet: RX doorbell served as
-  interrupt`, de banner, `62 MB RAM, arm64 go1.26.4`) en hetzelfde einde:
-  exit code 4294967295, de -1 van cloudflared's `UsageError` voor een
-  ongeldig token. Geen `HOPOS_SLOT_FAULT`, geen panic. De laatste
-  regels van de app (de reden) halen de console en de taaklog niet: de
-  kern sluit het slot (`HOPOS_SYSTEM_EVICTED`) voor de servicer ze leegt.
-- **De koude flip zonder PSCI**: niet op ijzer gevraagd. De kern weigert
-  vroeg in `flip::prepare` (`HOPOS_FLIP_COLD_NO_PSCI`, voor de staging en
-  het bevriezen), maar Hop stopt bij `"cold":true` eerst al zijn taken op
-  de node (`HOP_FLIP_COLD_STOP`, `agentd-hopos/src/node.rs`) en vraagt de
-  kern pas daarna; een weigering zet ze terug (`HOP_FLIP_COLD_BACK`). Met
-  een live werklast op de node is dat geen toets zonder bewoners te
-  stoppen.
+- **The scrub of the Device-mapped pool**: the same Go app (tamago,
+  `cloudflared-arm64-tamago.elf` from the rolling release `apps`, 64 MiB,
+  with a deliberately invalid `TUNNEL_TOKEN`) placed three times in a row
+  with a `DELETE` in between, each time in the same partition
+  (`part=0x10068000000+0x4000000`, slot 4, core 4; the first time `cold:
+  CPU_ON`, after that `dispatched to parked core 4`). All three the same
+  lines (`mem: Go memory limit 27MB`, `appnet: RX doorbell served as
+  interrupt`, the banner, `62 MB RAM, arm64 go1.26.4`) and the same end:
+  exit code 4294967295, the -1 of cloudflared's `UsageError` for an invalid
+  token. No `HOPOS_SLOT_FAULT`, no panic. The last lines of the app (the
+  reason) do not reach the console and the task log: the kernel closes the
+  slot (`HOPOS_SYSTEM_EVICTED`) before the servicer drains them.
+- **The cold flip without PSCI**: not requested on hardware. The kernel
+  refuses early in `flip::prepare` (`HOPOS_FLIP_COLD_NO_PSCI`, before the
+  staging and the freeze), but on `"cold":true` Hop first stops all his
+  tasks on the node (`HOP_FLIP_COLD_STOP`, `agentd-hopos/src/node.rs`) and
+  only asks the kernel after that; a refusal puts them back
+  (`HOP_FLIP_COLD_BACK`). With a live workload on the node that is not a
+  test you can run without stopping residents.
 
-## Niet gedaan
+## Not done
 
-- Een mini-proxy in het image (elke iteratie na de installatie kost een
-  1TR-bezoek).
-- Hop op de OS-core: `hopos/src/slots.rs` `os_pool` sluit `AppleVhe` nog
-  uit van de gedeelde OS-core (een ander spoor), dus Hop krijgt op de M4
-  een app-core. Weghalen zodra stap 13 op ijzer groen is.
-- `pmgr_reset` als herstelpad na een crash buiten de retry in
-  `probe_disk` (die er wel is).
-- De temperatuur op de tik: vraagt een SMC die wakker blijft en gepolld
-  wordt (zijn syslog), niet een open-meet-slaap per seconde.
-- Een core die in `cpu::el2::hold` wacht terwijl de kooien weigeren (een
-  verhuizing met een rode voorproef), spint daar: WFE slaapt op de M4 niet.
-- Een timer van een bewoner zelf (CNTV of CNTP op EL1 met de interrupt
-  aan) is op Apple een FIQ die de kern als device ziet; de bewoners van
-  HopOS slapen via de HVC-yield en zetten die niet aan.
-- De framebuffer: iBoot laat er een achter, maar niemand scant hem uit
-  (30-08); bewust uit.
+- A mini proxy in the image (every iteration after the installation costs a
+  1TR visit).
+- Hop on the OS core: `hopos/src/slots.rs` (`arch::SHARES_OS_CORE`) still
+  excludes `AppleVhe` from the shared OS core (a different track), so Hop
+  gets an app core on the M4: with `image/cfg/apple.cfg` in the group `hop`
+  on an E-core (`hopos.hop.core-class=small`); `hopos.hop.sharegroup=system`
+  is refused loudly. Remove that once step 13 is green on hardware.
+- `pmgr::reset_ans` as a recovery path after a crash outside the retry in
+  `probe_disk` (which does exist).
+- The temperature on the tick: needs an SMC that stays awake and is polled
+  (its syslog), not an open-measure-sleep per second.
+- A core that waits in `cpu::el2::hold` while the cages refuse (a move with
+  a red preflight) spins there: WFE does not sleep on the M4.
+- A timer of a resident itself (CNTV or CNTP at EL1 with the interrupt on)
+  is a FIQ on Apple that the kernel sees as a device; the residents of
+  HopOS sleep via the HVC yield and do not turn it on.
+- The framebuffer: iBoot leaves one behind, but nobody scans it out
+  (2026-08-30); deliberately off.

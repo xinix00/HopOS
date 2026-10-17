@@ -1,88 +1,96 @@
-# Port-review Go v2.2.7 naast Rust v3, de andere borden (02-10, avond)
+> Snapshot of 2026-10-02; later status is in [description.md](description.md) chapter 8 and [ALLES.md](../ALLES.md).
 
-Vijf leesagenten (Apple, Pi's, Radxa plus QEMU virt, UEFI/O6N/Altra, de
-arm64-kern) met hun deelreviews. Alleen gelezen, niets gebouwd. De
-deelrapporten staan niet in de repo; dit is hun samenvatting.
+# Port review Go v2.2.7 next to Rust v3, the other boards (2026-10-02, evening)
 
-## Niet gevallen
+Five reading agents (Apple, the Pis, Radxa plus QEMU virt, UEFI/O6N/Altra,
+the arm64 kernel) with their partial reviews. Read only, nothing built. The
+partial reports are not in the repo; this is their summary.
 
-- De arm64-switcher (cpu/src/el2/switch.rs) is regel voor regel Go: WFE op
-  de event stream in plaats van een spinpauze, FP via hvcYield aan de
-  app-kant, stage-2-revoke met TLBI ALLE1IS en SEV. Alle ijzerlessen uit de
-  Go-commentaren staan erin.
-- De Pi's: alles met een ijzerles erachter is geport, soms strenger.
-- De Radxa-bordkant (CRU, GRF, pinmux, PHY-reset, dwmac4, mdio, TRNG, WDT,
-  TSADC): volledig, met de gemeten volgorde van 05/06-08 bewaard.
-- hopfs, conport, irq, drbg, trng, memattr, pool, partmem, grants, flip-ABI:
-  geport, vaak beter.
+## Not dropped
 
-## Gaten die op ijzer tellen (op impact)
+- The arm64 switcher (cpu/src/el2/switch.rs) is Go line for line: WFE on
+  the event stream instead of a spin pause, FP via hvcYield on the app
+  side, stage-2 revoke with TLBI ALLE1IS and SEV. All the hardware lessons
+  from the Go comments are in it.
+- The Pis: everything with a hardware lesson behind it is ported, sometimes
+  stricter.
+- The Radxa board side (CRU, GRF, pinmux, PHY reset, dwmac4, mdio, TRNG,
+  WDT, TSADC): complete, with the measured order of 2026-08-05/06 kept.
+- hopfs, conport, irq, drbg, trng, memattr, pool, partmem, grants, flip ABI:
+  ported, often better.
 
-1. **Scrub zonder clean+invalidate vooraf** (hopos/src/cage.rs `ArmCage::clear`).
-   Go: CleanInv, Clear, Push (A76 10-07). Rust: Clear, Push. Op boards waar
-   de pool Device gemapt is (M4, Radxa) schrijft de `dc cvac` daarna de vuile
-   regels van de vorige huurder over de nullen terug: de heap en stack van de
-   nieuwe app bevatten oude data. Een tamago-app neemt nul aan. Drie agenten
-   onafhankelijk. Fix: één regel `dev::pull` vóór `dev::clear`.
-2. **M4: app-cores zonder wekker en met het verkeerde idle-model**
-   (hopos/src/cage.rs `APP_IDLE_MODE` = 0 buiten QEMU; hopos/src/slots.rs
-   `wake_all` kickt mpidr 0). Een app slaapt op WFE op EL1, die op de M4 niet
-   slaapt: elke bezette app-core spint (Go 02-09: 74 % en 1,3 M rondes/s, met
-   yield plus waker.go 0 % en 47 wekken/s). Wie wél yieldt (sharegroup,
-   SMP-secundair) slaapt in WFI op EL2 en niemand kickt hem op zijn wektijd.
-   Fix ~60 regels, afkijken van kern/slots/waker.go; eerst de wekker en de
-   gerichte kick, dan pas de modus op yield.
-3. **FP-staat op de OS-core** (cpu/src/el2/oscore.rs, en cpu/src/riscv/oscore.rs).
-   Een bewoner die door IRQ, kick of CNTHP onderbroken wordt, verliest q0..q31,
-   FPCR en FPSR aan de volgende bewoner. Nu onschadelijk (kern en Hop zijn
-   softfloat), fout zodra een hardfloat-bewoner (tamago-app, sinds 02-10) de
-   OS-core deelt. Dezelfde klasse als de riscv-FP-fout van vandaag. ~40 regels
-   asm; de ctx-blokken zijn Device, dus via GP-registers of een Normal-buffer.
-4. **Core-reclaim ontbreekt** (hopos/src/cage.rs `join`: 5 ms, dan
-   HOPOS_SHARE_PENDING en Ok). Go: na 2 s HOPOS_CORE_RECLAIM, de kooi van de
-   vasthouder intrekken, nog 2 s, anders ErrDispatch (14/15-08: uren
-   gijzeling). Nu houdt een rekenende bewoner een sharegroup-core voor altijd
-   vast en telt de start als gelukt. 30 tot 40 regels.
-5. **Watchdog aait op een zwakker bewijs** (hopos/src/watchdog.rs `run`: uplink-IP
-   plus heartbeat van Hop). Go: een verse TCP-verbinding naar de eigen :8080
-   (de doofheid van 02-08: nieuwe verbindingen en ICMP dood, alles binnen
-   gezond). Een dove node reset nu niet. Self-dial 50 tot 80 regels, of een
-   voortgangsteller van de switch-actor als goedkopere smaak (20 regels).
-6. **Flip op Apple roept PSCI** (hopos/src/flip.rs `reset` SYSTEM_RESET, `cores_off`
-   AFFINITY_INFO). Zonder EL3 is dat een UNDEF: de weg terug parkeert de core
-   (alleen de WDT haalt hem na 30 s terug) en de koude flip crasht de kern ná
-   het bevriezen van de opslag. De koude flip op de M4 is nog nooit gedaan.
-   ~15 regels: reset via de WDT, koud weigeren zonder EL3.
-7. **Altra, eerste boot** (board/uefi/src/boot.rs MAP_CAP 64 KB, slots.rs
-   `_dropped` stil, één kernvenster 0x8800_0000). Go: 256 KB (duizenden
-   descriptors, 14-07), zes vensterkandidaten omdat 0x9000_0000 bezet bleek
-   (13-07). De Altra heeft v3 nog nooit geboot. ~20 regels plus kandidaten.
-8. **Geen tweede poging zonder link bij de boot** (alle borden, `probe_nic`
-   "no link"). Go probeerde eindeloos (19-09). ~20 regels.
+## Gaps that count on hardware (by impact)
 
-## Prestatie, eerst meten
+1. **Scrub without clean+invalidate first** (hopos/src/cage.rs `ArmCage::clear`).
+   Go: CleanInv, Clear, Push (A76 2026-07-10). Rust: Clear, Push. On boards
+   where the pool is mapped Device (M4, Radxa), the `dc cvac` afterwards
+   writes the dirty lines of the previous tenant back over the zeros: the
+   heap and stack of the new app contain old data. A tamago app assumes
+   zero. Three agents independently. Fix: one line `dev::pull` before
+   `dev::clear`.
+2. **M4: app cores without an alarm and with the wrong idle model**
+   (hopos/src/cage.rs `APP_IDLE_MODE` = 0 outside QEMU; hopos/src/slots.rs
+   `wake_all` kicks mpidr 0). An app sleeps on WFE at EL1, which does not
+   sleep on the M4: every busy app core spins (Go 2026-09-02: 74 % and
+   1.3 M rounds/s, with yield plus waker.go 0 % and 47 wakes/s). Whoever
+   does yield (share group, SMP secondary) sleeps in WFI at EL2 and nobody
+   kicks it at its wake time. Fix ~60 lines, copy from kern/slots/waker.go;
+   first the alarm and the targeted kick, only then the mode on yield.
+3. **FP state on the OS core** (cpu/src/el2/oscore.rs, and cpu/src/riscv/oscore.rs).
+   A resident interrupted by IRQ, kick or CNTHP loses q0..q31, FPCR and
+   FPSR to the next resident. Harmless now (kernel and Hop are softfloat),
+   wrong as soon as a hardfloat resident (tamago app, since 2026-10-02)
+   shares the OS core. The same class as today's riscv FP bug. ~40 lines of
+   asm; the ctx blocks are Device, so via GP registers or a Normal buffer.
+4. **Core reclaim is missing** (hopos/src/cage.rs `join`: 5 ms, then
+   HOPOS_SHARE_PENDING and Ok). Go: after 2 s HOPOS_CORE_RECLAIM, revoke the
+   holder's cage, another 2 s, otherwise ErrDispatch (2026-08-14/15: hours
+   of hostage-taking). Now a computing resident holds a share group core
+   forever and the start counts as successful. 30 to 40 lines.
+5. **Watchdog pets on weaker evidence** (hopos/src/watchdog.rs `run`: uplink IP
+   plus Hop's heartbeat). Go: a fresh TCP connection to its own :8080 (the
+   deafness of 2026-08-02: new connections and ICMP dead, everything inside
+   healthy). A deaf node does not reset now. Self-dial 50 to 80 lines, or a
+   progress counter of the switch actor as a cheaper flavor (20 lines).
+6. **Flip on Apple calls PSCI** (hopos/src/flip.rs `reset` SYSTEM_RESET, `cores_off`
+   AFFINITY_INFO). Without EL3 that is an UNDEF: the way back parks the
+   core (only the WDT brings it back after 30 s) and the cold flip crashes
+   the kernel after freezing the storage. The cold flip on the M4 has never
+   been done. ~15 lines: reset via the WDT, refuse cold without EL3.
+7. **Altra, first boot** (board/uefi/src/boot.rs MAP_CAP 64 KB, slots.rs
+   `_dropped` silent, one kernel window 0x8800_0000). Go: 256 KB (thousands
+   of descriptors, 2026-07-14), six window candidates because 0x9000_0000
+   turned out to be taken (2026-07-13). The Altra has never booted v3.
+   ~20 lines plus candidates.
+8. **No second attempt without link at boot** (all boards, `probe_nic`
+   "no link"). Go retried forever (2026-09-19). ~20 lines.
 
-- Ring: pull/push op head en tail altijd, ook bij Coherence::Hardware; Go
-  sloeg ze op coherente ringen over en cleande de gepeekte RX-kop één keer
-  per burst (T13 03-09: de helft; bulk HOP naar app tot 4x, 04-09).
-- NIC-buffers Normal-NC in plaats van WB op M4 (tg3), O6N en Altra (Go
-  17-07 en 03-09). Kan een deel zijn van O6N v3 76 tot 78 tegen v2 111 tot
-  116 MB/s inkomend. ~8 regels per board.
-- Een app die blijft rekenen (BURN, vitals cpu) hoort RX alleen op de
-  poll-timer van de pomp, die tot 1 s oploopt. Zes regels in applib
-  (`after_deferrable(poll.lo)`), werkt op elk board.
-- igb (Altra): geen 10 ms na CTRL.RST, RDT vóór RXDCTL.ENABLE teruggelezen.
-- VBAR_EL2 niet op een kale vector vóór de flip-sprong (diagnose, Go 01-09).
-- O6N: de gemeten _CPC-klassenbron staat uit (`highest: 0`), de MPIDR-tabel
-  beslist small/big; de console op de SPCR-UART waar Go (09-09) de
-  header-UART nam. Werkt nu, kosten niet gemeten.
+## Performance, measure first
 
-## Klein
+- Ring: pull/push on head and tail always, even with Coherence::Hardware;
+  Go skipped them on coherent rings and cleaned the peeked RX head once per
+  burst (T13 2026-09-03: half; bulk HOP to app up to 4x, 2026-09-04).
+- NIC buffers Normal-NC instead of WB on M4 (tg3), O6N and Altra (Go
+  2026-07-17 and 2026-09-03). Could be part of O6N v3 76 to 78 versus v2 111
+  to 116 MB/s inbound. ~8 lines per board.
+- An app that keeps computing (BURN, vitals cpu) hears RX only on the
+  pump's poll timer, which grows up to 1 s. Six lines in applib
+  (`after_deferrable(poll.lo)`), works on every board.
+- igb (Altra): no 10 ms after CTRL.RST, RDT read back before
+  RXDCTL.ENABLE.
+- VBAR_EL2 not on a bare vector before the flip jump (diagnostics, Go
+  2026-09-01).
+- O6N: the measured _CPC class source is off (`highest: 0`), the MPIDR
+  table decides small/big; the console on the SPCR UART where Go
+  (2026-09-09) took the header UART. Works now, cost not measured.
 
-Radxa: geen serienummer-terugval voor de MAC (elke Radxa zonder hopos.node
-dezelfde), xHCI zonder barrières binnen een TRB op Normal-NC, VOP2-klokboom
-uit de keten, UTMI-breedte onzeker. Pi: cmdline.txt zonder lengtetoets (Go
-19-07), mailbox spint tot 500 ms op core 0, vroege faultdump weg, gui 16 bpp.
-Kern: laatste woorden na een stop gaan verloren, conport meldt "vol" niet aan
-de client, appregels synchroon naar de UART, docs/boards-radxa.md en het
-memattr-commentaar lopen achter.
+## Small
+
+Radxa: no serial-number fallback for the MAC (every Radxa without
+hopos.node gets the same one), xHCI without barriers within a TRB on
+Normal-NC, VOP2 clock tree outside the chain, UTMI width uncertain. Pi:
+cmdline.txt without a length check (Go 2026-07-19), mailbox spins up to
+500 ms on core 0, early fault dump gone, gui 16 bpp. Kernel: last words
+after a stop get lost, conport does not report "full" to the client, app
+lines go synchronously to the UART, docs/boards-radxa.md and the memattr
+comment lag behind.
