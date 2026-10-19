@@ -410,7 +410,7 @@ Features buiten het board: `gui`, `media`, `vhe`, en de meetkernen
 | `syncprobe` | De duurzaamheidsprobe voor `OP_SYNC` |
 | `display` | Houdt de fb-grant, tekent klok, cursor en invoer |
 | `decode` | Een stream door de VPU (feature `media`) |
-| `cloudflared-lean` | De Cloudflare-tunnel in Rust (TLS 1.3, HTTP/2, Cap'n Proto) |
+| `cloudflared-lean` | De Cloudflare-tunnel in Rust (TLS 1.3, HTTP/2, Cap'n Proto); sinds 19-10 in de Hop-repo (`apps/cloudflared-lean`), met Hop's release |
 
 Go-apps (`go/`, `docs/go-apps.md`): gebouwd met de gepatchte
 tamago-toolchain tegen de Go-SDK `metal/v2` (buiten deze repo), met een

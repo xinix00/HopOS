@@ -90,7 +90,6 @@ members = [
     # van de Go-meter (`cargo run -p loc`); std, dus ook geen default-member.
     "tools/loc",
     "hopos",
-    "apps/cloudflared-lean",
 ]
 # De host-poort (cargo test, cargo clippy) draait over de bibliotheken; de
 # twee binaries bouwen alleen voor een target (tools/gate.sh).
@@ -169,9 +168,6 @@ default-members = [
     # vitals draagt de toetsen van zijn rekenkant en zijn rapporten op de
     # host.
     "apps/vitals",
-    # cloudflared-lean draagt de toetsen van zijn protocollagen op de host
-    # (registratie, Cap'n Proto, ingress, de CA's door leantls).
-    "apps/cloudflared-lean",
 ]
 
 [workspace.package]

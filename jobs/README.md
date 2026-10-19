@@ -12,7 +12,7 @@ curl -X POST -d @jobs/job-stulp.local.json http://NODE:9080/v1/jobs
 | Spec | Wat | Artifact |
 | --- | --- | --- |
 | `job-cloudflared.json` | cloudflared's eigen `tunnel run` als slot-app (30 MB, 256 MB partitie) | release `apps` van xinix00/HopOS, Go (`-tamago.elf`) |
-| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release `apps` van xinix00/HopOS, Rust (`apps/cloudflared-lean`, alleen arm64) |
+| `job-cloudflared-lean.json` | het tunnelprotocol zelf op lean, 4 MB; wijst naar welcome op `10.100.0.2:80` | release van xinix00/hop (`apps/cloudflared-lean`, arm64 en riscv64) |
 | `job-spin.json` | de Spin-server met zijn volume `/spin` | release `rolling` van xinix00/Spin |
 | `job-stulp.json` | Stulp, de huisautomatisering, poort 80 en de attach-poort 7000 | release `apps` van xinix00/stulp |
 | `job-stulp-plugins.json` | de plugins van Stulp (Matter op 5540), hangen aan Stulp | release `apps` van xinix00/stulp |
@@ -38,7 +38,6 @@ xinix00/HopOS als `<app>-<arch>.elf`, met `<arch>` de `node.arch` van Hop
 
 ```
 https://github.com/xinix00/HopOS/releases/download/apps/welcome-arm64.elf
-https://github.com/xinix00/HopOS/releases/download/apps/cloudflared-lean-arm64.elf
 ```
 
 `tools/release.sh` bouwt ze (de lijst `APPS` in `tools/lib.sh` plus decode

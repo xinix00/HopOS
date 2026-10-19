@@ -81,9 +81,8 @@ echo "== target: apps ($(echo $APPS | sed 's/ /, /g'))"
 # shellcheck disable=SC2086
 cargo build --quiet --target aarch64-unknown-none-softfloat $(printf ' -p %s' $APPS)
 # De stage-1 van applib::mmu (de MMU-aan, de vectortabel, het glas)
-# bestaat alleen op het target; de host-ronde ziet alleen de tabellen. Zo
-# ook de start van cloudflared-lean (op de host een lege `main`).
-cargo clippy --quiet --target aarch64-unknown-none-softfloat -p display -p cloudflared-lean -- -D warnings
+# bestaat alleen op het target; de host-ronde ziet alleen de tabellen.
+cargo clippy --quiet --target aarch64-unknown-none-softfloat -p display -- -D warnings
 echo "== target: hopos (qemuvirt)"
 cargo build --quiet --target aarch64-unknown-none-softfloat -p hopos --features board-qemuvirt
 echo "== target: hopos (rpi4, rpi5)"

@@ -45,7 +45,7 @@ gui/        the framebuffer grant, the USB input service, the RK3566 scanout
 media/      the O6N video codec (mve) and the optical drive
 applib/     the app runtime; apps link against it
 appspike/   the ABI test app
-apps/       welcome, bench, vitals, display, decode, syncprobe, cloudflared-lean
+apps/       welcome, bench, vitals, display, decode, syncprobe
 go/         apps whose source is Go (cloudflared), built with TamaGo
 jobs/       job specs for the apps on the nodes
 hopos/      the kernel binary; picks exactly one board

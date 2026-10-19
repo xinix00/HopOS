@@ -10,7 +10,7 @@ HOP_DIR="${HOP_DIR:-$DIR/../hop/hop}"
 # tools/release.sh levert ze uit als <app>-<arch>.elf (de rollende release
 # `apps`, jobs/README.md), met decode (het media-vlak, apps/decode) erbij;
 # voor riscv64 alleen APPS_RISCV64.
-APPS="appspike welcome bench display vitals cloudflared-lean syncprobe"
+APPS="appspike welcome bench display vitals syncprobe"
 APPS_RISCV64="appspike welcome"
 
 # De staging van virt, virt-riscv en de Pi's (board/*/src/slots.rs
