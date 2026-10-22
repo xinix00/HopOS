@@ -48,12 +48,24 @@ if [ "$HOP_REV" = worktree ]; then
 	# Eén tar over de hele lijst (geen xargs: die kan hem in stukken
 	# knippen, en een tweede archief achter het eerste leest niemand).
 	(cd "$HOP_DIR" && git ls-files -z --cached --others --exclude-standard |
-		tar --null -T - -cf -) | tar -x -C "$SRC"
+		tar --null -T - -cf -) >"$WORK/src.tar"
 	REV_NAME="worktree on $(git -C "$HOP_DIR" rev-parse --short HEAD)"
 else
-	git -C "$HOP_DIR" archive "$HOP_REV" | tar -x -C "$SRC"
+	git -C "$HOP_DIR" archive "$HOP_REV" >"$WORK/src.tar"
 	REV_NAME="$HOP_REV $(git -C "$HOP_DIR" rev-parse --short "$HOP_REV")"
 fi
+tar -x -C "$SRC" -f "$WORK/src.tar"
+# Een andere bron dan de vorige keer krijgt verse mtimes. tar houdt die van
+# het origineel, en cargo vergelijkt mtimes: een werkboom met wijzigingen
+# van vóór de laatste build (een ring met HEAD tussendoor) liet de oude
+# binary staan. Gemeten 22-10: de herstart-ring draaide zo een Hop zonder
+# /restart (404). Dezelfde bron blijft incrementeel.
+SUM="$(shasum -a 256 "$WORK/src.tar" | cut -d' ' -f1)"
+if [ "$SUM" != "$(cat "$WORK/src.sum" 2>/dev/null || true)" ]; then
+	find "$SRC" -type f -exec touch {} +
+	echo "$SUM" >"$WORK/src.sum"
+fi
+rm -f "$WORK/src.tar"
 # De lean-tags van Hop gelijk aan die van deze werkboom: applib brengt
 # leannet op onze tag mee, en Hop's eigen leanhttp op een oudere tag zou
 # een tweede leannet (en dus een tweede TcpConn) in het image zetten. Dit

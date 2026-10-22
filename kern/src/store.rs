@@ -753,11 +753,21 @@ async fn next<T: Timer, C: Console>(
         if let Some(n) = cx.queue.take(cx.svc, hop, data) {
             return Ok((1, n));
         }
+        // Een Hop die wegging (een stop of een herstart door zijn
+        // supervisor) wacht niet tot het einde: zijn verbinding houdt een
+        // van zijn drie plaatsen vast ([`crate::system::MAX_HOP_CONNS`]), en
+        // de nieuwe Hop kreeg er tot 22-10 tot 5 s lang maar twee (zijn
+        // init-jobs en zijn klok "connection closed", HOPOS_SYSTEM_REFUSED).
+        // Dezelfde tik als het toezicht op elke verbinding
+        // ([`crate::system::LIFE_TICK`]).
+        if cx.hop_slot.and_then(|s| cx.svc.current(s)) != hop {
+            return Ok((0, 0));
+        }
         let now = cx.timer.now();
         if now >= until {
             return Ok((0, 0));
         }
-        let left = Duration::from_nanos(until - now);
+        let left = Duration::from_nanos(until - now).min(LIFE_TICK);
         let _ = select(cx.queue.work.wait(), cx.timer.sleep(left)).await;
     }
 }

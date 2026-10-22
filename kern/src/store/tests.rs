@@ -6,7 +6,7 @@ use crate::cage::tests::SparseMem;
 use crate::rpc::{FsActor, tests::disk};
 use crate::slots::Mount;
 use crate::slots::tests::{FakeConsole, Obey, actor, s, start_job, stop};
-use crate::system::{Conn, End, FlipBundle, Hooks, LogTee, SlotLogs, System};
+use crate::system::{Conn, End, FlipBundle, Hooks, HopImage, LogTee, SlotLogs, System};
 use crate::testutil::FakeTimer;
 use abi::hopabi::{OP_READ as READ, OP_WRITE as WRITE, Req};
 use abi::layout::port_ip4;
@@ -82,6 +82,14 @@ impl Hooks for NoHooks {
     fn flip(&self, _: &FlipBundle, _: &[u8; 32]) -> crate::Result {
         Ok(())
     }
+    fn hop_restart(
+        &self,
+        _: Option<&HopImage>,
+        _: core::time::Duration,
+    ) -> core::result::Result<(), crate::system::Fail> {
+        Ok(())
+    }
+    fn hop_refused(&self, _: &'static str, _: &crate::system::Fail) {}
     fn kern(&self) -> crate::cage::Status {
         crate::cage::Status::default()
     }

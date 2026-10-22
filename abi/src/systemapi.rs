@@ -30,6 +30,15 @@
 //! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (quarantaine)
 //! ```
 //!
+//! # Hop zelf herstarten
+//!
+//! ```text
+//! STATE_PUT(blob)                      bij elke wijziging: de staat bij de kern
+//! START_SLOT(HOP_IMAGE_JOB), STREAM    alleen voor een nieuw image
+//! HOP_RESTART(slot | 0, sha, termijn)  -> Ok; Hop vertrekt zelf, dan de nieuwe
+//! STATE_GET(0)                         de nieuwe Hop: zijn staat terug, adopteren
+//! ```
+//!
 //! # De store-ops van een app
 //!
 //! Een app kopieert op afroep tussen zijn eigen map in de object-store
@@ -287,7 +296,67 @@ pub enum PrivOp {
     /// fouttekst. `STATUS_NO_ENT` als antwoord: de opdracht bestaat niet
     /// meer (de app is gestopt); Hop gooit hem dan weg.
     StoreDone = 0x4A,
+    /// Leg de staat van Hop bij de kern neer: `data` het hele blob,
+    /// hoogstens [`HOP_STATE_MAX`] bytes, vervangend en atomair (een lezer
+    /// ziet het oude of het nieuwe blob, nooit een mengsel); nul bytes wist
+    /// het. Het blob leeft in het geheugen van de kern: het overleeft een
+    /// herstart van Hop ([`PrivOp::HopRestart`], of een crash die de kern
+    /// opvangt) en sterft met de boot. Zo kan een staat van een vorige
+    /// boot nooit een bewoner van deze boot voor de zijne houden (het spook
+    /// van 02-10 kwam uit een bestand op hopfs). De kern leest het niet.
+    StatePut = 0x4B,
+    /// Lees de staat van Hop: `n` de offset in het blob. Het antwoord:
+    /// `size` de maat van het hele blob (0: er ligt niets, ook dan
+    /// `STATUS_OK`), `data` de bytes vanaf `n`, zoveel als in het antwoord
+    /// past en nooit meer dan [`HOP_STATE_MAX`]. Een `n` voorbij het einde
+    /// is een fout.
+    StateGet = 0x4C,
+    /// Herstart Hop in zijn eigen slot, met zijn eigen image of een nieuw:
+    /// `off` 0 voor hetzelfde image, anders het slot waarin het nieuwe image
+    /// rauw gestroomd is (START_SLOT met de jobnaam [`HOP_IMAGE_JOB`], dan
+    /// STREAM_IMAGE), `path` dan de verwachte SHA-256 (32 bytes, of 64
+    /// hex-tekens; bij `off` 0 leeg, een som zonder image weigert de kern),
+    /// `n` in de lage 32 bits de termijn in ms waarbinnen Hop zelf vertrekt
+    /// (0: [`HOP_RESTART_GRACE_MS`], hoogstens [`HOP_RESTART_GRACE_MAX_MS`]);
+    /// de hoge 32 bits zijn vlaggen, nu geen enkele: een gezette weigert de
+    /// kern, liever "nee" dan iets anders dan gevraagd. `STATUS_OK`: het
+    /// image is getoetst (som en ELF) en overgenomen, het slot is terug in
+    /// de pool. Dan is Hop aan zet, zoals een systemd-dienst die om zijn
+    /// eigen herstart vraagt: hij schrijft dit antwoord en zijn staat weg en
+    /// keert terug uit `main` (een exit). De kern wacht daar hoogstens de
+    /// termijn op; vertrok Hop dan nog niet, dan volgt de stop-bel (de
+    /// kill-vlag) met een korte termijn als vangnet. Daarna plaatst de kern
+    /// de nieuwe Hop in hetzelfde slot, met dezelfde env, poorten en
+    /// bevoegdheid. De andere bewoners
+    /// merken niets; de staat van Hop ligt in [`PrivOp::StatePut`]. Haalt
+    /// een nieuw image het niet (de plaatsing faalt, of de nieuwe Hop stopt
+    /// of faalt binnen 30 s), dan zet de kern het vorige terug. Een fout:
+    /// er ligt al een herstart klaar, of er is geen image om "hetzelfde" uit
+    /// te plaatsen (na een warme kern-flip die over de staging ging). Viel
+    /// de weigering bij de toets van het image (som, ELF), dan is het slot
+    /// al terug in de pool en is een STOP_SLOT erop een no-op; viel hij
+    /// ervóór (velden, een onvolledige stroom), dan staat de stroom nog en
+    /// breekt STOP_SLOT hem af.
+    HopRestart = 0x4D,
 }
+
+/// De grootste staat van Hop ([`PrivOp::StatePut`]): één hap, dus één call.
+pub const HOP_STATE_MAX: usize = MAX_IO_CHUNK;
+
+/// De termijn van [`PrivOp::HopRestart`] als `n` 0 zegt: zo lang krijgt
+/// Hop om zelf te vertrekken, Hop's eigen 3 s van de nette stop.
+pub const HOP_RESTART_GRACE_MS: u64 = 3000;
+
+/// De langste termijn van [`PrivOp::HopRestart`]: de lease-TTL en de
+/// agent-timeout van de leader zijn 30 s, en een herstart die langer
+/// duurt dan dat, is voor het cluster een verloren node.
+pub const HOP_RESTART_GRACE_MAX_MS: u64 = 30_000;
+
+/// De jobnaam waarmee Hop een slot reserveert voor een nieuw image van
+/// zichzelf: de bytes van STREAM_IMAGE gaan rauw de partitie in, zonder
+/// plaatsing en zonder start, tot [`PrivOp::HopRestart`] ze opeist (de vorm
+/// van `kern::system::FLIP_BUNDLE_JOB`).
+pub const HOP_IMAGE_JOB: &[u8] = b"hopos.hop-image";
 
 /// Vlag in `n` van [`PrivOp::Flip`]: de KOUDE flip. De kern stopt elke
 /// bewoner naast Hop, zet de app-cores uit en springt zonder bewoners over
@@ -300,13 +369,13 @@ pub const FLIP_COLD: u64 = 1;
 /// Het laagste bevoegde opnummer.
 pub const PRIV_OP_FIRST: u8 = PrivOp::StartSlot as u8;
 /// Het hoogste bevoegde opnummer.
-pub const PRIV_OP_LAST: u8 = PrivOp::StoreDone as u8;
+pub const PRIV_OP_LAST: u8 = PrivOp::HopRestart as u8;
 
 const _: () = assert!(PRIV_OP_FIRST > crate::hopabi::OP_MAX);
 
 impl PrivOp {
     /// Alle bevoegde operaties, in opnummer-volgorde.
-    pub const ALL: [PrivOp; 11] = [
+    pub const ALL: [PrivOp; 14] = [
         Self::StartSlot,
         Self::StreamImage,
         Self::StopSlot,
@@ -318,6 +387,9 @@ impl PrivOp {
         Self::StoreRead,
         Self::StoreWrite,
         Self::StoreDone,
+        Self::StatePut,
+        Self::StateGet,
+        Self::HopRestart,
     ];
 
     /// De bevoegde operatie van een opnummer, of `None` voor een gewone of
@@ -336,6 +408,9 @@ impl PrivOp {
             0x48 => Self::StoreRead,
             0x49 => Self::StoreWrite,
             0x4A => Self::StoreDone,
+            0x4B => Self::StatePut,
+            0x4C => Self::StateGet,
+            0x4D => Self::HopRestart,
             _ => return None,
         })
     }

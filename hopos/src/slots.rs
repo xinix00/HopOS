@@ -32,10 +32,32 @@
 //! idle van de kern, `cpu::el2::OsCore`), 64 MiB, de env met de `HOPOS_*`-keuzes,
 //! en het `Privilege`-token hoort bij slot 1 vanaf de boot (`main`). Zijn
 //! start draagt de uplink-poorten (8080 agent, 9080 leader), die de
-//! lifecycle doorzet zoals die van een jobspec, en daarna bewaakt een taak
-//! de bewoner: elke wissel één regel, een fault of exit luid, zonder stop
-//! (wie Hop herstart is een volgende stap). Appspike plaatst de kern dan
+//! lifecycle doorzet zoals die van een jobspec. Appspike plaatst de kern dan
 //! niet meer: dat doet Hop zelf, via de system-API.
+//!
+//! Eén taak is de supervisor van Hop ([`Supervisor`]), zoals systemd voor
+//! een dienst met `Restart=on-failure`: plaatsen, bewaken (elke wissel één
+//! regel, een fault of exit luid met de diagnose), en dan:
+//!
+//! - **een crash**: stoppen, en na een back-off van 1, 2, 4 ... hoogstens
+//!   30 s hetzelfde image opnieuw (`HOPOS_HOP_RESTART reason=crash`); na
+//!   een minuut gezond begint de back-off weer bij 1 s;
+//! - **een HOP_RESTART van Hop zelf** (de haak [`hop_restart`] stuurt de
+//!   supervisor een bericht): Hop schrijft zijn antwoord en zijn staat weg
+//!   en vertrekt zelf; de kern wacht daar hoogstens zijn termijn op, en
+//!   belt pas daarna (`HOPOS_HOP_STOPPED reason=request left=self|bell`,
+//!   geen `HOPOS_HOP_EXIT`: die exit is gevraagd), dan het nieuwe of
+//!   hetzelfde image (`HOPOS_HOP_RESTART reason=request`);
+//! - **een nieuw image dat het niet haalt** (de plaatsing faalt, of de
+//!   nieuwe Hop valt binnen 30 s): het vorige terug (`HOPOS_HOP_ROLLBACK`).
+//!
+//! Elke nieuwe Hop krijgt hetzelfde slot, dezelfde env, poorten, volume en
+//! `Placement`, en dus de bevoegdheid (het token hoort bij slot 1), en
+//! vindt zijn staat in de kern terug (`STATE_GET`; `HOPOS_HOP_STATE kept=`
+//! zegt hoeveel er klaarligt). De andere bewoners draaien door. Kan Hop
+//! niet herstart worden (geen image meer na een warme flip over de
+//! staging), dan blijft hij staan zoals hij viel, voor de diagnose
+//! (`HOPOS_HOP_RESTART_REFUSED`).
 
 extern crate alloc;
 
@@ -191,6 +213,7 @@ use alloc::vec::Vec;
 use board::Board;
 use board::stage::StagedRole;
 use cage::SlotCores;
+use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use core::time::Duration;
 use cpu::el2::{self, CoreState};
@@ -206,6 +229,7 @@ use kern::slots::{
 use kern::system::{Fail, LogTee, SlotLogs};
 use kern::{Region, Slot};
 use sync::mpsc::Mailbox;
+use sync::{Local, Signal, select};
 use vboard::slots as vslots;
 
 /// De brievenbus van de lifecycle-actor. Hij staat in `main` naast de
@@ -290,7 +314,9 @@ const SERVICE_BUF: usize = (RING_DATA_CAP / 2) as usize;
 /// Hop niet opnieuw: Hop draait door (`HOPOS_FLIP_ADOPT`).
 ///
 /// `app_env` is de env van een gestagede app (`hopos.appenv`, [`app_env`]);
-/// Hop krijgt de zijne uit `hopos.cfg`.
+/// Hop krijgt de zijne uit `hopos.cfg`. `system` is de system-API van deze
+/// boot: de supervisor van Hop leest er de maat van Hop's staat uit en
+/// ruimt er de stromen van een gestopte Hop op.
 #[inline(never)] // eigen frame, niet in dat van `setup` (main.rs)
 pub(crate) fn start(
     exec: &'static Executor,
@@ -298,6 +324,7 @@ pub(crate) fn start(
     adopt: Option<Vec<kern::slots::SlotState>>,
     app_env: Vec<u8>,
     cfg: NodeCfg<'static>,
+    system: &'static crate::KernSystem,
 ) {
     let board = &crate::BOARD;
     // FLIP: een geadopteerde Hop zit waar hij zat, met zijn groep en core.
@@ -461,16 +488,23 @@ pub(crate) fn start(
             println!("slots: servicer {i} not spawned: {e:?} HOPOS_SLOT_SPAWN");
         }
     }
-    // FLIP: Hop leeft nog; alleen zijn poorten en de bewaking komen terug.
+    // FLIP: Hop leeft nog; alleen zijn poorten en de supervisor komen terug.
+    let hop = HopNode {
+        exec,
+        plan,
+        pool_bytes,
+        cfg,
+        system,
+    };
     if let Some(core) = hop_core {
-        if let Err(e) = exec.spawn(resume_hop(exec, plan, core)) {
-            println!("slots: Hop watch not spawned: {e:?} HOPOS_SLOT_SPAWN");
+        if let Err(e) = exec.spawn(hop.supervise(Some(core))) {
+            println!("slots: Hop supervisor not spawned: {e:?} HOPOS_SLOT_SPAWN");
         }
         return;
     }
     let spawned = match role {
-        Ok(StagedRole::App) => exec.spawn(place_first(exec, plan, app_env)),
-        Ok(StagedRole::Hop) => exec.spawn(place_hop(exec, plan, pool_bytes, cfg)),
+        Ok(StagedRole::App) => exec.spawn(place_first(exec, hop.plan, app_env)),
+        Ok(StagedRole::Hop) => exec.spawn(hop.supervise(None)),
         Err(word) => {
             println!(
                 "slots: staged role word {word:#x} is neither app (0) nor hop (1), nothing placed HOPOS_SLOT_NONE"
@@ -679,105 +713,651 @@ fn default_node(cfg: &NodeCfg<'_>) -> String {
     name
 }
 
-/// De plaatsing van Hop: het gestagede image één keer in slot 1, met de
-/// env van de node, dan de poorten op de uplink en de bewaking.
-async fn place_hop(
+/// Wat de supervisor van Hop van de boot meekrijgt: genoeg om Hop's env en
+/// core-vraag te bouwen ([`HopNode::spec`]) en zijn staat te zien.
+struct HopNode {
     exec: &'static Executor,
     plan: abi::layout::Plan,
     pool_bytes: u64,
     cfg: NodeCfg<'static>,
-) {
-    let Some(img) = vslots::staged_image() else {
-        println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
-        return;
-    };
-    let Some(slot) = Slot::new(HOP_SLOT) else {
-        return;
-    };
-    let node_ip = wait_uplink(exec).await;
-    // De env van Hop komt uit de config van het board (kern::nodecfg).
-    let node = default_node(&cfg);
-    let hop_group = kern::pool::hop_group();
-    let facts = kern::nodecfg::Facts {
-        default_node: &node,
-        node_ip,
-        dns: crate::net::uplink_dns(),
-        port: HOP_PORT,
-        app_cores: plan.app_cores(),
-        hop_on_os: hop_on_os(),
-        os_shared: arch::SHARES_OS_CORE,
-        hop_group: core::str::from_utf8(hop_group.as_slice()).unwrap_or("hop"),
-        cold_flip: crate::flip::COLD_FLIP,
-        pool_bytes,
-        hop_mem: HOP_MEM,
-    };
-    let env = match crate::config::hop_env(&cfg, &facts) {
-        Ok(e) => e,
-        Err(e) => {
-            println!("slots: Hop env: {e}, Hop not started HOPOS_HOP_FAIL");
-            return;
-        }
-    };
-    let at = match hop_placement(&plan, &cfg) {
-        Ok(a) => a,
-        Err(e) => {
-            println!("slots: Hop placement: {e}, Hop not started HOPOS_HOP_FAIL");
-            return;
-        }
-    };
-    let volume = match kern_mounts(&[HOP_VOLUME]) {
-        Ok(m) => m,
-        Err(e) => {
-            println!("slots: Hop volume: {e}, Hop not started HOPOS_HOP_FAIL");
-            return;
-        }
-    };
-    // Zonder switch (geen NIC) is er niets door te zetten, en zou de start
-    // op zijn poorten falen.
-    let ports = if crate::net::switch_up() {
-        hop_ports()
-    } else {
-        Vec::new()
-    };
-    // Vóór de plaatsing: zodra de poort aan de switch hangt, mag hij niet
-    // meer op Hop's ring wachten. Na de plaatsing volgt de echte core.
-    set_resident(slot.get(), hop_on_os());
-    let entry = match place(slot, img, HOP_MEM, at, env.as_bytes(), volume, ports).await {
-        Ok(e) => e,
-        Err(e) => {
-            println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL");
-            return;
-        }
-    };
-    let st = status(slot).await;
-    let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
-    set_resident(slot.get(), core == 0);
-    let part = st.and_then(|s| s.partition).unwrap_or_default();
-    let cpu = abi::layout::Core::new(core).map_or(core, |c| plan.phys_core(c));
-    println!(
-        "HOPOS_HOP_START slot={slot} core={core} cpu={cpu} entry={entry:#x} part={:#x}+{:#x} image={} env={} class={}",
-        part.base,
-        part.size,
-        img.len(),
-        env.len(),
-        crate::BOARD.core_class(cpu)
-    );
-    watch_hop(exec, &plan, slot, core).await;
+    system: &'static crate::KernSystem,
 }
 
-/// FLIP: Hop kwam mee over een kern-flip. Zijn kooi, ringen, servicer en
-/// poorten zijn al terug (`start`, de adoptie en `Lifecycle::republish`);
-/// de bewaking loopt verder.
-async fn resume_hop(exec: &'static Executor, plan: abi::layout::Plan, core: usize) {
-    let Some(slot) = Slot::new(HOP_SLOT) else {
-        return;
+impl HopNode {
+    /// De supervisor van Hop: plaatsen (of, na een warme flip, de
+    /// meegekomen Hop overnemen op `resumed`, zijn core), bewaken, en bij
+    /// een crash of een HOP_RESTART stoppen en opnieuw plaatsen
+    /// ([`Supervisor`]).
+    async fn supervise(self, resumed: Option<usize>) {
+        let Some(slot) = Slot::new(HOP_SLOT) else {
+            return;
+        };
+        if let Some(core) = resumed {
+            set_resident(slot.get(), core == 0);
+        } else if crate::flip::staged_hop().is_none() {
+            println!("slots: role hop but no staged image, Hop not started HOPOS_HOP_FAIL");
+            return;
+        }
+        let node_ip = wait_uplink(self.exec).await;
+        let spec = self.spec(node_ip, resumed.is_some());
+        let sup = Supervisor {
+            exec: self.exec,
+            plan: self.plan,
+            slot,
+            system: self.system,
+            spec,
+            current: Image::Staged,
+            previous: None,
+            restarts: 0,
+            crashes: 0,
+        };
+        let core = match resumed {
+            Some(core) => {
+                println!(
+                    "slot {slot}: Hop carried over the flip on core {core}, not restarted HOPOS_HOP_RESUMED"
+                );
+                resumed_image();
+                core
+            }
+            None => match sup.put().await {
+                Ok(core) => core,
+                Err(e) => {
+                    println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL");
+                    return;
+                }
+            },
+        };
+        sup.run(core).await;
+    }
+
+    /// De env en de core-vraag van Hop, zoals bij elke plaatsing. Op de
+    /// boot is een fout het einde (`HOPOS_HOP_FAIL`, zoals altijd); na een
+    /// flip draait de meegekomen Hop door, maar kan hij niet herstart
+    /// worden.
+    fn spec(&self, node_ip: Option<core::net::Ipv4Addr>, resumed: bool) -> Option<HopSpec> {
+        let cut = if resumed {
+            "Hop runs on but cannot be restarted HOPOS_HOP_RESTART_REFUSED no spec"
+        } else {
+            "Hop not started HOPOS_HOP_FAIL"
+        };
+        // De env van Hop komt uit de config van het board (kern::nodecfg).
+        let node = default_node(&self.cfg);
+        let hop_group = kern::pool::hop_group();
+        let facts = kern::nodecfg::Facts {
+            default_node: &node,
+            node_ip,
+            dns: crate::net::uplink_dns(),
+            port: HOP_PORT,
+            app_cores: self.plan.app_cores(),
+            hop_on_os: hop_on_os(),
+            os_shared: arch::SHARES_OS_CORE,
+            hop_group: core::str::from_utf8(hop_group.as_slice()).unwrap_or("hop"),
+            cold_flip: crate::flip::COLD_FLIP,
+            pool_bytes: self.pool_bytes,
+            hop_mem: HOP_MEM,
+        };
+        let env = match crate::config::hop_env(&self.cfg, &facts) {
+            Ok(e) => e,
+            Err(e) => {
+                println!("slots: Hop env: {e}, {cut}");
+                return None;
+            }
+        };
+        match hop_placement(&self.plan, &self.cfg) {
+            Ok(at) => Some(HopSpec { env, at }),
+            Err(e) => {
+                println!("slots: Hop placement: {e}, {cut}");
+                None
+            }
+        }
+    }
+}
+
+/// FLIP: wat een herstart van een meegekomen Hop zou plaatsen. Een image
+/// dat Hop de vorige kern gaf (HOP_RESTART), lag in diens heap en kwam niet
+/// mee; deze kern kent alleen het gestagede, als dat er nog is.
+fn resumed_image() {
+    match crate::flip::staged_hop() {
+        Some(img) => println!(
+            "slots: a restart of Hop on this kernel places the staged image ({} bytes); an image Hop gave the previous kernel stayed behind HOPOS_HOP_IMAGE_STAGED",
+            img.len()
+        ),
+        None => println!(
+            "slots: no staged Hop image left (the staging went to the flip): Hop runs on, a crash keeps him down and a restart needs a new image HOPOS_HOP_IMAGE_NONE"
+        ),
+    }
+}
+
+/// Wat de supervisor bewaart om Hop opnieuw te plaatsen: de env (uit
+/// `hopos.cfg` en de feiten van de node) en de core-vraag. Volume, poorten
+/// en partitiemaat zijn constanten ([`HOP_VOLUME`], [`HOP_PORTS`],
+/// [`HOP_MEM`]), en het slot is [`HOP_SLOT`]: daar hoort het
+/// `Privilege`-token bij, dus elke Hop in dat slot is bevoegd.
+struct HopSpec {
+    env: kern::nodecfg::EnvBlob,
+    at: Placement,
+}
+
+/// Het image van een Hop.
+enum Image {
+    /// Het gestagede ([`crate::flip::staged_hop`]), bij elke plaatsing
+    /// opnieuw opgezocht.
+    Staged,
+    /// Een image dat Hop gaf (HOP_RESTART), in de kern-heap.
+    Taken(Vec<u8>),
+}
+
+impl Image {
+    /// De bytes, of `None` als het gestagede image weg is.
+    fn bytes(&self) -> Option<&[u8]> {
+        match self {
+            Image::Staged => crate::flip::staged_hop(),
+            Image::Taken(v) => Some(v),
+        }
+    }
+
+    fn source(&self) -> Source {
+        match self {
+            Image::Staged => Source::Staged,
+            Image::Taken(_) => Source::Taken,
+        }
+    }
+}
+
+/// Waar "hetzelfde image" nu vandaan komt, voor de haak.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Source {
+    Staged,
+    Taken,
+}
+
+/// Een aangenomen HOP_RESTART: het nieuwe image (`None`: hetzelfde) en de
+/// termijn van de nette stop.
+struct Asked {
+    image: Option<Vec<u8>>,
+    grace: Duration,
+}
+
+/// De aangenomen herstart, van de haak ([`hop_restart`]) naar de
+/// supervisor. Beide op de executor van de OS-core, zoals de flip
+/// (`flip::PENDING`): een bericht, geen gedeelde tabel.
+static ASKED: Local<Cell<Option<Asked>>> = Local::new(Cell::new(None));
+/// De bel van de supervisor bij een aangenomen herstart.
+static ASK_BELL: Signal = Signal::new();
+/// Wat de supervisor nu zou plaatsen als "hetzelfde image", gezet zolang
+/// hij een Hop bewaakt die hij kan herstarten; `None` daarbuiten. De haak
+/// leest het om vooraf te weigeren in plaats van na zijn `Ok`.
+static SAME: Local<Cell<Option<Source>>> = Local::new(Cell::new(None));
+
+/// Hoe vaak de supervisor kijkt of een Hop die om zijn herstart vroeg al
+/// vertrok. Er is geen bel voor de exit van een bewoner (de bewaking pollt
+/// zijn status net zo, maar per seconde); 50 ms houdt de herstart kort
+/// zonder de lifecycle-actor te belasten: hoogstens 600 vragen in de
+/// langste termijn.
+const LEAVE_POLL: Duration = Duration::from_millis(50);
+
+/// Het vangnet als Hop binnen zijn termijn niet zelf vertrok: de stop-bel
+/// met deze korte termijn, dan de intrekking. Hop had zijn kans al.
+const BELL_STOP: Duration = Duration::from_secs(1);
+
+/// De stop van een Hop die al dood is (exit of fault): niets om netjes af
+/// te sluiten, de kooi is al stil.
+const DEAD_STOP: Duration = Duration::from_secs(1);
+
+/// De proeftijd van een nieuw image: stopt of faalt de nieuwe Hop
+/// daarbinnen, dan komt het vorige terug (`HOPOS_HOP_ROLLBACK`). 30 s is de
+/// lease-TTL en de agent-timeout van de leader: wie dat haalt, heeft zich
+/// bij het cluster gemeld.
+const PROBATION: Duration = Duration::from_secs(30);
+
+/// Zo lang gezond, en de volgende crash begint de back-off weer bij 1 s
+/// (systemd telt zijn herstarts per venster, `StartLimitIntervalSec`).
+const HEALTHY: Duration = Duration::from_secs(60);
+
+/// De langste back-off tussen twee crash-herstarts.
+const BACKOFF_MAX: Duration = Duration::from_secs(30);
+
+/// De back-off voor de `n`-de crash op rij: 1, 2, 4, 8, 16, 30, 30 ... s.
+/// systemd's `Restart=on-failure` met `RestartSec=1s`, `RestartSteps` en
+/// `RestartMaxDelaySec=30s` (v254) loopt zo exponentieel op; een vaste
+/// `RestartSec` hamert een Hop die bij elke start valt (een kapotte
+/// config, een leeg volume) elke seconde opnieuw.
+fn back_off(n: u32) -> Duration {
+    let secs = 1u64
+        .checked_shl(n.saturating_sub(1))
+        .unwrap_or(u64::MAX)
+        .min(BACKOFF_MAX.as_secs());
+    Duration::from_secs(secs)
+}
+
+/// Hoe een bewaking van Hop eindigde.
+enum Watched {
+    /// Een fault of exit; de diagnoseregel staat al op de console.
+    Crashed,
+    /// Hop vroeg een herstart (HOP_RESTART).
+    Asked(Asked),
+    /// De status van het slot is weg (`HOPOS_HOP_FAIL`): niets meer te doen.
+    Lost,
+}
+
+/// De supervisor van Hop: één taak, die Hop plaatst, bewaakt en herstart.
+/// Hij bezit alles wat een herstart nodig heeft (de spec, het image en het
+/// vorige image); de haak stuurt hem een bericht ([`ASKED`]).
+struct Supervisor {
+    exec: &'static Executor,
+    plan: abi::layout::Plan,
+    slot: Slot,
+    system: &'static crate::KernSystem,
+    /// `None`: deze Hop kan niet herstart worden (geen env na een flip).
+    spec: Option<HopSpec>,
+    /// Het image van de Hop die nu draait.
+    current: Image,
+    /// Het image van vóór een nieuw image, tot het nieuwe zijn proeftijd
+    /// haalde ([`PROBATION`]).
+    previous: Option<Image>,
+    /// Herstarts in deze boot, voor `n=` in de marker.
+    restarts: u64,
+    /// Crashes op rij, voor de back-off.
+    crashes: u32,
+}
+
+impl Supervisor {
+    /// De lus: bewaken, en na elke crash of vraag de volgende Hop.
+    async fn run(mut self, mut core: usize) {
+        loop {
+            SAME.set(self.spec.as_ref().map(|_| self.current.source()));
+            let t0 = self.exec.now();
+            let end = self.watch(core, t0).await;
+            SAME.set(None);
+            let up = Duration::from_nanos(self.exec.now().saturating_sub(t0));
+            let go = match end {
+                Watched::Lost => false,
+                Watched::Crashed => self.after_crash(up).await,
+                Watched::Asked(a) => self.after_ask(a).await,
+            };
+            if !go {
+                return;
+            }
+            core = self.replace().await;
+        }
+    }
+
+    /// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om
+    /// de [`HOP_BEAT_EVERY`] seconden de hartslag. Eindigt bij een fault of
+    /// exit (luid, met de diagnose) of een gevraagde herstart; houdt de
+    /// proeftijd van een nieuw image bij.
+    async fn watch(&mut self, core: usize, t0: u64) -> Watched {
+        let slot = self.slot;
+        let mut last: Option<(u64, u64, bool)> = None;
+        let mut round: u64 = 0;
+        loop {
+            if let Some(a) = ASKED.take() {
+                return Watched::Asked(a);
+            }
+            let Some(st) = status(slot).await else {
+                println!("slot {slot}: Hop status unavailable HOPOS_HOP_FAIL");
+                return Watched::Lost;
+            };
+            let dt = self.exec.now().saturating_sub(t0);
+            let seen = (st.cage.app, st.cage.fault_vec, st.cage.core_on);
+            round = round.wrapping_add(1);
+            if last != Some(seen) || round.is_multiple_of(HOP_BEAT_EVERY) {
+                probe(&self.plan, slot, core, &st, dt);
+                last = Some(seen);
+            }
+            if crashed(slot, &st) {
+                return Watched::Crashed;
+            }
+            if self.previous.is_some() && dt >= PROBATION.as_nanos() as u64 {
+                // Het vorige image gaat los (en uit de heap, als het daar
+                // stond); een crash herstart vanaf nu het nieuwe.
+                self.previous = None;
+                println!(
+                    "slot {slot}: the new Hop image held for {} s, the previous one is let go HOPOS_HOP_IMAGE_HELD",
+                    PROBATION.as_secs()
+                );
+            }
+            // Wakker op de bel of de volgende ronde: een herstart wacht
+            // niet op de poll.
+            let _ = select(ASK_BELL.wait(), self.exec.after(HOP_WATCH)).await;
+        }
+    }
+
+    /// Na een fault of exit: binnen de proeftijd van een nieuw image het
+    /// vorige terug, anders hetzelfde image na de back-off. `false` als Hop
+    /// niet herstart kan worden (dan blijft hij staan zoals hij viel, voor
+    /// de diagnose).
+    async fn after_crash(&mut self, up: Duration) -> bool {
+        let slot = self.slot;
+        if ASKED.take().is_some() {
+            println!(
+                "slot {slot}: the restart Hop asked for is dropped, he went down first HOPOS_HOP_RESTART_REFUSED crashed"
+            );
+        }
+        if self.spec.is_none() {
+            println!(
+                "slot {slot}: Hop is down and this kernel has no env to place him with HOPOS_HOP_RESTART_REFUSED no spec"
+            );
+            return false;
+        }
+        if up < PROBATION && self.roll_back("went down") {
+            stop(slot, DEAD_STOP).await;
+            return true;
+        }
+        if self.current.bytes().is_none() {
+            println!(
+                "slot {slot}: Hop is down and the staged image is gone (the staging went to a flip), he stays down HOPOS_HOP_RESTART_REFUSED no image"
+            );
+            return false;
+        }
+        if up >= HEALTHY {
+            self.crashes = 0;
+        }
+        self.crashes = self.crashes.saturating_add(1);
+        self.restarts = self.restarts.wrapping_add(1);
+        let wait = back_off(self.crashes);
+        println!(
+            "slot {slot}: Hop restarts in {} s, crash {} in a row after {} s up HOPOS_HOP_RESTART reason=crash image=same n={}",
+            wait.as_secs(),
+            self.crashes,
+            up.as_secs(),
+            self.restarts
+        );
+        // Eerst de stop: de poorten weg en de kooi vrij tijdens de
+        // back-off. Weigert hij (quarantaine), dan probeert [`replace`] het
+        // opnieuw.
+        stop(slot, DEAD_STOP).await;
+        self.exec.after(wait).await;
+        true
+    }
+
+    /// Na een aangenomen HOP_RESTART: Hop vertrekt zelf (hij schrijft eerst
+    /// zijn antwoord en zijn staat weg en keert dan terug uit `main`), zoals
+    /// een systemd-dienst die om zijn eigen herstart vraagt en dan zelf
+    /// eindigt. De kern wacht daar hoogstens zijn termijn op; pas daarna de
+    /// stop-bel als vangnet. Tot 22-10 stopte de kern hem na een vaste halve
+    /// seconde, en een Hop die nog met SNTP bezig was, schreef zijn 202 nooit
+    /// (de ring van de herstart: curl HTTP 000). Het nieuwe image wordt het
+    /// huidige, met het oude als terugval.
+    async fn after_ask(&mut self, a: Asked) -> bool {
+        let slot = self.slot;
+        self.restarts = self.restarts.wrapping_add(1);
+        let what = match &a.image {
+            Some(img) => alloc::format!("a new image of {} bytes", img.len()),
+            None => String::from("the same image"),
+        };
+        println!(
+            "slot {slot}: Hop asked for a restart with {what}, waiting up to {} ms for him to leave HOPOS_HOP_RESTART reason=request image={} n={}",
+            a.grace.as_millis(),
+            if a.image.is_some() { "new" } else { "same" },
+            self.restarts
+        );
+        // Zijn exit is hier verwacht, dus geen HOPOS_HOP_EXIT; een fault
+        // onderweg blijft luid.
+        let left = self.wait_leave(a.grace).await;
+        let timeout = if left == "bell" {
+            println!(
+                "slot {slot}: Hop did not leave within {} ms, the stop bell with {} ms as a backstop",
+                a.grace.as_millis(),
+                BELL_STOP.as_millis()
+            );
+            BELL_STOP
+        } else {
+            DEAD_STOP
+        };
+        if stop(slot, timeout).await {
+            println!(
+                "slot {slot}: Hop stopped for the restart HOPOS_HOP_STOPPED reason=request left={left}"
+            );
+        }
+        if let Some(img) = a.image {
+            let old = core::mem::replace(&mut self.current, Image::Taken(img));
+            // Staat er al een image op proef, dan blijft het laatste dat
+            // zijn proeftijd haalde de terugval.
+            if self.previous.is_none() {
+                self.previous = Some(old);
+            }
+        }
+        true
+    }
+
+    /// Wacht hoogstens `grace` tot Hop zelf vertrok. Geeft hoe:
+    /// `self` (een exit), `fault` (luid, met de diagnose), `gone` (geen
+    /// status meer) of `bell` (nog daar na de termijn).
+    async fn wait_leave(&self, grace: Duration) -> &'static str {
+        let slot = self.slot;
+        let until = self.exec.now().saturating_add(grace.as_nanos() as u64);
+        loop {
+            let Some(st) = status(slot).await else {
+                return "gone";
+            };
+            if st.cage.fault_vec != 0 || el1_fault(&st.cage).is_some() {
+                crashed(slot, &st);
+                return "fault";
+            }
+            if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
+                return "self";
+            }
+            if self.exec.now() >= until {
+                return "bell";
+            }
+            self.exec.after(LEAVE_POLL).await;
+        }
+    }
+
+    /// Het vorige image terug, als er een is en het er nog is; één regel.
+    fn roll_back(&mut self, why: &str) -> bool {
+        let Some(prev) = self.previous.take() else {
+            return false;
+        };
+        if prev.bytes().is_none() {
+            return false;
+        }
+        self.current = prev;
+        println!(
+            "slot {}: the new Hop image {why} within {} s, back to the previous image HOPOS_HOP_ROLLBACK",
+            self.slot,
+            PROBATION.as_secs()
+        );
+        true
+    }
+
+    /// De volgende Hop in het slot: de oude stop (een no-op als hij al
+    /// gestopt is), zijn open stromen weg, de staat die klaarligt op de
+    /// console, en plaatsen. Faalt de plaatsing van een nieuw image, dan het
+    /// vorige; faalt hetzelfde, dan na de back-off opnieuw, net zo lang tot
+    /// het lukt. Geeft de core.
+    async fn replace(&mut self) -> usize {
+        let slot = self.slot;
+        loop {
+            if stop(slot, DEAD_STOP).await {
+                let n = self.system.drop_streams(&BOOT_REPLY).await;
+                if n > 0 {
+                    println!(
+                        "slot {slot}: {n} open stream(s) of the old Hop dropped, their slots are back in the pool HOPOS_HOP_STREAMS_DROPPED"
+                    );
+                }
+                let kept = self.system.hop_state_len();
+                println!(
+                    "slot {slot}: {kept} byte(s) of Hop state wait in the kern for the new Hop HOPOS_HOP_STATE kept={kept}"
+                );
+                match self.put().await {
+                    Ok(core) => return core,
+                    Err(e) if self.previous.is_some() => {
+                        println!("slot {slot}: the new Hop image did not place: {e}");
+                        if self.roll_back("did not place") {
+                            continue;
+                        }
+                    }
+                    Err(e) => println!("slot {slot}: Hop not started: {e} HOPOS_HOP_FAIL"),
+                }
+            }
+            self.crashes = self.crashes.saturating_add(1);
+            self.restarts = self.restarts.wrapping_add(1);
+            let wait = back_off(self.crashes);
+            println!(
+                "slot {slot}: Hop placed again in {} s HOPOS_HOP_RESTART reason=crash image=same n={}",
+                wait.as_secs(),
+                self.restarts
+            );
+            self.exec.after(wait).await;
+        }
+    }
+
+    /// Plaatst het huidige image in het slot van Hop, met de spec, het
+    /// volume en de poorten van elke plaatsing (de switch moet er zijn,
+    /// anders is er niets door te zetten en faalt de start op zijn poorten).
+    /// Eén regel `HOPOS_HOP_START`. Geeft de core.
+    async fn put(&self) -> Result<usize, Fail> {
+        let slot = self.slot;
+        let no = Fail::Kern(kern::Error::NoEnt);
+        let spec = self.spec.as_ref().ok_or(no)?;
+        let img = self.current.bytes().ok_or(no)?;
+        let volume = kern_mounts(&[HOP_VOLUME])?;
+        let ports = if crate::net::switch_up() {
+            hop_ports()
+        } else {
+            Vec::new()
+        };
+        // Vóór de plaatsing: zodra de poort aan de switch hangt, mag hij
+        // niet meer op Hop's ring wachten. Na de plaatsing volgt de echte
+        // core.
+        set_resident(slot.get(), hop_on_os());
+        let env = spec.env.as_bytes();
+        let entry = place(slot, img, HOP_MEM, spec.at.clone(), env, volume, ports).await?;
+        let st = status(slot).await;
+        let core = st.and_then(|s| s.core).map_or(0, |(c, _)| c.get());
+        set_resident(slot.get(), core == 0);
+        let part = st.and_then(|s| s.partition).unwrap_or_default();
+        let cpu = abi::layout::Core::new(core).map_or(core, |c| self.plan.phys_core(c));
+        println!(
+            "HOPOS_HOP_START slot={slot} core={core} cpu={cpu} entry={entry:#x} part={:#x}+{:#x} image={} env={} class={}",
+            part.base,
+            part.size,
+            img.len(),
+            env.len(),
+            crate::BOARD.core_class(cpu)
+        );
+        Ok(core)
+    }
+}
+
+/// Is Hop gevallen? Een fault (op EL2 gezien of door de app op EL1
+/// gemeld) of een exit, elk luid met de diagnose. De kern stopt hem pas
+/// daarna, dus de regel zegt wat er in de kooi stond.
+fn crashed(slot: Slot, st: &SlotStatus) -> bool {
+    if st.cage.fault_vec != 0 {
+        println!(
+            "slot {slot}: Hop faulted vec={} esr={:#x} ({}) far={:#x} HOPOS_HOP_FAULT",
+            st.cage.fault_vec - 1,
+            st.cage.fault_esr,
+            kern::cage::esr_class(st.cage.fault_esr),
+            st.cage.fault_far
+        );
+        return true;
+    }
+    if let Some(line) = el1_fault(&st.cage) {
+        println!("slot {slot}: Hop faulted at EL1 {line} HOPOS_HOP_FAULT");
+        return true;
+    }
+    if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
+        println!(
+            "slot {slot}: Hop exited with {} HOPOS_HOP_EXIT",
+            st.cage.exit_code
+        );
+        return true;
+    }
+    false
+}
+
+/// De haak van HOP_RESTART (`Hooks::hop_restart`, main.rs): toetst het
+/// verzoek en het nieuwe image, kopieert het in de kern-heap en geeft het
+/// de supervisor. Synchroon: na `Ok` gaat het slot van het image terug in
+/// de pool. Elke weigering is één regel `HOPOS_HOP_RESTART_REFUSED`.
+pub(crate) fn hop_restart(
+    image: Option<&kern::system::HopImage>,
+    grace: Duration,
+) -> Result<(), Fail> {
+    ask_restart(image, grace).map_err(|(why, e)| {
+        println!("slots: Hop restart refused: {e} HOPOS_HOP_RESTART_REFUSED {why}");
+        e
+    })
+}
+
+fn ask_restart(
+    image: Option<&kern::system::HopImage>,
+    grace: Duration,
+) -> Result<(), (&'static str, Fail)> {
+    let Some(same) = SAME.get().get() else {
+        return Err(("not restartable now", Fail::Kern(kern::Error::NoEnt)));
     };
-    set_resident(slot.get(), core == 0);
-    let _ = wait_uplink(exec).await;
-    println!(
-        "slot {slot}: Hop carried over the flip on core {core}, not restarted HOPOS_HOP_RESUMED"
-    );
-    watch_hop(exec, &plan, slot, core).await;
+    let pending = ASKED.take();
+    let busy = pending.is_some();
+    ASKED.set(pending);
+    if busy {
+        return Err(("restart already pending", Fail::Kern(kern::Error::Busy)));
+    }
+    let image = match image {
+        Some(img) => Some(take_image(img)?),
+        None if same == Source::Staged && crate::flip::staged_hop().is_none() => {
+            return Err(("no image", Fail::Kern(kern::Error::NoEnt)));
+        }
+        None => None,
+    };
+    ASKED.set(Some(Asked { image, grace }));
+    ASK_BELL.set();
+    Ok(())
+}
+
+/// Het nieuwe image uit zijn partitie: de som, de ELF-toets van de
+/// plaatsing (`kern::system::check_image`, tegen de partitie van Hop) en
+/// een kopie in de kern-heap.
+///
+/// Waarom de heap: het slot gaat na de haak terug in de pool (slots zijn
+/// schaars, één per app-core), de staging is per board anders (het venster
+/// van QEMU, de initrd van de Pi, het image zelf op de Mac mini) en houdt
+/// de nieuwe kern van een flip, en de heap is ruim: 40 MB kern-RAM op de
+/// LicheeRV tot 256 MB op de Mac mini, tegen 2,4 MB voor een gestripte Hop
+/// (arm64, 22-10). Op proef ligt er hoogstens twee keer een image. Het
+/// overleeft een kern-flip niet; dan plaatst een herstart het gestagede
+/// (`HOPOS_HOP_IMAGE_STAGED`).
+fn take_image(img: &kern::system::HopImage) -> Result<Vec<u8>, (&'static str, Fail)> {
+    let len = match usize::try_from(img.len) {
+        Ok(n) if img.len <= HOP_MEM => n,
+        _ => {
+            let e = kern::Error::TooLarge {
+                len: usize::try_from(img.len).unwrap_or(usize::MAX),
+                max: HOP_MEM as usize,
+            };
+            return Err(("image larger than Hop's partition", Fail::Kern(e)));
+        }
+    };
+    // SAFETY: `[base, base+len)` is de partitie van een stroom die de
+    // system-API tijdens deze aanroep in handen houdt (de grant is buiten
+    // de actor: er draait niets in en niemand anders schrijft erin), en de
+    // lengte is wat er gestroomd is, binnen de partitie (`Placer::raw`).
+    // Het geheugen is pool-RAM, Normal gemapt in de identity map. Alleen
+    // lezen, en de slice leeft niet langer dan deze functie (zoals
+    // `flip::prepare`).
+    let bytes = unsafe { core::slice::from_raw_parts(img.base as usize as *const u8, len) };
+    let sum = abi::sha256::digest(bytes);
+    if sum != img.sha256 {
+        let e = kern::Error::Version {
+            have: kern::kernflip::sum64(&sum),
+            want: kern::kernflip::sum64(&img.sha256),
+        };
+        return Err(("sha256 mismatch", Fail::Kern(e)));
+    }
+    kern::system::check_image(bytes, HOP_MEM).map_err(|e| ("not a placeable ELF", e))?;
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).map_err(|_| {
+        (
+            "no heap",
+            Fail::Kern(kern::Error::OutOfMemory { bytes: len }),
+        )
+    })?;
+    v.extend_from_slice(bytes);
+    Ok(v)
 }
 
 /// Wacht tot de lease er is, hooguit [`UPLINK_WAIT`]; `None` na de termijn.
@@ -954,50 +1534,6 @@ fn el1_fault(st: &kern::cage::Status) -> Option<alloc::string::String> {
     Some(line)
 }
 
-/// Bewaakt Hop: elke wissel van app-status, core of fault één regel, om de
-/// [`HOP_BEAT_EVERY`] seconden de hartslag. Een fault of exit is luid en
-/// het einde van de bewaking; een herstart van Hop is een volgende stap
-/// (de kern stopt hem niet, zodat zijn staat voor diagnose blijft staan).
-async fn watch_hop(exec: &'static Executor, plan: &abi::layout::Plan, slot: Slot, core: usize) {
-    let t0 = exec.now();
-    let mut last: Option<(u64, u64, bool)> = None;
-    let mut round: u64 = 0;
-    loop {
-        let Some(st) = status(slot).await else {
-            println!("slot {slot}: Hop status unavailable HOPOS_HOP_FAIL");
-            return;
-        };
-        let seen = (st.cage.app, st.cage.fault_vec, st.cage.core_on);
-        round = round.wrapping_add(1);
-        if last != Some(seen) || round.is_multiple_of(HOP_BEAT_EVERY) {
-            probe(plan, slot, core, &st, exec.now().saturating_sub(t0));
-            last = Some(seen);
-        }
-        if st.cage.fault_vec != 0 {
-            println!(
-                "slot {slot}: Hop faulted vec={} esr={:#x} ({}) far={:#x} HOPOS_HOP_FAULT",
-                st.cage.fault_vec - 1,
-                st.cage.fault_esr,
-                kern::cage::esr_class(st.cage.fault_esr),
-                st.cage.fault_far
-            );
-            return;
-        }
-        if let Some(line) = el1_fault(&st.cage) {
-            println!("slot {slot}: Hop faulted at EL1 {line} HOPOS_HOP_FAULT");
-            return;
-        }
-        if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
-            println!(
-                "slot {slot}: Hop exited with {} HOPOS_HOP_EXIT",
-                st.cage.exit_code
-            );
-            return;
-        }
-        exec.after(HOP_WATCH).await;
-    }
-}
-
 /// Eén levensduur van `img` in `slot`: plaatsen, volgen tot de exit, en
 /// stoppen. Geeft `true` als de stop bevestigd is (core en partitie vrij).
 async fn run_once(
@@ -1106,12 +1642,12 @@ async fn watch_first(
             );
             // De switcher meldde hem dood en parkeerde de core: de stop
             // geeft partitie en core terug, maar een tweede ronde niet.
-            stop(slot).await;
+            stop(slot, DEAD_STOP).await;
             return false;
         }
         if let Some(line) = el1_fault(&st.cage) {
             println!("slot {slot}: fault at EL1 {line} HOPOS_SLOT_FAULT");
-            stop(slot).await;
+            stop(slot, DEAD_STOP).await;
             return false;
         }
         if st.cage.app == abi::hopabi::AppStatus::Exited as u64 {
@@ -1125,7 +1661,7 @@ async fn watch_first(
                     st.cage.exit_code
                 );
             }
-            return stop(slot).await;
+            return stop(slot, DEAD_STOP).await;
         }
         if now >= deadline {
             println!(
@@ -1159,15 +1695,11 @@ fn probe(plan: &abi::layout::Plan, slot: Slot, core: usize, st: &SlotStatus, dt:
     );
 }
 
-/// De stop na een exit: bevestigd stil, dus partitie en core terug. Geeft
-/// `true` als de actor de stop bevestigde.
-async fn stop(slot: Slot) -> bool {
-    match ask(Request::Stop {
-        slot,
-        timeout: Duration::from_secs(1),
-    })
-    .await
-    {
+/// De stop met `timeout` als coöperatieve kans: bevestigd stil, dus
+/// partitie en core terug. Geeft `true` als de actor de stop bevestigde
+/// (ook als er niets meer stond).
+async fn stop(slot: Slot, timeout: Duration) -> bool {
+    match ask(Request::Stop { slot, timeout }).await {
         // De regel `HOPOS_SLOT_STOPPED` schrijft de actor zelf, bij elke stop.
         Ok(_) => true,
         Err(e) => {

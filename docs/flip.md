@@ -23,6 +23,8 @@ bundel), de `FLIP_*`-blokken in `board/*/src/slots.rs` (de adressen) en
 | De volumes (hopfs) | Vóór de sprong legt de actor de boom vast en neemt hij niets meer aan (`HOPOS_FS_FROZEN generation=N`); de nieuwe kern mount precies die generatie (`HOPOS_FS_UP fresh=0 generation=N`). |
 | De switch-code van de app-cores | Blijft staan; de nieuwe kern adopteert haar alleen bij een gelijke som, en die som toetst de oude kern al vóór de sprong. |
 | De config (`hopos.cfg`) | Staat op elk board in het venster van het kern-image (`board/src/cfgwin.rs`, [boards.md](boards.md)). Een bundel met een leeg venster krijgt dat van de draaiende kern vóór de sprong (`HOPOS_FLIP_CFG`); een bundel met een gevuld venster (`CFG=` van `image/flip-bundle.sh`, of `hop image`) houdt het zijne (`HOPOS_FLIP_CFG_OWN`). Een kern van vóór het venster geeft niets mee; de terugval (de ESP, de bootargs, de initrd, 0xF000 op de M4) blijft dan tellen, behalve op de LicheeRV: daar `CFG=`. |
+| Niet: de staat van Hop in de kern (`STATE_PUT`) | Dat blob leeft in de heap van de system-API en sterft met kern A, zoals de fdstore van systemd met de manager. Hop draait door en hoeft het niet terug te lezen, maar tot zijn volgende `STATE_PUT` ligt er op kern B niets: een crash van Hop in dat venster begint met een lege staat (de herstart zegt `HOPOS_HOP_STATE kept=0`). Daarom hoort Hop zijn staat opnieuw te schrijven zodra zijn system-client de nieuwe kern bereikt (een nieuwe verbinding na de flip), niet pas bij de volgende wijziging. Het handoff-blob draagt het niet mee: het is een vaste staart van een paar KiB, het blob tot 1 MiB. |
+| Niet: een image dat Hop voor zijn herstart gaf (`HOP_RESTART`) | Ook dat lag in de heap van kern A. Een herstart van Hop op kern B plaatst het gestagede image (`HOPOS_HOP_IMAGE_STAGED`); is de staging naar de flip gegaan (`HOPOS_FLIP_STAGE_SHARED`), dan is er geen (`HOPOS_HOP_IMAGE_NONE`): een crash laat Hop dan liggen, en een herstart kan alleen met een nieuw image. |
 | Niet: de system-API-verbindingen | Die zijn van de kern; Hop's system-client bouwt ze opnieuw op. |
 | Niet: file calls tussen bevriezing en sprong | Die krijgen `Busy` (`HOPOS_FS_FROZEN_CALL`); de aanroeper doet ze opnieuw op de nieuwe kern. |
 | Niet: een nieuwe uitgaande verbinding tussen snapshot en sprong | Die krijgt geen flow; zijn SYN-retransmit krijgt er op de nieuwe kern een. |
@@ -81,7 +83,7 @@ opties).
    | B | `HOPOS_BOOT gen=G stamp=B` | de nieuwe kern met het nieuwe stempel |
    | B | `HOPOS_FS_UP fresh=0 generation=N` | dezelfde N als bij `HOPOS_FS_FROZEN` |
    | B | `HOPOS_FLIP_ADOPT n of n resident(s)` | alle bewoners terug |
-   | B | `HOPOS_HOP_RESUMED` | Hop draait door, niet herstart |
+   | B | `HOPOS_HOP_RESUMED` | Hop draait door, niet herstart; zijn supervisor loopt weer (`HOPOS_HOP_IMAGE_STAGED` of `HOPOS_HOP_IMAGE_NONE`: wat een herstart hier zou plaatsen) |
    | B | `HOPOS_FLIP_NAT restored=K of=K` | elke flow terug |
    | B | `HOPOS_FLIP_SETTLED` | de guard is tevreden: adoptie en net binnen de gratie |
 

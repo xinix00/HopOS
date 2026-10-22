@@ -448,7 +448,14 @@ fn setup(board: &'static Machine, dtb: u64, el: u8) -> <Machine as Board>::Sleep
         Ok(StagedRole::App) => slots::app_env(board.boot_param("hopos.appenv")),
         _ => alloc::vec::Vec::new(),
     };
-    slots::start(exec, role, landing.map(|h| h.slots), app_env, node_cfg);
+    slots::start(
+        exec,
+        role,
+        landing.map(|h| h.slots),
+        app_env,
+        node_cfg,
+        system,
+    );
 
     // De OS-core (PORT.md beslissing 2): de idle van de kern is de rotatie
     // over zijn bewoners (Hop). Lukt dat niet, dan houdt de kern zijn core
@@ -604,7 +611,7 @@ fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static 
 static SYSTEM_REPLIES: [Reply; net::SYSTEM_WORKERS] = [const { Reply::new() }; net::SYSTEM_WORKERS];
 
 /// De system-API van de kern: één, bij boot gebouwd ([`system`]).
-type KernSystem = System<'static, 'static, LIFECYCLE_DEPTH>;
+pub(crate) type KernSystem = System<'static, 'static, LIFECYCLE_DEPTH>;
 /// De console van de system-API: de kernconsole met de logrij van de slots.
 type SystemLog = LogTee<'static, KernConsole>;
 
@@ -638,7 +645,9 @@ pub(crate) fn slot_count(board: &Machine) -> usize {
 
 /// De haken van de system-API: de klok van Hop zet de wandklok van de kern
 /// (en daarmee die van elke kooi); de flip toetst de bundel en legt de
-/// nieuwe kern klaar (flip.rs), de sprong komt van de flip-taak.
+/// nieuwe kern klaar (flip.rs), de sprong komt van de flip-taak; de
+/// herstart van Hop toetst en neemt het image over (slots.rs), de stop en
+/// de plaatsing komen van de supervisor van Hop.
 struct BootHooks;
 
 impl Hooks for BootHooks {
@@ -648,6 +657,16 @@ impl Hooks for BootHooks {
     }
     fn flip(&self, bundle: &kern::system::FlipBundle, sha256: &[u8; 32]) -> kern::Result {
         flip::prepare(bundle, sha256) // FLIP: toetsen en klaarleggen (flip.rs)
+    }
+    fn hop_restart(
+        &self,
+        image: Option<&kern::system::HopImage>,
+        grace: core::time::Duration,
+    ) -> Result<(), kern::system::Fail> {
+        slots::hop_restart(image, grace)
+    }
+    fn hop_refused(&self, why: &'static str, err: &kern::system::Fail) {
+        println!("system: Hop restart refused: {err} HOPOS_HOP_RESTART_REFUSED {why}");
     }
     /// Slot 0: de slaap van de executor (`slept_ns`, `sleeps`, dezelfde als
     /// `busy_ms` van de tik) en zijn klok, ná de slaap gelezen: de system-API

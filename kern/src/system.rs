@@ -6,9 +6,10 @@
 //! levensduur. Er is geen tweede identiteitspad.
 //!
 //! Bovenop de gewone calls staan de BEVOEGDE operaties
-//! ([`abi::systemapi::PrivOp`], 0x40 tot en met 0x4A): een slot reserveren,
+//! ([`abi::systemapi::PrivOp`], 0x40 tot en met 0x4D): een slot reserveren,
 //! een image erin stromen, stoppen, status, logregels, de klok, de flip,
-//! en de store-opdrachten van de apps ophalen en afronden ([`crate::store`]).
+//! de store-opdrachten van de apps ophalen en afronden ([`crate::store`]),
+//! en Hop's eigen staat en herstart (hieronder).
 //! Alleen het slot met de [`Privilege`] mag ze: dat is Hop, de eerste
 //! bewoner (PORT.md beslissing 1). De kern maakt het token één keer bij boot
 //! en geeft het aan het slot van Hop; nergens anders bestaat er een. Een
@@ -32,6 +33,18 @@
 //! het hele image in één brok ([`place()`]): er is één plaatsing.
 //!
 //! De TCP-verbinding komt van `leannet`, over de [`Conn`]-trait.
+//!
+//! # Hop herstarten
+//!
+//! Hop legt zijn agent-staat hier neer (`STATE_PUT`): één blob, eigendom van
+//! deze service, in kerngeheugen. Het overleeft een herstart van Hop en
+//! sterft met de boot, zoals de fdstore van systemd de staat van een dienst
+//! over zijn herstart vasthoudt en met de manager verdwijnt. `HOP_RESTART`
+//! toetst het verzoek (de stroom van een nieuw image is compleet en rauw,
+//! de vlaggen en de termijn kloppen) en geeft het aan [`Hooks::hop_restart`]:
+//! de supervisor van de kern-binary wacht dan tot Hop zelf vertrekt
+//! (hoogstens de termijn, anders de stop-bel) en plaatst hem opnieuw. Wat de oude Hop half deed (een open stroom), ruimt
+//! [`System::drop_streams`] op vóór de nieuwe begint.
 //!
 //! # Verbindingen naast elkaar
 //!
@@ -61,8 +74,8 @@ use abi::hopabi::{
 use abi::layout::{ABI_CTRL_OFF, ABI_TAIL, LINK_BASE};
 use abi::place::{self, MAX_SEGMENTS, Segment};
 use abi::systemapi::{
-    Header, Kind, PrivOp, SlotInfo, SlotState, StartReq, StreamResp, StreamState, decode_header,
-    encode_header,
+    HOP_IMAGE_JOB, HOP_RESTART_GRACE_MAX_MS, HOP_RESTART_GRACE_MS, HOP_STATE_MAX, Header, Kind,
+    PrivOp, SlotInfo, SlotState, StartReq, StreamResp, StreamState, decode_header, encode_header,
 };
 use alloc::vec::Vec;
 use bounded::BoundedVec;
@@ -183,6 +196,24 @@ pub trait Hooks {
     /// sprong zelf komt later, van de eigenaar van de flip (hij moet dit
     /// antwoord nog naar Hop laten gaan).
     fn flip(&self, bundle: &FlipBundle, sha256: &[u8; 32]) -> Result;
+    /// Herstart Hop: met `image` het nieuwe image (rauw gestroomd in een
+    /// slot dat met [`HOP_IMAGE_JOB`] gereserveerd is, met de som die het
+    /// moet hebben), zonder hetzelfde; `grace` is hoe lang Hop krijgt om
+    /// zelf te vertrekken. Synchroon, zoals [`Hooks::flip`]: de haak toetst
+    /// som en ELF en kopieert het image; na zijn `Ok` geeft de system-API
+    /// het slot terug aan de pool. Het wachten op Hop's vertrek (en anders
+    /// de stop-bel) en de plaatsing komen later, van de supervisor van Hop.
+    /// Een weigering meldt de haak zelf op de console.
+    fn hop_restart(
+        &self,
+        image: Option<&HopImage>,
+        grace: Duration,
+    ) -> core::result::Result<(), Fail>;
+    /// Een HOP_RESTART die de system-API zelf weigerde, vóór de haak: `why`
+    /// is de korte reden voor achter de marker, `err` wat Hop als antwoord
+    /// krijgt. Zo is elke weigering één regel op de console, waar hij ook
+    /// viel.
+    fn hop_refused(&self, why: &'static str, err: &Fail);
     /// De meetlat van de kern zelf, voor slot 0 van SLOT_STATUS: `heartbeat`
     /// (de tik), `ram_size` (de kern-RAM), `mem_sys` (de heap in gebruik),
     /// `idle_ns` en `wakes` (de slaap van de executor, cumulatief) en `at_ns`
@@ -210,6 +241,43 @@ pub struct FlipBundle {
     /// De koude flip ([`abi::systemapi::FLIP_COLD`] in `n` van de FLIP):
     /// bewoners stoppen en zonder adoptie springen.
     pub cold: bool,
+}
+
+/// Een compleet nieuw image van Hop in een gereserveerde partitie
+/// ([`HOP_IMAGE_JOB`]), voor [`Hooks::hop_restart`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct HopImage {
+    /// Het slot waarin het stroomde.
+    pub slot: Slot,
+    /// De fysieke basis van de partitie: byte 0 van het image.
+    pub base: u64,
+    /// De lengte van het image.
+    pub len: u64,
+    /// De SHA-256 die het moet hebben.
+    pub sha256: [u8; 32],
+}
+
+/// Een rauwe stroom: de bytes gaan zonder plaatsing de partitie in, tot een
+/// bevoegde op ze opeist. Welke op dat mag, zegt de jobnaam van de start.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Raw {
+    /// Een kern-bundel ([`FLIP_BUNDLE_JOB`], voor `FLIP`).
+    FlipBundle,
+    /// Een nieuw image van Hop ([`HOP_IMAGE_JOB`], voor `HOP_RESTART`).
+    HopImage,
+}
+
+impl Raw {
+    /// De rauwe soort van een jobnaam, of `None` voor een gewone app.
+    fn of(job: &[u8]) -> Option<Raw> {
+        if job == FLIP_BUNDLE_JOB {
+            Some(Raw::FlipBundle)
+        } else if job == HOP_IMAGE_JOB {
+            Some(Raw::HopImage)
+        } else {
+            None
+        }
+    }
 }
 
 /// Het slot achter een bron-IP, of `None` als het geen app-adres is.
@@ -587,7 +655,8 @@ struct Placer {
     /// De entry uit de header.
     entry: u64,
     ready: bool,
-    /// Een flip-bundel: bytes rauw naar hun offset, geen ELF en geen start.
+    /// Een rauwe stroom ([`Raw`]): bytes naar hun offset, geen ELF en geen
+    /// start.
     raw: bool,
 }
 
@@ -612,12 +681,13 @@ impl Placer {
         })
     }
 
-    /// Een rauwe stroom voor een flip-bundel: `size` bytes op offset 0 van
-    /// een partitie met `app_ram` bytes onder de staart.
+    /// Een rauwe stroom (een flip-bundel, een nieuw image van Hop): `size`
+    /// bytes op offset 0 van een partitie met `app_ram` bytes onder de
+    /// staart.
     fn raw(size: u64, app_ram: u64) -> core::result::Result<Placer, Fail> {
         if size > app_ram {
             return Err(Self::fail(
-                "flip bundle larger than its partition",
+                "raw stream larger than its partition",
                 size,
                 app_ram,
             ));
@@ -1044,6 +1114,8 @@ struct Stream {
     grant: ImageGrant,
     placer: Placer,
     env: Vec<u8>,
+    /// Een rauwe stroom, en voor welke op; `None` voor een app.
+    raw: Option<Raw>,
 }
 
 impl Stream {
@@ -1180,7 +1252,46 @@ pub async fn place<'r, const N: usize>(
             return Err(e);
         }
     };
-    Stream { grant, placer, env }.arm(inbox, reply, mem).await
+    Stream {
+        grant,
+        placer,
+        env,
+        raw: None,
+    }
+    .arm(inbox, reply, mem)
+    .await
+}
+
+/// Toetst `img` als image voor een partitie van `partition` bytes, zonder
+/// één byte te plaatsen: de kop, de program headers, elk PT_LOAD in het
+/// venster en in het bestand, en de staart naast de segmenten. Dezelfde
+/// toetsen als de eerste brok van een stroom ([`Placer`]); de symbolen
+/// toetst pas de plaatsing zelf. Voor de haak van `HOP_RESTART`: een image
+/// dat hier al faalt, wordt geweigerd vóór de oude Hop stopt.
+///
+/// # Errors
+///
+/// Waarom het image niet geplaatst kan worden.
+pub fn check_image(img: &[u8], partition: u64) -> core::result::Result<(), Fail> {
+    let ram = partition
+        .checked_sub(ABI_TAIL)
+        .filter(|&ram| abi::layout::Tail::new(LINK_BASE, ram).is_some())
+        .ok_or(Fail::Kern(Error::PartitionSize { size: partition }))?;
+    let mut p = Placer::new(img.len() as u64, ram)?;
+    let head = img.get(..MAX_HEAD).unwrap_or(img);
+    p.head
+        .try_reserve_exact(head.len())
+        .map_err(|_| Error::OutOfMemory { bytes: head.len() })?;
+    p.head.extend_from_slice(head);
+    if p.parse_head()? {
+        Ok(())
+    } else {
+        Err(Placer::fail(
+            "program headers not complete within",
+            MAX_HEAD as u64,
+            img.len() as u64,
+        ))
+    }
 }
 
 /// Wat een bevoegde op teruggeeft: `size` en hoeveel databytes er al op
@@ -1293,16 +1404,21 @@ impl<C: Conn, T: Timer> Conn for Watched<'_, C, T> {
     }
 }
 
-/// De system-API: de bevoegdheid en de stromen die tussen twee calls leven.
+/// De system-API: de bevoegdheid, de stromen die tussen twee calls leven en
+/// de staat van Hop.
 ///
 /// Deelbaar tussen de verbindingstaken: alles hier is `&self`. De stromen
-/// zijn een leesbare tabel (handboek §1.1); de bevoegdheid staat vast vanaf
-/// de bouw.
+/// en de staat zijn leesbare tabellen (handboek §1.1); de bevoegdheid staat
+/// vast vanaf de bouw.
 pub struct System<'i, 'r, const N: usize> {
     inbox: &'i Mailbox<Envelope<'r>, N>,
     svc: &'i Servicers,
     privilege: Option<Privilege>,
     streams: LocalCell<[Option<Stream>; MAX_STREAMS]>,
+    /// De staat van Hop (`STATE_PUT`): één blob, van deze service. Een
+    /// schrijf bouwt een nieuwe `Vec` en wisselt hem in één lening, dus een
+    /// lezer ziet het oude of het nieuwe blob, nooit een mengsel.
+    state: LocalCell<Vec<u8>>,
     logs: Option<&'i SlotLogs>,
     fs: Option<&'i FsInbox<'r>>,
     devices: Option<&'i crate::deviceabi::Inbox<'r>>,
@@ -1325,6 +1441,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
             svc,
             privilege,
             streams: LocalCell::cell([const { None }; MAX_STREAMS]),
+            state: LocalCell::cell(Vec::new()),
             logs: None,
             fs: None,
             devices: None,
@@ -1699,7 +1816,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                     .into());
                 }
                 let complete = self.with_stream(slot, |s| {
-                    s.placer.raw && s.placer.received() == s.placer.size
+                    s.raw == Some(Raw::FlipBundle) && s.placer.received() == s.placer.size
                 });
                 if complete != Some(true) {
                     return Err(Error::NotOwned { slot: slot.get() }.into());
@@ -1720,6 +1837,116 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
                 r?;
                 Ok((0, 0))
             }
+            PrivOp::StatePut => {
+                self.state_put(c.data)?;
+                Ok((0, 0))
+            }
+            PrivOp::StateGet => self.state_get(c.n, data),
+            PrivOp::HopRestart => {
+                let ask = match hop_ask(c) {
+                    Ok(a) => a,
+                    Err((why, e)) => {
+                        hooks.hop_refused(why, &e);
+                        return Err(e);
+                    }
+                };
+                self.hop_restart(ask, reply, hooks).await
+            }
+        }
+    }
+
+    // De staat van Hop. Eén lening per call, zonder `.await`: een lezer ziet
+    // het blob van vóór of van na een schrijf.
+
+    /// STATE_PUT: vervangt het blob door `data`; nul bytes wist het. Het
+    /// nieuwe blob staat helemaal klaar (faalbaar gealloceerd) vóór het
+    /// oude wijkt: een weigering laat het oude staan.
+    fn state_put(&self, data: &[u8]) -> Result {
+        if data.len() > HOP_STATE_MAX {
+            return Err(Error::TooLarge {
+                len: data.len(),
+                max: HOP_STATE_MAX,
+            });
+        }
+        let new = try_vec(data)?;
+        let old = core::mem::replace(&mut *self.state.borrow_mut(), new);
+        drop(old);
+        Ok(())
+    }
+
+    /// STATE_GET: de maat van het hele blob en de bytes vanaf `at` in
+    /// `data`, zoveel als passen en nooit meer dan [`HOP_STATE_MAX`] (de
+    /// buffer van Hop). Niets klaar is `STATUS_OK` met maat 0: een fout
+    /// leest Hop als een kern zonder staat. Een offset voorbij het einde is
+    /// wel een fout, geen leeg antwoord: dan veranderde het blob onder de
+    /// lezer.
+    fn state_get(&self, at: u64, data: &mut [u8]) -> Answer {
+        let blob = self.state.borrow();
+        let size = blob.len() as u64;
+        let rest = usize::try_from(at)
+            .ok()
+            .and_then(|at| blob.get(at..))
+            .ok_or(Error::Range { base: at, size })?;
+        let n = rest.len().min(data.len()).min(HOP_STATE_MAX);
+        if let (Some(d), Some(s)) = (data.get_mut(..n), rest.get(..n)) {
+            d.copy_from_slice(s);
+        }
+        Ok((size, n))
+    }
+
+    /// De maat van de staat van Hop die nu klaarligt (0: niets). Voor de
+    /// supervisor van Hop, die hem bij elke herstart op de console zet.
+    #[must_use]
+    pub fn hop_state_len(&self) -> usize {
+        self.state.borrow().len()
+    }
+
+    /// HOP_RESTART na de veldtoetsen ([`hop_ask`]): een nieuw image moet
+    /// compleet in een [`Raw::HopImage`]-stroom liggen. De haak toetst en
+    /// kopieert; gelukt of niet, daarna gaat het slot terug in de pool.
+    async fn hop_restart(&self, ask: HopAsk, reply: &'r Reply, hooks: &impl Hooks) -> Answer {
+        let Some((slot, sha256)) = ask.image else {
+            hooks.hop_restart(None, ask.grace)?;
+            return Ok((0, 0));
+        };
+        let complete = self.with_stream(slot, |s| {
+            s.raw == Some(Raw::HopImage) && s.placer.received() == s.placer.size
+        });
+        let stream = match complete {
+            Some(true) => self.take_stream(slot),
+            _ => None,
+        };
+        let Some(s) = stream else {
+            let e = Fail::from(Error::NotOwned { slot: slot.get() });
+            hooks.hop_refused("no complete image stream", &e);
+            return Err(e);
+        };
+        let image = HopImage {
+            slot,
+            base: s.grant.region().base,
+            len: s.placer.size,
+            sha256,
+        };
+        let r = hooks.hop_restart(Some(&image), ask.grace);
+        // Gelukt of niet: het slot gaat terug. Bij succes heeft de haak het
+        // image al buiten de partitie gekopieerd.
+        let _ = slots::call(self.inbox, reply, Request::Abort(s.grant)).await;
+        r?;
+        Ok((0, 0))
+    }
+
+    /// Breekt elke open stroom af en geeft zijn slot terug aan de pool;
+    /// geeft hoeveel. Voor de supervisor van Hop, tussen de stop van een
+    /// Hop en de plaatsing van de volgende: een stroom is van de levensduur
+    /// van de Hop die hem begon, en de nieuwe kent hem niet (hij zou zijn
+    /// slot anders tot de volgende boot bezet houden).
+    pub async fn drop_streams(&self, reply: &'r Reply) -> usize {
+        let mut n = 0;
+        loop {
+            let s = self.streams.borrow_mut().iter_mut().find_map(Option::take);
+            let Some(s) = s else { return n };
+            let _ = slots::call(self.inbox, reply, Request::Abort(s.grant)).await;
+            n += 1;
         }
     }
 
@@ -1796,17 +2023,19 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         // (`Placement::hop`); anders weigert een node met elke app-core
         // bezet de flip al bij de reservering (QEMU riscv64 en de LicheeRV
         // met hun ene app-hart, 02-10: "no free run of 1 app core(s)").
-        let placement = if req.job == FLIP_BUNDLE_JOB {
+        // Een nieuw image van Hop net zo: het draait pas in slot 1.
+        let raw = Raw::of(req.job);
+        let placement = if raw.is_some() {
             Placement::hop()?
         } else {
             placement(&req)?
         };
-        // De partitie van een flipbundel bemeet de kern zelf: de bundel
+        // De partitie van een rauwe stroom bemeet de kern zelf: de bytes
         // plus de ABI-staart, op hele 2 MB. Wat Hop vraagt is een
         // ondergrens, geen maat: een Hop die precies `bundel + staart`
         // vroeg, kreeg na de guard-pagina 4 KiB te weinig en elke flip werd
         // geweigerd ("length 2252800 exceeds 2248704", de O6N 30-09).
-        let mem = if req.job == FLIP_BUNDLE_JOB {
+        let mem = if raw.is_some() {
             req.memory_limit
                 .max(req.image_size.saturating_add(ABI_TAIL))
                 .next_multiple_of(2 << 20)
@@ -1820,8 +2049,7 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         spec.ports = start_ports(&req)?;
         spec.mounts = start_mounts(&req)?;
         let grant = claim(self.inbox, reply, spec).await?;
-        let flip = req.job == FLIP_BUNDLE_JOB;
-        let placer = match Placer::for_grant(&grant, req.image_size, flip) {
+        let placer = match Placer::for_grant(&grant, req.image_size, raw.is_some()) {
             Ok(p) => p,
             Err(e) => {
                 let _ = slots::call(self.inbox, reply, Request::Abort(grant)).await;
@@ -1831,7 +2059,12 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if let Some(e) = self.logs {
             e.clear(slot);
         }
-        if let Some(s) = self.put_stream(Stream { grant, placer, env }) {
+        if let Some(s) = self.put_stream(Stream {
+            grant,
+            placer,
+            env,
+            raw,
+        }) {
             let _ = slots::call(self.inbox, reply, Request::Abort(s.grant)).await;
             return Err(Error::Full { cap: MAX_STREAMS }.into());
         }
@@ -1898,8 +2131,9 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         if received < size {
             return answer_stream(data, received, StreamState::More, None);
         }
-        // Een complete flip-bundel blijft in de tabel liggen tot FLIP hem
-        // opeist (of STOP_SLOT hem afbreekt): "geplaatst" is hier "binnen".
+        // Een complete rauwe stroom blijft in de tabel liggen tot FLIP of
+        // HOP_RESTART hem opeist (of STOP_SLOT hem afbreekt): "geplaatst" is
+        // hier "binnen".
         if self.with_stream(slot, |s| s.placer.raw) == Some(true) {
             return answer_stream(data, received, StreamState::Placed, None);
         }
@@ -2005,8 +2239,9 @@ fn fit_info(b: &[u8; abi::systemapi::SLOT_INFO_LEN], want: u64, data: &mut [u8])
     Ok((0, n))
 }
 
-/// De som van een FLIP: 32 rauwe bytes, of 64 hex-tekens (de client van
-/// applib draagt het pad als tekst, en Hop heeft de som al als hex).
+/// De som van een FLIP of een HOP_RESTART: 32 rauwe bytes, of 64
+/// hex-tekens (de client van applib draagt het pad als tekst, en Hop heeft
+/// de som al als hex).
 fn flip_sum(path: &[u8]) -> Result<[u8; 32]> {
     if let Ok(raw) = <[u8; 32]>::try_from(path) {
         return Ok(raw);
@@ -2032,6 +2267,66 @@ fn flip_sum(path: &[u8]) -> Result<[u8; 32]> {
         *o = (h << 4) | l;
     }
     Ok(out)
+}
+
+/// Een HOP_RESTART na de veldtoetsen: het slot en de som van een nieuw
+/// image (`None`: hetzelfde) en de termijn van de stop.
+#[derive(Copy, Clone, Debug)]
+struct HopAsk {
+    image: Option<(Slot, [u8; 32])>,
+    grace: Duration,
+}
+
+/// De velden van een HOP_RESTART (`abi::systemapi::PrivOp::HopRestart`):
+/// de vlaggen in de hoge 32 bits van `n` (nu geen enkele), de termijn in de
+/// lage (0: de standaard, hoogstens 30 s), en een som alleen bij een
+/// image. Een weigering draagt een korte reden voor de console.
+fn hop_ask(c: &Req<'_>) -> core::result::Result<HopAsk, (&'static str, Fail)> {
+    let flags = c.n >> 32;
+    if flags != 0 {
+        return Err((
+            "unknown flag",
+            Error::Version {
+                have: flags,
+                want: 0,
+            }
+            .into(),
+        ));
+    }
+    let ms = match c.n & 0xffff_ffff {
+        0 => HOP_RESTART_GRACE_MS,
+        ms => ms,
+    };
+    if ms > HOP_RESTART_GRACE_MAX_MS {
+        return Err((
+            "grace too long",
+            Error::TooLarge {
+                len: usize::try_from(ms).unwrap_or(usize::MAX),
+                max: HOP_RESTART_GRACE_MAX_MS as usize,
+            }
+            .into(),
+        ));
+    }
+    let grace = Duration::from_millis(ms);
+    if c.off == 0 {
+        if !c.path.is_empty() {
+            return Err((
+                "sum without an image",
+                Error::TooLarge {
+                    len: c.path.len(),
+                    max: 0,
+                }
+                .into(),
+            ));
+        }
+        return Ok(HopAsk { image: None, grace });
+    }
+    let slot = target(c).map_err(|e| ("bad slot", e.into()))?;
+    let sha = flip_sum(c.path).map_err(|e| ("bad sum", e.into()))?;
+    Ok(HopAsk {
+        image: Some((slot, sha)),
+        grace,
+    })
 }
 
 /// De kop van een bestandscall zonder lening: getallen en de bereiken van
@@ -2506,13 +2801,17 @@ mod tests {
     }
 
     /// De haken, met de klok van de kern in `.3`: elke [`Hooks::kern`] is
-    /// een seconde later, waarvan de executor driekwart sliep.
+    /// een seconde later, waarvan de executor driekwart sliep. `.4` is de
+    /// laatste HOP_RESTART die de haak bereikte (het image of `None`, en de
+    /// termijn), `.5` de reden van de laatste weigering vóór de haak.
     #[derive(Default)]
     struct NoHooks(
         Cell<u64>,
         Cell<Option<(usize, [u8; 32])>>,
         Cell<bool>,
         Cell<u64>,
+        Cell<Option<(Option<HopImage>, Duration)>>,
+        Cell<Option<&'static str>>,
     );
     impl Hooks for NoHooks {
         fn set_clock(&self, unix_ns: u64) {
@@ -2522,6 +2821,17 @@ mod tests {
             self.1.set(Some((bundle.slot.get(), *sha256)));
             self.2.set(bundle.cold);
             Ok(())
+        }
+        fn hop_restart(
+            &self,
+            image: Option<&HopImage>,
+            grace: Duration,
+        ) -> core::result::Result<(), Fail> {
+            self.4.set(Some((image.copied(), grace)));
+            Ok(())
+        }
+        fn hop_refused(&self, why: &'static str, _: &Fail) {
+            self.5.set(Some(why));
         }
         fn kern(&self) -> crate::cage::Status {
             let at_ns = self.3.get() + 1_000_000_000;
@@ -3312,6 +3622,292 @@ mod tests {
         // De bytes staan rauw vanaf offset 0 van de partitie.
         let part = info.partition;
         assert!(part >= bundle.len() as u64);
+    }
+
+    /// Een bevoegde call met `data` (STATE_PUT) of `path` (HOP_RESTART).
+    fn req(o: PrivOp, seq: u32, off: u64, n: u64, path: &[u8], data: &[u8]) -> Vec<u8> {
+        enc(&abi::hopabi::Req {
+            op: o.op(),
+            seq,
+            off,
+            n,
+            path,
+            data,
+        })
+    }
+
+    #[test]
+    fn hop_state_round_trips_by_offset_and_is_wiped_by_zero_bytes() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let mut p = Pipe::new(
+            port_ip4(1),
+            &[
+                op(PrivOp::StateGet, 1, 0, 0),
+                req(PrivOp::StatePut, 2, 0, 0, b"", b"agent state v1"),
+                req(PrivOp::StatePut, 3, 0, 0, b"", b"agent state v2"),
+                op(PrivOp::StateGet, 4, 0, 0),
+                op(PrivOp::StateGet, 5, 0, 6),
+                op(PrivOp::StateGet, 6, 0, 14),
+                op(PrivOp::StateGet, 7, 0, 15),
+                req(PrivOp::StatePut, 8, 0, 0, b"", b""),
+                op(PrivOp::StateGet, 9, 0, 0),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!(res.len(), 9);
+        assert_eq!(
+            (res[0].1, res[0].3, res[0].4.len()),
+            (STATUS_OK, 0, 0),
+            "nothing yet"
+        );
+        assert_eq!((res[1].1, res[2].1), (STATUS_OK, STATUS_OK));
+        // Vervangend: het tweede blob, heel.
+        assert_eq!((res[3].3, &res[3].4[..]), (14, &b"agent state v2"[..]));
+        // Vanaf een offset: de maat blijft die van het hele blob.
+        assert_eq!((res[4].3, &res[4].4[..]), (14, &b"state v2"[..]));
+        assert_eq!(
+            (res[5].1, res[5].3, res[5].4.len()),
+            (STATUS_OK, 14, 0),
+            "at the end"
+        );
+        assert_eq!(res[6].1, STATUS_ERROR, "beyond the end");
+        // Nul bytes wist.
+        assert_eq!((res[7].1, res[8].3), (STATUS_OK, 0));
+        assert_eq!(sys.hop_state_len(), 0);
+    }
+
+    #[test]
+    fn a_too_large_state_is_refused_and_the_old_one_stays() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let _a = node(&svc, &con);
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        sys.state_put(b"kept").unwrap();
+        let big = vec![7u8; HOP_STATE_MAX + 1];
+        assert_eq!(
+            sys.state_put(&big),
+            Err(Error::TooLarge {
+                len: HOP_STATE_MAX + 1,
+                max: HOP_STATE_MAX
+            })
+        );
+        assert_eq!(sys.hop_state_len(), 4, "the old blob is untouched");
+        // Precies de grens past.
+        sys.state_put(&big[..HOP_STATE_MAX]).unwrap();
+        assert_eq!(sys.hop_state_len(), HOP_STATE_MAX);
+    }
+
+    #[test]
+    fn an_app_may_not_touch_the_state_or_restart_hop() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let mut app = Pipe::new(
+            port_ip4(2),
+            &[
+                req(PrivOp::StatePut, 1, 0, 0, b"", b"mine now"),
+                op(PrivOp::StateGet, 2, 0, 0),
+                op(PrivOp::HopRestart, 3, 0, 0),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut app, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&app.tx);
+        assert!(res.iter().all(|r| r.1 == STATUS_DENIED), "{res:?}");
+        assert_eq!(sys.hop_state_len(), 0);
+        assert!(hooks.4.take().is_none(), "the restart reached the hook");
+    }
+
+    #[test]
+    fn hop_restart_checks_its_fields_before_the_hook() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let sha = [5u8; 32];
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        for (call, why) in [
+            (op(PrivOp::HopRestart, 1, 0, 1 << 32), "unknown flag"),
+            (op(PrivOp::HopRestart, 2, 0, 30_001), "grace too long"),
+            (
+                req(PrivOp::HopRestart, 3, 0, 0, &sha, b""),
+                "sum without an image",
+            ),
+            (req(PrivOp::HopRestart, 4, 3, 0, &sha[..31], b""), "bad sum"),
+            // Geen stroom in slot 5: niets om op te eisen.
+            (
+                req(PrivOp::HopRestart, 5, 5, 0, &sha, b""),
+                "no complete image stream",
+            ),
+        ] {
+            let mut p = Pipe::new(port_ip4(1), &[call]);
+            let _ = drive(
+                &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+            );
+            assert_eq!(results(&p.tx)[0].1, STATUS_ERROR, "{why}");
+            assert_eq!(hooks.5.take(), Some(why));
+            assert!(hooks.4.take().is_none(), "{why} reached the hook");
+        }
+        // Hetzelfde image, met de standaard en met een eigen termijn.
+        let mut p = Pipe::new(port_ip4(1), &[op(PrivOp::HopRestart, 6, 0, 0)]);
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(results(&p.tx)[0].1, STATUS_OK);
+        assert_eq!(hooks.4.take(), Some((None, Duration::from_secs(3))));
+        let mut p = Pipe::new(port_ip4(1), &[op(PrivOp::HopRestart, 7, 0, 500)]);
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        assert_eq!(hooks.4.take(), Some((None, Duration::from_millis(500))));
+    }
+
+    /// Een START_SLOT met een rauwe jobnaam.
+    fn raw_start(seq: u32, size: u64, job: &[u8]) -> Vec<u8> {
+        let r = StartReq {
+            memory_limit: ABI_TAIL + 1,
+            image_size: size,
+            cores: 1,
+            pool_cores: 1,
+            job,
+            ..Default::default()
+        };
+        let mut v = vec![0u8; 512];
+        let n = r.encode(&mut v, seq).unwrap();
+        v.truncate(n);
+        v
+    }
+
+    #[test]
+    fn a_hop_image_streams_raw_like_a_flip_bundle_and_is_claimed_once() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        // Geen geldige ELF: de kern plaatst hem niet, hij gaat rauw de
+        // partitie in; som en ELF toetst de haak.
+        let img = b"a new Hop, raw".repeat(5);
+        let sha = [3u8; 32];
+        let hex = b"03".repeat(32);
+        let restart = req(PrivOp::HopRestart, 6, 3, 2000, &hex, b"");
+        let mut p = Pipe::new(
+            port_ip4(1),
+            &[
+                raw_start(1, img.len() as u64, HOP_IMAGE_JOB),
+                enc(&stream_req(2, 3, 0, &img[..20])),
+                // Half binnen: geweigerd, en de stroom blijft staan.
+                restart.clone(),
+                enc(&stream_req(3, 3, 20, &img[20..])),
+                op(PrivOp::SlotStatus, 4, 3, 128),
+                // Een Hop-image is geen kern-bundel.
+                req(PrivOp::Flip, 5, 3, 0, &sha, b""),
+                restart.clone(),
+                restart,
+                op(PrivOp::SlotStatus, 7, 3, 128),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!(res.len(), 9);
+        assert_eq!((res[0].1, res[0].3), (STATUS_OK, 3));
+        assert_eq!(stream_state(&res[1]), StreamState::More);
+        assert_eq!(res[2].1, STATUS_ERROR, "an incomplete stream was claimed");
+        assert_eq!(stream_state(&res[3]), StreamState::Placed, "complete");
+        let info = SlotInfo::decode(&res[4].4).unwrap();
+        assert_eq!(info.state, SlotState::Streaming as u8, "not started");
+        // De kern bemat de partitie zelf, zoals voor een bundel: het image
+        // plus de staart, op hele 2 MB, ook al vroeg de start minder.
+        assert_eq!(
+            info.partition,
+            (img.len() as u64 + ABI_TAIL).next_multiple_of(2 * MIB)
+        );
+        assert_eq!(res[5].1, STATUS_ERROR, "a Hop image went to the flip");
+        assert_eq!(hooks.1.get(), None);
+        assert_eq!(
+            (res[6].1, res[7].1),
+            (STATUS_OK, STATUS_ERROR),
+            "claimed once"
+        );
+        let (image, grace) = hooks.4.take().unwrap();
+        let image = image.unwrap();
+        assert_eq!(
+            (image.slot, image.len, image.sha256),
+            (s(3), img.len() as u64, sha)
+        );
+        assert_eq!(grace, Duration::from_secs(2));
+        // Het slot is terug in de pool.
+        let info = SlotInfo::decode(&res[8].4).unwrap();
+        assert_eq!(info.state, SlotState::Empty as u8);
+    }
+
+    #[test]
+    fn the_open_streams_of_an_old_hop_are_dropped() {
+        let (svc, con, logs) = (Servicers::new(), FakeConsole::default(), SlotLogs::new());
+        let tee = LogTee::new(&con, &logs);
+        let mut a = node(&svc, &con);
+        let reply = Reply::new();
+        let inbox: Mailbox<Envelope<'_>, 8> = Mailbox::new();
+        let sys = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let img = elf(1);
+        let mut p = Pipe::new(
+            port_ip4(1),
+            &[
+                start_call(1, img.len() as u64, b""),
+                raw_start(2, 64, HOP_IMAGE_JOB),
+            ],
+        );
+        let (mut mem, hooks) = (SparseMem::default(), NoHooks::default());
+        let _ = drive(
+            &sys, &mut a, &inbox, &reply, &mut p, &mut mem, &hooks, &tee, None,
+        );
+        let res = results(&p.tx);
+        assert_eq!((res[0].3, res[1].3), (3, 4));
+        assert_eq!(a.status(s(3)).occupancy, Occupancy::Streaming);
+        let n = {
+            let mut gone = pin!(sys.drop_streams(&reply));
+            let mut run = pin!(a.run(&inbox));
+            let mut cx = Context::from_waker(Waker::noop());
+            loop {
+                let _ = run.as_mut().poll(&mut cx);
+                if let Poll::Ready(n) = gone.as_mut().poll(&mut cx) {
+                    break n;
+                }
+            }
+        };
+        assert_eq!(n, 2);
+        assert!(!sys.has_stream(s(3)) && !sys.has_stream(s(4)));
+        assert_eq!(a.status(s(3)).occupancy, Occupancy::Empty);
+        assert_eq!(a.status(s(4)).occupancy, Occupancy::Empty);
+    }
+
+    #[test]
+    fn an_image_is_checked_without_placing_a_byte() {
+        let img = elf(1);
+        assert_eq!(check_image(&img, 8 * MIB), Ok(()));
+        assert!(check_image(b"not an ELF", 8 * MIB).is_err());
+        assert!(check_image(&img[..40], 8 * MIB).is_err(), "truncated");
+        assert!(check_image(&img, ABI_TAIL).is_err(), "no room");
     }
 
     #[test]
