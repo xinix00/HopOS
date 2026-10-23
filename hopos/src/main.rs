@@ -595,6 +595,7 @@ static STORE: kern::store::StoreQueue = kern::store::StoreQueue::new();
 fn system(privilege: Option<Privilege>, fs: bool, max_slots: usize) -> &'static KernSystem {
     let mut s = System::new(&LIFECYCLE, &SERVICERS, privilege, max_slots)
         .with_logs(&slots::LOGS)
+        .with_kern_log(&conport::KERN_LOG)
         .with_store(&STORE);
     if fs {
         s = s.with_fs(&storage::FS_INBOX);

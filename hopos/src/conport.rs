@@ -17,6 +17,12 @@
 //! krijgt alles. De lezers lenen de ring per hap
 //! (`snapshot`), nooit over een await heen.
 //!
+//! De tee geeft de bytes van de OS-core ook aan de regelring van de kern
+//! ([`KERN_LOG`], `kern::system::KernLog`): de console van de kern voor
+//! `NEXT_LOG` 0, zodat Hop hem naast die van zijn apps toont. De regels van
+//! de apps markeert hun schrijver (`glue::KernConsole::app_line`); die gaan
+//! niet in die ring, want Hop haalt ze al per slot.
+//!
 //! De tee geeft elke regel ook aan de zwarte doos (`flip::black_box`): een
 //! ring op een vaste plek buiten het kernimage die een watchdog-reset
 //! overleeft, want deze ring in de BSS doet dat niet. Die schrijft vanaf elke
@@ -43,6 +49,7 @@ use core::time::Duration;
 use cpu::println;
 use executor::Executor;
 use kern::conport::{Readers, Ring, Uart};
+use kern::system::KernLog;
 use sync::{LocalCell, Signal};
 
 /// De ring: 256 KiB. Een boot is 10 KB tot `HOP_UP` (de Pi 5, 30-09),
@@ -90,6 +97,11 @@ static PREV: AtomicPtr<()> = AtomicPtr::new(core::ptr::null_mut());
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// De lezersplaatsen: hoogstens `kern::conport::MAX_READERS` tegelijk.
 pub(crate) static READERS: Readers = Readers::new();
+/// De console van de kern regel voor regel, zonder de regels van de apps,
+/// voor `NEXT_LOG` 0 (de system-API leest hem, `main::system`). Net als de
+/// ring hierboven van de OS-core; 64 KiB in .bss (de maat staat bij
+/// `kern::system::KERN_LOG_BYTES`).
+pub(crate) static KERN_LOG: KernLog = KernLog::new();
 
 /// Hangt de ring achter `prev` en zet de tee als console-sink; de core van
 /// nu bezit de ring tot [`here`] hem overdraagt.
@@ -145,6 +157,7 @@ pub(crate) fn tee(b: &[u8]) {
         }
         return;
     }
+    KERN_LOG.feed(b);
     match (nowait(), LOG.try_borrow_mut()) {
         (Some(put), Ok(mut log)) => {
             let Log { ring, uart } = &mut *log;

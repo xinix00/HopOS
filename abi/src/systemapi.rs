@@ -26,7 +26,7 @@
 //! STREAM_IMAGE(slot, m, brok)  -> Placed      laatste byte: plaatsen + starten
 //!                              |  Failed(tekst)
 //! SLOT_STATUS(slot)            -> SlotInfo    staat, core, heartbeat, exit (slot 0: de kern)
-//! NEXT_LOG(slot, max)          -> regel | leeg
+//! NEXT_LOG(slot, max)          -> regel | leeg (slot 0: de kern zelf)
 //! STOP_SLOT(slot, timeout_ms)  -> Ok (de kern geeft vrij) | fout (quarantaine)
 //! ```
 //!
@@ -259,8 +259,16 @@ pub enum PrivOp {
     /// [`SlotInfo`].
     SlotStatus = 0x43,
     /// De volgende logregel van een slot: `off` het slot, `n` de grootste
-    /// lengte. Het antwoord: `size` 1 en de regel in `data`, of `size` 0 als
-    /// er niets klaarstaat. De kern bewaart per slot een korte ring.
+    /// lengte. Het antwoord: `size` 1 en de regel in `data` (afgekapt op
+    /// `n`), of `size` 0 als er niets klaarstaat. De kern bewaart per slot
+    /// een korte ring.
+    ///
+    /// Slot 0 is de kern zelf, zoals bij [`PrivOp::SlotStatus`]: de
+    /// volgende regel die de kern op zijn console zette, zonder de regels
+    /// van de apps (die staan in de ring van hun slot, nooit dubbel), in
+    /// een ruimere ring (64 KiB, `kern::system::KERN_LOG_BYTES`) zodat de
+    /// boot er nog in staat als Hop opkomt. Vol is ook daar de oudste regel
+    /// eruit. Een kern van 3.0.16 of ouder weigert `off` 0 (een fout-status).
     NextLog = 0x44,
     /// Zet de klok: `n` de Unix-tijd in nanoseconden.
     SetClock = 0x45,

@@ -338,7 +338,9 @@ procedure).
 - **Telemetrie** (`hopos/src/telemetry.rs`): thermiek en klokbeleid per
   board, met `driver/dvfs` als governor.
 - **Console**: de tee gaat naar zwarte doos, UART, een ring van 256 KiB en
-  het glas. `nc NODE 5555` speelt de ring af en leest mee (hoogstens 4
+  het glas, en regel voor regel naar de ring van de kern voor `NEXT_LOG` 0
+  (64 KiB, `kern::system::KernLog`, zonder de regels van de apps): zo toont
+  Hop de console van de kern naast die van zijn apps. `nc NODE 5555` speelt de ring af en leest mee (hoogstens 4
   lezers; `kern/src/conport.rs`, `hopos/src/conport.rs`).
 - **Config**: een venster van 16 KiB (`#HOPCFG1`) in elke kern
   (`board/src/cfgwin.rs`), gevuld door `image/hopcfg.py` of `hop image`.
