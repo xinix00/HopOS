@@ -266,7 +266,7 @@ pub enum PrivOp {
     SetClock = 0x45,
     /// Flip naar een nieuwe kern: `off` het gereserveerde slot waarin de
     /// bundel gestroomd is (START_SLOT met de jobnaam
-    /// `kern::system::FLIP_BUNDLE_JOB`, dan STREAM_IMAGE: rauw, zonder
+    /// [`FLIP_BUNDLE_JOB`], dan STREAM_IMAGE: rauw, zonder
     /// plaatsing), `path` de verwachte SHA-256 (32 bytes, of 64 hex-tekens).
     /// `STATUS_OK`: de bundel is getoetst en klaargelegd, de sprong volgt
     /// een halve seconde later; het slot is dan al terug in de pool.
@@ -300,8 +300,8 @@ pub enum PrivOp {
     /// hoogstens [`HOP_STATE_MAX`] bytes, vervangend en atomair (een lezer
     /// ziet het oude of het nieuwe blob, nooit een mengsel); nul bytes wist
     /// het. Het blob leeft in het geheugen van de kern: het overleeft een
-    /// herstart van Hop ([`PrivOp::HopRestart`], of een crash die de kern
-    /// opvangt) en sterft met de boot. Zo kan een staat van een vorige
+    /// herstart van Hop ([`PrivOp::HopRestart`]) en sterft met de boot (ook
+    /// met de reset van de watchdog na een falende Hop). Zo kan een staat van een vorige
     /// boot nooit een bewoner van deze boot voor de zijne houden (het spook
     /// van 02-10 kwam uit een bestand op hopfs). De kern leest het niet.
     StatePut = 0x4B,
@@ -327,10 +327,13 @@ pub enum PrivOp {
     /// termijn op; vertrok Hop dan nog niet, dan volgt de stop-bel (de
     /// kill-vlag) met een korte termijn als vangnet. Daarna plaatst de kern
     /// de nieuwe Hop in hetzelfde slot, met dezelfde env, poorten en
-    /// bevoegdheid. De andere bewoners
-    /// merken niets; de staat van Hop ligt in [`PrivOp::StatePut`]. Haalt
-    /// een nieuw image het niet (de plaatsing faalt, of de nieuwe Hop stopt
-    /// of faalt binnen 30 s), dan zet de kern het vorige terug. Een fout:
+    /// bevoegdheid. De andere bewoners merken niets; de staat van Hop ligt
+    /// in [`PrivOp::StatePut`]. Haalt een nieuw image het niet (het plaatst
+    /// niet, of de nieuwe Hop faalt of vertrekt ongevraagd), dan is er geen
+    /// Hop meer: een falende Hop is een falende node. De kern zet geen vorig
+    /// image terug; de node-watchdog ziet Hop's hartslag en de canary
+    /// stoppen, reset de node, en de koude boot start de Hop van het
+    /// bootmedium. Een fout:
     /// er ligt al een herstart klaar, of er is geen image om "hetzelfde" uit
     /// te plaatsen (na een warme kern-flip die over de staging ging). Viel
     /// de weigering bij de toets van het image (som, ELF), dan is het slot
@@ -352,10 +355,19 @@ pub const HOP_RESTART_GRACE_MS: u64 = 3000;
 /// duurt dan dat, is voor het cluster een verloren node.
 pub const HOP_RESTART_GRACE_MAX_MS: u64 = 30_000;
 
+/// De jobnaam waarmee Hop een slot reserveert voor een flip-bundel: de
+/// bytes van STREAM_IMAGE gaan dan rauw de partitie in (vanaf offset 0),
+/// zonder plaatsing en zonder start, tot [`PrivOp::Flip`] ze opeist. Een
+/// naam en geen vlag in de wire: Hop sprak de ABI van zijn getagde HopOS
+/// (alpha.4), en een naam paste daarin zonder nieuw veld. Tot 3.0.16 stond
+/// hij in `kern::system` (dat hem nog her-exporteert) en hield Hop een
+/// tekstkopie.
+pub const FLIP_BUNDLE_JOB: &[u8] = b"hopos.flip-bundle";
+
 /// De jobnaam waarmee Hop een slot reserveert voor een nieuw image van
 /// zichzelf: de bytes van STREAM_IMAGE gaan rauw de partitie in, zonder
 /// plaatsing en zonder start, tot [`PrivOp::HopRestart`] ze opeist (de vorm
-/// van `kern::system::FLIP_BUNDLE_JOB`).
+/// van [`FLIP_BUNDLE_JOB`]).
 pub const HOP_IMAGE_JOB: &[u8] = b"hopos.hop-image";
 
 /// Vlag in `n` van [`PrivOp::Flip`]: de KOUDE flip. De kern stopt elke

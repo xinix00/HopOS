@@ -158,6 +158,7 @@ dependencies = [
  "dev",
  "driver-fb",
  "driver-gicv3",
+ "driver-i6300esb",
  "driver-pcie",
  "driver-pl011",
  "driver-virtioblk",
@@ -419,6 +420,13 @@ name = "driver-hid"
 version = "3.0.15"
 dependencies = [
  "bounded",
+]
+
+[[package]]
+name = "driver-i6300esb"
+version = "3.0.15"
+dependencies = [
+ "dev",
 ]
 
 [[package]]

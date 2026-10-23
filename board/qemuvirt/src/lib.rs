@@ -39,8 +39,11 @@ mod ramfb {
     }
 }
 pub mod slots;
-// De qemu-xhci op PCIe (usb.rs), alleen in de gui-smaak.
+// De PCIe-host (pcie.rs), met de qemu-xhci (usb.rs, alleen in de
+// gui-smaak) en de i6300esb (wdt.rs) erop.
+mod pcie;
 mod usb;
+pub mod wdt;
 
 use board::{Board, CoreClass, Dispatched, Error, Plan, Region};
 use core::cell::Cell;
@@ -242,10 +245,23 @@ impl Default for QemuVirt {
     }
 }
 
-/// Geen watchdog bedraad: de node draait onbewaakt, en de canary staat
+/// De i6300esb op PCIe (`wdt`), als QEMU hem geeft (`WDT=1` van
+/// image/qemu-run.sh); anders draait de node onbewaakt, en staat de canary
 /// toch op de console.
 impl board::Watchdog for QemuVirt {
-    type Armed = &'static str;
+    type Armed = wdt::Desc;
+
+    fn arm(&self, timeout_ms: u64) -> Result<wdt::Desc, &'static str> {
+        wdt::arm(timeout_ms)
+    }
+
+    fn pet(&self) {
+        wdt::pet();
+    }
+
+    fn disarm(&self) -> bool {
+        wdt::off()
+    }
 }
 
 /// Geen thermometer.

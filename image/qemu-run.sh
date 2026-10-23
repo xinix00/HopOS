@@ -40,6 +40,16 @@
 #                                    muis en de display-app tekent ze.
 #                                    QDISPLAY=cocoa|gtk|sdl kiest de
 #                                    weergave (standaard die van QEMU)
+#   WDT=1 image/qemu-run.sh          de hardware-watchdog: `-device
+#                                    i6300esb` op de PCIe-host met
+#                                    `-action watchdog=reset`. De kern wapent
+#                                    hem (board/qemuvirt/src/wdt.rs,
+#                                    HOPOS_WD_ARMED) en houdt zijn pets in
+#                                    als Hop of de canary stil valt; de reset
+#                                    laadt de loader-blobs opnieuw, dus de
+#                                    koude boot start weer de gestagede Hop
+#                                    (tools/qemu-test-hop-fail.sh).
+#                                    Standaard uit: dan "no watchdog"
 #   DISK=pad image/qemu-run.sh       de schijf (raw); standaard
 #                                    target/hopos-disk.img, 64 MiB, aangemaakt
 #                                    (ijl) als hij ontbreekt. Een verse schijf
@@ -121,6 +131,16 @@ display)
 	;;
 *)
 	echo "qemu-run: GUI=$GUI: only GUI=display" >&2
+	exit 2
+	;;
+esac
+# WDT=1: de i6300esb, en een reset (geen exit, geen pauze) als hij afloopt.
+QWDT=""
+case "${WDT:-}" in
+"" | 0) ;;
+1) QWDT="-device i6300esb -action watchdog=reset" ;;
+*)
+	echo "qemu-run: WDT=$WDT: only WDT=1" >&2
 	exit 2
 	;;
 esac
@@ -222,7 +242,7 @@ if [ -n "${DNSPORT:-}" ]; then
 fi
 QFWD="$FWD"
 # shellcheck disable=SC2086
-set -- $SCREEN -monitor none $QUSB $QDISK -kernel "$KERNEL" "$@"
+set -- $SCREEN -monitor none $QUSB $QWDT $QDISK -kernel "$KERNEL" "$@"
 # Met een artifact-server draait QEMU als kind, zodat de server met hem
 # stopt; anders vervangt hij dit script.
 if [ -n "$ARTPID" ]; then

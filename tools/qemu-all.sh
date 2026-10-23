@@ -32,6 +32,7 @@ hop-smp2      SMP=2 sh tools/qemu-test-hop.sh
 hop-oscore1   SMP=2 OSCORE=1 sh tools/qemu-test-hop.sh
 welcome       sh tools/qemu-test-welcome.sh
 hop-restart   sh tools/qemu-test-hop-restart.sh
+hop-fail      sh tools/qemu-test-hop-fail.sh
 smp           sh tools/qemu-test-smp.sh
 share         sh tools/qemu-test-share.sh
 reclaim       sh tools/qemu-test-reclaim.sh

@@ -6,7 +6,7 @@
 //! De weg, in volgorde:
 //!
 //! 1. Hop haalt de bundel (`POST /flip` met URL en sha256) en stroomt hem
-//!    rauw in een slot dat hij met `kern::system::FLIP_BUNDLE_JOB`
+//!    rauw in een slot dat hij met `abi::systemapi::FLIP_BUNDLE_JOB`
 //!    reserveerde; dan `PrivOp::FLIP` met het slot en de som.
 //! 2. [`prepare`] (de haak, synchroon): de som toetsen, de bundel lezen
 //!    (`kern::kernflip::Bundle`), de som van zijn switch-code tegen de

@@ -222,12 +222,9 @@ pub trait Hooks {
     fn kern(&self) -> crate::cage::Status;
 }
 
-/// De jobnaam waarmee Hop een slot reserveert voor een flip-bundel: de
-/// bytes van STREAM_IMAGE gaan dan rauw de partitie in (vanaf offset 0),
-/// zonder plaatsing en zonder start, tot PrivOp::FLIP ze opeist. Een naam
-/// en geen vlag in de wire: Hop spreekt de ABI van zijn getagde HopOS
-/// (alpha.4), en een naam past daarin zonder nieuw veld.
-pub const FLIP_BUNDLE_JOB: &[u8] = b"hopos.flip-bundle";
+// De jobnaam van een flip-bundel staat in `abi`, naast die van een nieuw
+// image van Hop: Hop leest hem daar, zonder eigen kopie (23-10).
+pub use abi::systemapi::FLIP_BUNDLE_JOB;
 
 /// Een complete flip-bundel in een gereserveerde partitie.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

@@ -168,17 +168,10 @@ Wie wat bezit:
    legt hopfs vast.
 
 **Hop zelf.** Hop is de bewoner van slot 1, en de kern is zijn supervisor
-(`Supervisor`, `hopos/src/slots.rs`), zoals systemd voor een dienst met
-`Restart=on-failure`. Eén taak plaatst hem, bewaakt hem (elke wissel één
-regel) en herstart hem, terwijl elke andere bewoner doordraait:
+(`Supervisor`, `hopos/src/slots.rs`). Eén taak plaatst hem, bewaakt hem
+(elke wissel één regel) en herstart hem alleen als hij daar zelf om vraagt,
+terwijl elke andere bewoner doordraait:
 
-- **Een crash** (fault of exit): eerst de diagnoseregel (`HOPOS_HOP_FAULT`,
-  `HOPOS_HOP_EXIT`), dan de stop en na een back-off van 1, 2, 4 ... hoogstens
-  30 s hetzelfde image (`HOPOS_HOP_RESTART reason=crash image=same n=K`).
-  Na een minuut gezond begint de back-off weer bij 1 s (systemd's
-  `RestartSteps` en `RestartMaxDelaySec`). Is er geen image meer (na een
-  warme flip over de staging), dan blijft Hop liggen zoals hij viel, voor
-  de diagnose (`HOPOS_HOP_RESTART_REFUSED`).
 - **Een vraag van Hop** (`HOP_RESTART`, met hetzelfde image of een nieuw
   dat hij rauw stroomde met de jobnaam `hopos.hop-image`): de system-API
   toetst velden en stroom, de haak toetst som en ELF en kopieert het image
@@ -191,11 +184,20 @@ regel) en herstart hem, terwijl elke andere bewoner doordraait:
   (`HOPOS_HOP_STOPPED reason=request left=self|bell`, en geen
   `HOPOS_HOP_EXIT`: deze exit is gevraagd); dan de nieuwe Hop. Tot 22-10
   stopte de kern hem na een vaste halve seconde, en een Hop die nog bezig
-  was, schreef zijn antwoord nooit.
-- **Een nieuw image dat het niet haalt** (de plaatsing faalt, of de nieuwe
-  Hop valt binnen 30 s, de lease-TTL van de leader): het vorige terug
-  (`HOPOS_HOP_ROLLBACK`). Na 30 s laat de supervisor het vorige los
-  (`HOPOS_HOP_IMAGE_HELD`).
+  was, schreef zijn antwoord nooit. Het image van de Hop die draait blijft
+  in de heap voor een volgende herstart met hetzelfde image; een vorig
+  image wordt niet bewaard.
+- **Een Hop die faalt is een node die faalt** (Derek, 23-10): een fault,
+  een exit die niemand vroeg, of een nieuw image dat niet plaatst. De kern
+  zet de diagnoseregel neer (`HOPOS_HOP_FAULT`, `HOPOS_HOP_EXIT`,
+  `HOPOS_HOP_FAIL`, dan `HOPOS_HOP_DOWN`) en laat hem liggen zoals hij viel.
+  Geen herstart met back-off, geen terugval op een vorig image: Hop's
+  hartslag en de canary stoppen, de node-watchdog houdt na `STALE_NS` zijn
+  pets in, de hardware reset, en de koude boot start de Hop van het
+  bootmedium (§4.10). Falen gaat naar het oude; is het ijzer de oorzaak,
+  dan helpt een verse start in dezelfde boot niet, en een koude boot
+  ontdoet de node juist van zijn toestand. Na een stroomonderbreking is
+  het net zo de Hop van het bootmedium.
 
 Elke nieuwe Hop krijgt hetzelfde slot (en dus de bevoegdheid: het token
 hoort bij slot 1), dezelfde env, poorten, volume en `Placement`
@@ -205,7 +207,8 @@ in de kern terug: Hop legt hem bij elke wijziging neer (`STATE_PUT`, één
 blob tot 1 MiB, vervangend en atomair) en leest hem na de start
 (`STATE_GET`); `HOPOS_HOP_STATE kept=B` zegt bij elke herstart hoeveel er
 klaarligt. Het blob leeft in de heap van de system-API en sterft met de
-boot, zoals de fdstore van systemd: een koude boot begint dus leeg, en een
+boot, zoals de fdstore van systemd: een koude boot (ook die van de
+watchdog na een falende Hop) begint dus leeg, en een
 staat van een vorige boot kan nooit een bewoner van deze voor de zijne
 houden. Wat een kern-flip ermee doet: [flip.md](flip.md).
 
@@ -327,7 +330,11 @@ procedure).
 - **Watchdog** (`hopos/src/watchdog.rs`, beleid in `kern/src/watchdog.rs`):
   elke 2 s een verse TCP-verbinding naar Hop; beweegt de hartslag niet, dan
   stopt het aaien en reset de hardware-watchdog de node. De hardware zit per
-  board.
+  board; op QEMU virt is het de i6300esb op PCIe, alleen met `WDT=1`
+  (`driver/i6300esb`, `board/qemuvirt/src/wdt.rs`). Dit is ook wat een
+  falende Hop opvangt (§4.3): de kern laat hem liggen, de watchdog reset, en
+  de koude boot start de Hop van het bootmedium
+  (`tools/qemu-test-hop-fail.sh`).
 - **Telemetrie** (`hopos/src/telemetry.rs`): thermiek en klokbeleid per
   board, met `driver/dvfs` als governor.
 - **Console**: de tee gaat naar zwarte doos, UART, een ring van 256 KiB en

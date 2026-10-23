@@ -42,7 +42,9 @@
 //! direct MMIO; QEMU `raspi4b` modelleert alleen de reset en wordt dus niet
 //! gewapend), de primaire van `/arm-io/wdt` op de Mac mini
 //! (`board_apple::wdt`, 30 s), de DesignWare-WDT op de Radxa en de LicheeRV
-//! (`driver_dwwdt`; de Radxa op TOP 15 = 89,5 s zoals Go), en niets op virt.
+//! (`driver_dwwdt`; de Radxa op TOP 15 = 89,5 s zoals Go), en op virt de
+//! i6300esb op PCIe als QEMU hem geeft (`WDT=1` van image/qemu-run.sh,
+//! `board_qemuvirt::wdt`, `driver_i6300esb`); zonder is virt onbewaakt.
 
 use crate::{BOARD, Machine};
 use board::{Board, Watchdog};

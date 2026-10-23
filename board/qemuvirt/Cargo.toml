@@ -21,8 +21,11 @@ driver-virtionet = { path = "../../driver/virtionet" }
 driver-virtioblk = { path = "../../driver/virtioblk" }
 # De framebuffer-beschrijving van `Board::framebuffer` (ramfb.rs).
 driver-fb = { path = "../../driver/fb" }
-# De qemu-xhci op de PCIe-host (usb.rs), alleen met `gui`.
-driver-pcie = { path = "../../driver/pcie", optional = true }
+# De PCIe-host (pcie.rs): de i6300esb (wdt.rs) en, met `gui`, de qemu-xhci
+# (usb.rs).
+driver-pcie = { path = "../../driver/pcie" }
+# De watchdog van virt: `-device i6300esb` (wdt.rs).
+driver-i6300esb = { path = "../../driver/i6300esb" }
 
 [lints]
 workspace = true
@@ -31,4 +34,4 @@ workspace = true
 default = []
 # `-device ramfb` over fw_cfg (ramfb.rs): de console op het glas in QEMU,
 # en de qemu-xhci op PCIe (usb.rs).
-gui = ["dep:driver-pcie"]
+gui = []

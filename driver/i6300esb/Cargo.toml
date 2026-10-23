@@ -1,0 +1,13 @@
+[package]
+name = "driver-i6300esb"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "De watchdog van de Intel 6300ESB (PCI 8086:25ab): de registers, het ontsluiten en de twee trappen; de enige watchdog van QEMU virt."
+
+[dependencies]
+dev = { path = "../../dev" }
+
+[lints]
+workspace = true

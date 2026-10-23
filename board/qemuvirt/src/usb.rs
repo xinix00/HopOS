@@ -3,7 +3,8 @@
 //! mee, met `usb-kbd` en `usb-mouse` erachter).
 //!
 //! Kaal is er niets: zonder de feature `gui` geeft [`hosts`] een lege lijst
-//! en linkt het board geen regel PCIe (handboek §7, docs/gui.md).
+//! en linkt het board geen regel xHCI (handboek §7, docs/gui.md); de
+//! PCIe-host zelf (pcie.rs) is er altijd, voor de watchdog (wdt.rs).
 //!
 //! Waarom PCIe en niet de MMIO-bus: virt heeft geen sysbus-xHCI die een
 //! gebruiker kan aanmaken (`nec-usb-xhci` en `qemu-xhci` zijn allebei
@@ -27,23 +28,13 @@ mod imp {
 #[cfg(feature = "gui")]
 mod imp {
     use crate::BLK_DMA;
+    // Het ECAM-venster en het stuk MMIO-venster van de xHCI: de watchdog
+    // krijgt het zijne (pcie.rs).
+    use crate::pcie::{ECAM, ECAM_LAST_BUS, MMIO};
     use board::{Region, UsbHost, UsbHosts, UsbKind};
     use cpu::println;
     use dev::Pa;
     use driver_pcie::{Bar, Config, Ecam, Function, MmioWindow};
-
-    /// Het ECAM-venster van virt met `highmem-ecam=off` (`hw/arm/virt.c`,
-    /// `VIRT_PCIE_ECAM`): 16 MB, bus 0 tot 15, in de Device-gigabyte van
-    /// de identity map (`mmu`).
-    const ECAM: Pa = Pa(0x3f00_0000);
-    /// De laatste bus in dat venster.
-    const ECAM_LAST_BUS: u8 = 15;
-    /// Het 32-bit MMIO-venster van de PCIe-host (`VIRT_PCIE_MMIO`), ook in
-    /// de Device-gigabyte. De BAR van de xHCI komt hieruit.
-    const MMIO: Region = Region {
-        base: Pa(0x1000_0000),
-        size: 0x2eff_0000,
-    };
     /// De eerste SPI van de vier INTx-lijnen (`VIRT_PCIE`, SPI 3), als
     /// INTID.
     const INTX_BASE: u32 = 32 + 3;
