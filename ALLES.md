@@ -85,20 +85,13 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
-- [ ] leanhttp (lean, de client): een headerregel boven 8192 bytes is een
-      fout, en de 302 van een GitHub-release draagt een
-      `content-security-policy` van 9243 bytes (24-10). Geen node haalt dus
-      nog iets van github.com/.../releases/download (`HOP_JOB_FAILED ...
-      header line exceeds 8192 bytes`), ook de init-job van welcome niet.
-      Een regel die we niet lezen overslaan in plaats van falen, of de grens
-      zoals curl (100 KB per regel); dan een lean-tag en de bump.
 - [ ] De O6N-stick staat nog op v3.0.16 met Hop 3.0.14: de node draait
-      3.0.17 met Hop 3.0.15 via flip en `POST /restart` (24-10), met
+      kern 3.0.17 met Hop 3.0.16 via flips en `POST /restart` (24-10), met
       `hopos.tick=1` in het venster van de flip. Een koude boot valt terug op
-      de stick; de stick naar 3.0.17 zodra hij er toch uit is.
-
-### Op ijzer te zien
-
+      de stick; de stick naar de nieuwste release zodra hij er toch uit is.
+      De volgende release draagt ook de verbindingsteller per levensduur
+      (fb81b13) en Hop's herhaling na een stille kern (8b1025a): pas dan
+      heeft een herstart op de O6N meteen een klok en https.
 - [ ] Het config-venster: de bootregel `HOPOS_CFG_WINDOW` per bord, een
       warme flip met `HOPOS_FLIP_CFG`, en `hop image --write` op een echte
       kaart (de LicheeRV eerst met `CFG=`, anders boot hij zonder config).
