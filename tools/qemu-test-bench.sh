@@ -42,6 +42,19 @@
 #   tools/qemu-test-bench.sh               TIMEOUT=90 standaard, in seconden
 #   BYTES=16777216 tools/qemu-test-bench.sh   bytes per doorvoerfase
 #   NVME=0 tools/qemu-test-bench.sh        zonder de tweede boot
+#   WIRE=1 NVME=0 TIMEOUT=180 CFG=c tools/qemu-test-bench.sh
+#                                          onder een trage draad met een paar
+#                                          ms RTT (image/qemu-run.sh WIRE=1,
+#                                          WIRE_BURST/WIRE_TIMER/WIRE_DELAY_US);
+#                                          met `hopos.tick=1` en
+#                                          `hopos.virtio.txq=16` in c de
+#                                          zendring die volloopt. Lees de
+#                                          netmeter out en de laatste
+#                                          HOPOS_TICK: sw(txdrop xoff) en
+#                                          nic(full held err). De slirp van
+#                                          QEMU houdt het venster op ~50 KB,
+#                                          dus een ring van 64 loopt onder
+#                                          één stroom nooit vol (24-10)
 #   KEEP_LOG=pad / KEEP_JSON=pad           bewaart console en netmeter-json
 #   SYSPORT/AGENTPORT/LEADERPORT/ARTPORT/WEBPORT   de host-poorten; standaard
 #                                          vrije van het OS

@@ -50,6 +50,17 @@
 #                                    koude boot start weer de gestagede Hop
 #                                    (tools/qemu-test-hop-fail.sh).
 #                                    Standaard uit: dan "no watchdog"
+#   WIRE=1 image/qemu-run.sh         een trage draad met vertraging, zoals
+#                                    een link van 1 Gbit met een paar ms RTT
+#                                    (de ORION naar een Mac over wifi): de
+#                                    virtio-net zendt hoogstens
+#                                    WIRE_BURST frames (8) per WIRE_TIMER ns
+#                                    (100000: ~80 kpps, ~120 MB/s), dus zijn
+#                                    TX-ring loopt vol als de gast sneller
+#                                    zendt; en een filter-buffer houdt elk
+#                                    pakket tot WIRE_DELAY_US µs (3000) vast,
+#                                    in beide richtingen. Standaard uit
+#                                    (tools/qemu-test-bench.sh met WIRE=1)
 #   DISK=pad image/qemu-run.sh       de schijf (raw); standaard
 #                                    target/hopos-disk.img, 64 MiB, aangemaakt
 #                                    (ijl) als hij ontbreekt. Een verse schijf
@@ -131,6 +142,22 @@ display)
 	;;
 *)
 	echo "qemu-run: GUI=$GUI: only GUI=display" >&2
+	exit 2
+	;;
+esac
+# WIRE=1: de trage draad (x-txburst per x-txtimer) en de vertraging
+# (filter-buffer), via $QNETDEV en $QNETOBJ in tools/lib.sh qemu_virt.
+QNETDEV=""
+QNETOBJ=""
+case "${WIRE:-}" in
+"" | 0) ;;
+1)
+	QNETDEV="tx=timer,x-txburst=${WIRE_BURST:-8},x-txtimer=${WIRE_TIMER:-100000}"
+	QNETOBJ="-object filter-buffer,id=wire0,netdev=n0,queue=all,interval=${WIRE_DELAY_US:-3000}"
+	echo "qemu-run: wire ${WIRE_BURST:-8} frames per ${WIRE_TIMER:-100000} ns, ${WIRE_DELAY_US:-3000} us buffered each way" >&2
+	;;
+*)
+	echo "qemu-run: WIRE=$WIRE: only WIRE=1" >&2
 	exit 2
 	;;
 esac

@@ -205,15 +205,17 @@ hop_virt() {
 # 2) op de mmio-bus (virt zet hem anders op PCIe) met $QFWD, en virtio-blk
 # op de mmio-bus achter drive disk0 (die geeft de aanroeper: -drive of
 # -blockdev), net als het scherm, de monitor en de kern. De regel van
-# image/qemu-run.sh. Doet exec.
+# image/qemu-run.sh. Doet exec. $QNETDEV gaat achter de virtio-net (de
+# trage draad van WIRE=1), $QNETOBJ is een extra -object (de vertraging).
 qemu_virt() {
 	smp="$1"
 	shift
+	# shellcheck disable=SC2086 # QNETOBJ is een lijst argumenten
 	exec qemu-system-aarch64 -M virt,gic-version=3,highmem-ecam=off,virtualization=on \
 		-cpu cortex-a53 -smp "$smp" -m 3G -serial stdio \
 		-global virtio-mmio.force-legacy=false \
-		-device virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0 \
-		-netdev "user,id=n0,$QFWD" \
+		-device "virtio-net-device,netdev=n0,bus=virtio-mmio-bus.0${QNETDEV:+,$QNETDEV}" \
+		-netdev "user,id=n0,$QFWD" ${QNETOBJ:-} \
 		-device virtio-blk-device,drive=disk0,bus=virtio-mmio-bus.1 \
 		"$@"
 }

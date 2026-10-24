@@ -452,6 +452,13 @@ impl Board for QemuVirt {
         // non-cacheable gemapt, en door niets anders uitgedeeld.
         let mut nic = unsafe { VirtioNet::new(base, NET_DMA.base, NET_DMA.size, cpu::idle::now) }
             .map_err(|_| Error::Nic("virtio-net init failed"))?;
+        // `hopos.virtio.txq=N`: een zendring van N plekken (de 64 van de
+        // RTL8125 op de ORION), voor de proef onder een trage draad
+        // (`WIRE=1`, tools/qemu-test-bench.sh). Zonder: de hele queue.
+        let txq = self
+            .boot_param("hopos.virtio.txq")
+            .parse::<u16>()
+            .map_or(nic.queue_size(), |n| nic.limit_tx(n));
         if intid != 0 {
             NIC_IRQ.get().set(Some((intid, nic.irq_ack())));
             if cpu::irq::enable(Line(intid), Some(nic_ack), Some(&NIC_BELL)).is_ok() {
@@ -459,7 +466,7 @@ impl Board for QemuVirt {
             }
         }
         cpu::println!(
-            "net: virtio-net at {:#x}, intid {intid}, queue {}",
+            "net: virtio-net at {:#x}, intid {intid}, queue {}, tx ring {txq}",
             base.0,
             nic.queue_size()
         );

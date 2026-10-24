@@ -152,6 +152,10 @@ pub struct VirtioNet<T: Transport = Mmio> {
     t: T,
     mac: Mac,
     qsize: u16,
+    /// Hoeveel TX-descriptors er hoogstens uitstaan (standaard `qsize`): de
+    /// "zendring van N plekken" van een NIC, zonder de RX-ring of de
+    /// queue zelf te verkleinen ([`VirtioNet::limit_tx`]).
+    tx_limit: u16,
     rx: Vq,
     tx: Vq,
     irq: Option<&'static Signal>,
@@ -206,6 +210,7 @@ impl<T: Transport> VirtioNet<T> {
             t,
             mac: Mac::default(),
             qsize: 0,
+            tx_limit: 0,
             rx: Vq::default(),
             tx: Vq::default(),
             irq: None,
@@ -235,6 +240,7 @@ impl<T: Transport> VirtioNet<T> {
         n.rx.avail_idx = n.qsize;
         n.rx.publish();
 
+        n.tx_limit = n.qsize;
         n.t.driver_ok();
         n.notify(RX_QUEUE);
         Ok(n)
@@ -287,6 +293,16 @@ impl<T: Transport> VirtioNet<T> {
         self.qsize
     }
 
+    /// Laat hoogstens `n` TX-descriptors tegelijk uitstaan (1 tot de
+    /// queuegrootte): een kleinere zendring, zoals de 64 plekken van de
+    /// RTL8125, op een device dat 256 biedt. Voor de proef onder een trage
+    /// draad (`hopos.virtio.txq`, tools/qemu-test-bench.sh met `WIRE=1`);
+    /// de RX-ring blijft zoals hij is. Geeft de grens die nu geldt.
+    pub fn limit_tx(&mut self, n: u16) -> u16 {
+        self.tx_limit = n.clamp(1, self.qsize.max(1));
+        self.tx_limit
+    }
+
     /// Het transport, voor wie het device verder wil bekijken (de
     /// interruptstatus, de config).
     #[must_use]
@@ -313,7 +329,7 @@ impl<T: Transport> netdev::Device for VirtioNet<T> {
             return Err(TxError::Size(frame.len()));
         }
         self.tx.last_used = self.tx.used_idx();
-        if self.tx.avail_idx.wrapping_sub(self.tx.last_used) >= self.qsize {
+        if self.tx.avail_idx.wrapping_sub(self.tx.last_used) >= self.tx_limit {
             self.stats.tx_full += 1;
             return Err(TxError::Full);
         }
@@ -434,6 +450,7 @@ mod tests {
             t: unsafe { Mmio::new(pa(&mut regs)) },
             mac: Mac::default(),
             qsize: 2,
+            tx_limit: 2,
             rx: Vq::default(),
             tx: Vq::default(),
             irq: None,
@@ -524,6 +541,21 @@ mod tests {
         n.transmit(&[4; 60]).unwrap();
         // Descriptor 0 wijst naar zijn buffer met header plus frame.
         assert_eq!(dev::read32(n.tx.desc.add(8)), (HDR_LEN + 60) as u32);
+    }
+
+    #[test]
+    fn a_tx_limit_makes_a_smaller_send_ring() {
+        let mut f = fake(false);
+        let n = &mut f.net;
+        assert_eq!(n.limit_tx(1), 1);
+        n.transmit(&[1; 60]).unwrap();
+        assert_eq!(n.transmit(&[2; 60]), Err(TxError::Full), "one slot");
+        assert_eq!(n.stats.tx_full, 1);
+        // Het device verzond hem: de plek is weer vrij.
+        dev::write16(n.tx.used.add(2), 1);
+        n.transmit(&[2; 60]).unwrap();
+        assert_eq!(n.limit_tx(0), 1, "at least one");
+        assert_eq!(n.limit_tx(1000), 2, "at most the queue");
     }
 
     /// Een nep-transport: onthoudt wat de driver deed, zodat de

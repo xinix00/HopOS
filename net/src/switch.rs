@@ -26,7 +26,10 @@ use crate::{Error, Frame, LogFn, Result, Stats, UPLINK_QUEUE};
 use alloc::vec::Vec;
 use core::fmt;
 use core::marker::PhantomData;
-use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use core::sync::atomic::{
+    AtomicBool, AtomicU64,
+    Ordering::{AcqRel, Relaxed, Release},
+};
 use core::time::Duration;
 use executor::{Executor, Sleeper};
 use sync::mpsc::Mailbox;
@@ -36,6 +39,12 @@ use sync::{Either, Oneshot, Signal, select, yield_now};
 /// Het aantal frames per poort per switch-ronde, zodat één drukke poort de
 /// rest niet verhongert.
 pub const MAX_BURST: usize = 64;
+
+/// Zoveel plaatsen moet de egress-rij hebben voor de switch nog een record
+/// uit een TX-ring leest: de bestemming weet hij pas na het lezen, en één
+/// record maakt hoogstens twee uplink-frames (het frame en een ARP-vraag
+/// naar een onbekende next-hop).
+pub const EGRESS_HEADROOM: usize = 2;
 
 /// Begrensde lokale backpressure: een korte TCP-burst verdwijnt niet stil,
 /// en een niet-lezende poort kan de switch niet blokkeren.
@@ -172,6 +181,9 @@ pub enum Command<'a, R, W> {
 /// en de actor kijkt zelf nog een keer.
 pub struct Published<R> {
     tx: [AtomicU64; PORTS],
+    /// De uplink staat stil ([`Xoff`]): dan is een volle TX-ring geen werk
+    /// voor de switch, en belt de deur niet.
+    xoff: Xoff,
     /// Welke poorten een handvat hebben, bit `i % 64` van woord `i / 64`:
     /// de deur kijkt alleen daar (de gereed-bits van de executor, Linux'
     /// `for_each_set_bit`). Tot 03-10 las elke blik alle 129 woorden, en
@@ -202,15 +214,27 @@ impl<R: Reader> Published<R> {
     pub const fn new() -> Self {
         Self {
             tx: [const { AtomicU64::new(0) }; PORTS],
+            xoff: Xoff::new(),
             live: [const { AtomicU64::new(0) }; PORT_WORDS],
             _ring: PhantomData,
         }
     }
 
+    /// De stop van de uplink-rij, voor de pomp (die hem weer opent).
+    #[must_use]
+    pub fn xoff(&self) -> &Xoff {
+        &self.xoff
+    }
+
     /// Ligt er werk in een TX-ring? Alleen kale loads (Go: `switchPending`,
-    /// en zie [`Reader::probe`] voor de 1,7M-rondes/s-les van 04-09).
+    /// en zie [`Reader::probe`] voor de 1,7M-rondes/s-les van 04-09). Staat
+    /// de uplink stil ([`Xoff`]), dan niet: de switch leest dan geen ring,
+    /// en een deur die toch belde, liet de OS-core nooit slapen.
     #[must_use]
     pub fn pending(&self) -> bool {
+        if self.xoff.is_stopped() {
+            return false;
+        }
         let live = core::array::from_fn(|w| self.live.get(w).map_or(0, |b| b.load(Relaxed)));
         ports_of(live).any(|i| {
             let v = self.tx.get(i).map_or(0, |h| h.load(Relaxed));
@@ -249,6 +273,68 @@ impl<R: Reader> Published<R> {
                 w.fetch_and(!bit, Relaxed);
             }
         }
+    }
+}
+
+/// De stop van de uplink-rij: Linux' `netif_stop_queue` en
+/// `netif_wake_queue` (`__QUEUE_STATE_DRV_XOFF`). Heeft de egress-rij geen
+/// plaats, dan stopt de switch met lezen uit de TX-ringen van de slots en
+/// de host in plaats van frames weg te gooien; de frames blijven daar, de
+/// app wacht in `transmit_wait`, en het segment blijft in de zendbuffer van
+/// zijn TCP. De pomp opent hem weer zodra hij een frame uit de rij nam, en
+/// belt dan de deur van de switch.
+///
+/// Tot 24-10 gooide de switch een frame bij een volle rij weg, en de pomp
+/// een frame bij een volle NIC-ring: elk gat kostte de TCP van de app een
+/// go-back-N, soms een RTO van 200 ms (de ORION op de RTL8125, één stroom
+/// naar een Mac over wifi: niet boven ~17 MB/s).
+///
+/// Eén vlag, geen protocol: wie hem zet, kijkt daarna nog één keer of er
+/// toch plaats is (de volgorde van `netif_tx_stop_queue` en de hertoets in
+/// een driver), dus een wek die net vóór de stop viel, gaat niet verloren.
+pub struct Xoff {
+    stopped: AtomicBool,
+}
+
+impl Xoff {
+    /// Open; voor een `static`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+        }
+    }
+
+    /// Staat de rij stil?
+    #[must_use]
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Relaxed)
+    }
+
+    /// Zet hem stil; `true` als hij liep (een nieuwe stop).
+    pub(crate) fn stop(&self) -> bool {
+        !self.stopped.swap(true, AcqRel)
+    }
+
+    /// Weer open, zonder bel (de switch zag zelf toch plaats).
+    fn start(&self) {
+        self.stopped.store(false, Release);
+    }
+
+    /// De wek van de pomp: stond hij stil, dan open en de bel van de
+    /// switch. Een kale lees eerst, want de pomp roept dit na elke ronde
+    /// met frames, en een CAS in een hete lus kost op sommige ARM-cores de
+    /// volgende WFE (zie [`Published::pending`]).
+    pub fn wake(&self, door: &Signal) {
+        if self.stopped.load(Relaxed) && self.stopped.swap(false, AcqRel) {
+            door.set();
+        }
+    }
+}
+
+impl Default for Xoff {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -551,9 +637,20 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         self.warn_corrupt(0);
         // Een stille coherente ring niet openen: het lezen van kop en staart
         // kost daar per ring een `dc civac` en twee `dsb sy` (03-10, O6N).
-        let live = self.core.live;
-        for i in ports_of(live).filter(|i| *i != 0 && !self.published.quiet(*i)) {
+        let (live, published) = (self.core.live, self.published);
+        'ports: for i in ports_of(live).filter(|i| *i != 0 && !published.quiet(*i)) {
+            // Past een hele burst in de egress-rij, dan één blik per poort en
+            // niet één per record: het pad van slot naar slot leest per
+            // record anders twee indexen van een rij die het nooit raakt.
+            let burst_fits = self.room_for(MAX_BURST);
             for _ in 0..MAX_BURST {
+                // Geen plaats in de egress-rij: niets meer uit de TX-ringen
+                // tot de pomp hem weer opent ([`Xoff`]). Ook verkeer van slot
+                // naar slot wacht dan even, zoals Linux één rij per device
+                // heeft; de uplink-ingress hieronder loopt door.
+                if !burst_fits && !self.room() {
+                    break 'ports;
+                }
                 match self.step_slot(i, buf, now) {
                     None => break,
                     Some(w) => worked |= w,
@@ -621,6 +718,9 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
         };
         let mut worked = false;
         for _ in 0..MAX_BURST {
+            if !self.room() {
+                break;
+            }
             let (core, nat) = (&mut self.core, &self.nat);
             let rec = port.tx.read_in_place(MAX_LAN_FRAME, |kind, f| match kind {
                 // Van poort 0 is er geen NAT-staart: wat `deliver` laat
@@ -645,6 +745,41 @@ impl<'a, R: Reader, W: Writer> Switch<'a, R, W> {
             *p = Some(port);
         }
         worked
+    }
+
+    /// Past `records` records in de egress-rij (elk [`EGRESS_HEADROOM`])?
+    /// Een blik zonder stop: het snelle pad van [`Switch::switch_pass`].
+    fn room_for(&self, records: usize) -> bool {
+        self.core
+            .egress
+            .as_ref()
+            .is_none_or(|e| e.free() >= records * EGRESS_HEADROOM)
+    }
+
+    /// Mag de switch nog een record uit een TX-ring lezen? Ja als de
+    /// egress-rij [`EGRESS_HEADROOM`] plaatsen heeft (of er geen uplink
+    /// is). Anders zet hij de uplink stil ([`Xoff`]) en kijkt hij nog één
+    /// keer: nam de pomp er intussen een uit (een andere core), dan loopt
+    /// hij weer, want diens wek kwam vóór de stop.
+    fn room(&mut self) -> bool {
+        let has = |c: &Core<'a, R, W>| {
+            c.egress
+                .as_ref()
+                .is_none_or(|e| e.free() >= EGRESS_HEADROOM)
+        };
+        if has(&self.core) {
+            return true;
+        }
+        let xoff = &self.published.xoff;
+        let new = xoff.stop();
+        if has(&self.core) {
+            xoff.start();
+            return true;
+        }
+        if new {
+            self.core.stats.uplink_xoff.fetch_add(1, Relaxed);
+        }
+        false
     }
 
     fn warn_corrupt(&mut self, i: usize) {

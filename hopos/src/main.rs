@@ -870,7 +870,7 @@ async fn tick(exec: &'static Executor) {
             continue;
         }
         println!(
-            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} flowfull={} natin={} natmiss={}) nic(bad={} full={} bells={}) waker(rounds={} seen={} kicks={} rx={}) temp={}",
+            "HOPOS_TICK {n} late_ms={late_ms} busy_ms={busy_ms} sleeps={} polls={} irq(timer={} nic={} other={}) os(in={} irq={} ipi={} timer={} yield={} exit={} fault={} idle={} res_ms={} kicks={}) turn(last={}:{} long_us={long_us}) stack_kb={stack_kb} sw(door={} timer={} rxfull={} rxdrop={} big={} noroute={} txdrop={} xoff={} flowfull={} natin={} natmiss={}) nic(bad={} full={} held={} err={} bells={}) waker(rounds={} seen={} kicks={} rx={}) temp={}",
             s.sleeps.load(Relaxed),
             s.polls.load(Relaxed),
             IRQS[0].load(Relaxed),
@@ -895,11 +895,14 @@ async fn tick(exec: &'static Executor) {
             sw.nat_oversize.load(Relaxed),
             sw.nat_no_route.load(Relaxed),
             sw.uplink_tx_drops.load(Relaxed),
+            sw.uplink_xoff.load(Relaxed),
             sw.nat_flow_full.load(Relaxed),
             sw.nat_reply_in.load(Relaxed),
             sw.nat_in_unmatched.load(Relaxed),
             sw.nic_rx_bad.load(Relaxed),
             sw.nic_tx_full.load(Relaxed),
+            sw.nic_tx_held.load(Relaxed),
+            sw.nic_tx_errors.load(Relaxed),
             sw.nic_doorbells.load(Relaxed),
             slots::WAKER.rounds.load(Relaxed),
             slots::WAKER.seen.load(Relaxed),

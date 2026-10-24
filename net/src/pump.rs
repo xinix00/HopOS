@@ -11,7 +11,18 @@
 //! kost bij stilte 100 wekken per seconde in plaats van 3.333, en onder
 //! verkeer wordt hij nooit geraakt). Zonder lijn: pollen op 300 µs, zodat de
 //! core bij stilte echt kan slapen; onder last wordt er nooit geslapen.
+//!
+//! Een volle TX-ring van de NIC is geen drop maar een stop, zoals Linux'
+//! `netif_stop_queue` in een driver die geen descriptor meer heeft: de pomp
+//! houdt het frame vast en probeert het de volgende ronde als eerste, en
+//! zolang hij vasthoudt kijkt hij elke [`NIC_POLL`] (er is geen
+//! TX-interrupt). De egress-rij loopt dan vol, en de switch stopt met lezen
+//! uit de TX-ringen ([`crate::switch::Xoff`]); de pomp opent hem weer zodra
+//! hij een frame uit de rij nam (`netif_wake_queue`). Tot 24-10 ging het
+//! frame na één flush weg ("drop, TCP herstelt"), en elk gat kostte de TCP
+//! van de app een go-back-N of een RTO.
 
+use crate::switch::Xoff;
 use crate::{Frame, Stats, UPLINK_QUEUE};
 use core::sync::atomic::Ordering::Relaxed;
 use core::time::Duration;
@@ -44,6 +55,11 @@ pub struct Pump<'a, D: Device> {
     bell: &'a Signal,
     /// De deur van de switch.
     door: &'a Signal,
+    /// De stop van de switch: de pomp opent hem als er weer plaats is.
+    xoff: &'a Xoff,
+    /// Het frame dat de NIC niet nam (een volle TX-ring): de volgende ronde
+    /// gaat het als eerste, vóór de egress-rij.
+    held: Option<Frame>,
     stats: &'a Stats,
 }
 
@@ -55,6 +71,7 @@ impl<'a, D: Device> Pump<'a, D> {
         egress: Receiver<'a, Frame, UPLINK_QUEUE>,
         bell: &'a Signal,
         door: &'a Signal,
+        xoff: &'a Xoff,
         stats: &'a Stats,
     ) -> Self {
         Self {
@@ -63,6 +80,8 @@ impl<'a, D: Device> Pump<'a, D> {
             egress,
             bell,
             door,
+            xoff,
+            held: None,
             stats,
         }
     }
@@ -72,26 +91,61 @@ impl<'a, D: Device> Pump<'a, D> {
         &mut self.nic
     }
 
-    /// Zet wat de switch klaarlegde de draad op. `true` = er ging iets uit.
+    /// Houdt de pomp een frame vast dat de NIC nog niet nam?
+    #[must_use]
+    pub fn is_holding(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// Zet wat de switch klaarlegde de draad op, het vastgehouden frame
+    /// eerst. Een volle ring houdt het frame vast en stopt de ronde (de
+    /// volgorde blijft); een echte driverfout telt en gooit weg. Nam de pomp
+    /// iets uit de rij, dan opent hij de switch weer. `true` = er ging iets
+    /// uit.
     fn tx_pass(&mut self) -> bool {
         let mut sent = false;
-        while let Some(f) = self.egress.try_recv() {
+        let mut took = false;
+        loop {
+            // Alleen nemen als hij er is: een `take` van een lege plek
+            // verplaatst toch de hele 1,5 KiB van `Option<Frame>`.
+            let held = if self.held.is_some() {
+                self.held.take()
+            } else {
+                None
+            };
+            let (f, fresh) = match held {
+                Some(f) => (f, false),
+                None => match self.egress.try_recv() {
+                    Some(f) => {
+                        took = true;
+                        (f, true)
+                    }
+                    None => break,
+                },
+            };
             match self.nic.transmit(f.bytes()) {
                 Ok(()) => sent = true,
-                // Vol: één flush (de doorbell van wat al klaarstaat) en nog
-                // één poging; daarna is het Ethernet: drop, TCP herstelt.
+                // Vol: één flush (de doorbell van wat al klaarstaat laat de
+                // NIC beginnen) en nog één poging; dan vasthouden.
                 Err(TxError::Full) => {
                     self.nic.flush();
                     if self.nic.transmit(f.bytes()).is_ok() {
                         sent = true;
-                    } else {
-                        self.stats.nic_tx_errors.fetch_add(1, Relaxed);
+                        continue;
                     }
+                    if fresh {
+                        self.stats.nic_tx_held.fetch_add(1, Relaxed);
+                    }
+                    self.held = Some(f);
+                    break;
                 }
                 Err(_) => {
                     self.stats.nic_tx_errors.fetch_add(1, Relaxed);
                 }
             }
+        }
+        if took {
+            self.xoff.wake(self.door);
         }
         sent
     }
@@ -146,6 +200,12 @@ impl<'a, D: Device> Pump<'a, D> {
             }
             self.stats.rx_idle.fetch_add(1, Relaxed);
             match irq {
+                // Een vastgehouden frame wacht op een descriptor die de NIC
+                // vrijgeeft zonder interrupt: elke poll-periode kijken, niet
+                // pas bij de vangrail.
+                Some(line) if self.held.is_some() => {
+                    select(self.bell.wait(), select(line.wait(), exec.after(NIC_POLL))).await;
+                }
                 Some(line) => {
                     let grid = u64::try_from(IRQ_GUARD.as_nanos()).unwrap_or(u64::MAX);
                     let guard =
@@ -219,7 +279,15 @@ mod tests {
             flushes: 0,
             full_once: false,
         };
-        let mut p = Pump::new(nic, ing_tx, eg_rx, leak(Signal::new()), door, stats);
+        let mut p = Pump::new(
+            nic,
+            ing_tx,
+            eg_rx,
+            leak(Signal::new()),
+            door,
+            leak(Xoff::new()),
+            stats,
+        );
         assert!(p.pass());
         assert_eq!(ing_rx.len(), RX_BATCH, "één burst is RX_BATCH frames");
         assert_eq!(p.nic().flushes, 1, "één doorbell per burst");
@@ -252,6 +320,7 @@ mod tests {
             eg_rx,
             leak(Signal::new()),
             leak(Signal::new()),
+            leak(Xoff::new()),
             stats,
         );
         while p.pass() {}
@@ -284,6 +353,7 @@ mod tests {
             eg_rx,
             leak(Signal::new()),
             leak(Signal::new()),
+            leak(Xoff::new()),
             stats,
         );
         for i in 0..3u8 {
@@ -297,6 +367,67 @@ mod tests {
         );
         assert_eq!(p.nic().flushes, 2, "de flush bij vol plus die van de burst");
         assert_eq!(stats.nic_tx_errors.load(Relaxed), 0);
+    }
+
+    /// Een volle ring houdt het frame vast in plaats van het weg te
+    /// gooien: de volgende ronde gaat het als eerste, de rest blijft in de
+    /// egress-rij, en een stilstaande switch krijgt zijn bel zodra de pomp
+    /// weer een frame uit de rij nam.
+    #[test]
+    fn een_volle_ring_houdt_vast_en_wekt_de_switch() {
+        struct Stuck {
+            free: usize,
+            tx: Vec<u8>,
+        }
+        impl Device for Stuck {
+            fn transmit(&mut self, f: &[u8]) -> Result<(), TxError> {
+                if self.free == 0 {
+                    return Err(TxError::Full);
+                }
+                self.free -= 1;
+                self.tx.push(f[0]);
+                Ok(())
+            }
+            fn receive(&mut self, _: &mut [u8]) -> Option<usize> {
+                None
+            }
+            fn flush(&mut self) {}
+            fn mac(&self) -> Mac {
+                Mac([2, 0, 0, 0, 0, 9])
+            }
+        }
+        let (ing_tx, _ing_rx) = leak(Ingress::new()).split().unwrap();
+        let (mut eg_tx, eg_rx) = leak(Egress::new()).split().unwrap();
+        let (door, xoff, stats) = (leak(Signal::new()), leak(Xoff::new()), leak(Stats::new()));
+        let nic = Stuck {
+            free: 1,
+            tx: Vec::new(),
+        };
+        let mut p = Pump::new(nic, ing_tx, eg_rx, leak(Signal::new()), door, xoff, stats);
+        for i in 0..4u8 {
+            assert!(eg_tx.try_send(Frame::from_slice(&[i; 42]).unwrap()).is_ok());
+        }
+        assert!(p.pass(), "frame 0 went out");
+        assert!(p.is_holding(), "frame 1 was not held");
+        assert_eq!(eg_tx.free(), UPLINK_QUEUE - 2, "frames 2 and 3 stay queued");
+        assert!(!p.pass(), "a held frame on a full ring is no work");
+        assert_eq!(
+            stats.nic_tx_held.load(Relaxed),
+            1,
+            "one hold, not one per poll"
+        );
+        assert_eq!(stats.nic_tx_errors.load(Relaxed), 0, "full is no error");
+        // De switch stopt; de NIC geeft plaats vrij.
+        assert!(xoff.stop());
+        door.take();
+        p.nic().free = 8;
+        assert!(p.pass());
+        assert_eq!(p.nic().tx, [0, 1, 2, 3], "the order held");
+        assert!(!p.is_holding());
+        assert!(
+            !xoff.is_stopped() && door.is_set(),
+            "the switch was not woken"
+        );
     }
 
     thread_local! {
@@ -326,6 +457,7 @@ mod tests {
             eg_rx,
             leak(Signal::new()),
             leak(Signal::new()),
+            leak(Xoff::new()),
             stats,
         );
         p.nic().rx.push_back(vec![7; 64]);

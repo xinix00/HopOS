@@ -127,13 +127,22 @@ pub struct Stats {
     pub nat_in_unmatched: AtomicU64,
     /// Uplink-frames die de pomp niet in de ingress-rij kwijt kon.
     pub uplink_rx_drops: AtomicU64,
-    /// Frames die de switch niet in de egress-rij kwijt kon.
+    /// Frames die de switch niet in de egress-rij kwijt kon. Sinds de
+    /// stop van de rij ([`switch::Xoff`], 24-10) alleen nog een record dat
+    /// meer dan zijn marge aan uplink-frames maakte; hoort 0 te zijn.
     pub uplink_tx_drops: AtomicU64,
+    /// Hoe vaak de switch stopte met lezen omdat de egress-rij vol was
+    /// (`netif_stop_queue`); de frames bleven in de TX-ringen van de slots.
+    pub uplink_xoff: AtomicU64,
     /// Lege rondes van de RX-pomp: hoe vaak HOP keek en niets vond. Gepold
     /// ~3.333/s bij stilte, op de interrupt ~100/s (de vangrail).
     pub rx_idle: AtomicU64,
-    /// Frames die de NIC weigerde (vol of dood).
+    /// Frames die de NIC weigerde met een echte fout (geen volle ring):
+    /// geteld en weg.
     pub nic_tx_errors: AtomicU64,
+    /// Hoe vaak de pomp een frame vasthield omdat de TX-ring van de NIC
+    /// vol was, ook na een flush; de volgende ronde probeert hij hem eerst.
+    pub nic_tx_held: AtomicU64,
     /// De meetlat van de NIC-driver (`netdev::Stats`), na elke ronde van de
     /// pomp overgenomen: afgekeurde RX-descriptors.
     pub nic_rx_bad: AtomicU64,
@@ -170,8 +179,10 @@ impl Stats {
             nat_in_unmatched: AtomicU64::new(0),
             uplink_rx_drops: AtomicU64::new(0),
             uplink_tx_drops: AtomicU64::new(0),
+            uplink_xoff: AtomicU64::new(0),
             rx_idle: AtomicU64::new(0),
             nic_tx_errors: AtomicU64::new(0),
+            nic_tx_held: AtomicU64::new(0),
             nic_rx_bad: AtomicU64::new(0),
             nic_tx_full: AtomicU64::new(0),
             nic_doorbells: AtomicU64::new(0),

@@ -901,3 +901,236 @@ fn corrupte_ring_gaat_uit_de_deur() {
         "een dode ring houdt de deur voor altijd open"
     );
 }
+
+/// Een NIC met een TX-ring van `cap` plekken die alleen leegloopt als de
+/// toets het zegt ([`SlowNic::complete`]): de RTL8125 die een Mac over wifi
+/// niet bijhoudt. `transmit` op een volle ring is `Full`, zoals de drivers.
+struct SlowNic {
+    ring: std::collections::VecDeque<Vec<u8>>,
+    cap: usize,
+    wire: Vec<Vec<u8>>,
+    rx: std::collections::VecDeque<Vec<u8>>,
+    full: u64,
+}
+
+impl SlowNic {
+    fn new(cap: usize) -> Self {
+        Self {
+            ring: std::collections::VecDeque::new(),
+            cap,
+            wire: Vec::new(),
+            rx: std::collections::VecDeque::new(),
+            full: 0,
+        }
+    }
+
+    /// De NIC zet `n` frames op de draad en geeft hun descriptors vrij.
+    fn complete(&mut self, n: usize) {
+        for _ in 0..n {
+            let Some(f) = self.ring.pop_front() else {
+                break;
+            };
+            self.wire.push(f);
+        }
+    }
+}
+
+impl netdev::Device for SlowNic {
+    fn transmit(&mut self, f: &[u8]) -> core::result::Result<(), netdev::TxError> {
+        if self.ring.len() >= self.cap {
+            self.full += 1;
+            return Err(netdev::TxError::Full);
+        }
+        self.ring.push_back(f.to_vec());
+        Ok(())
+    }
+    fn receive(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let f = self.rx.pop_front()?;
+        buf[..f.len()].copy_from_slice(&f);
+        Some(f.len())
+    }
+    fn flush(&mut self) {}
+    fn mac(&self) -> netdev::Mac {
+        netdev::Mac(NIC_MAC)
+    }
+    fn stats(&self) -> netdev::Stats {
+        netdev::Stats {
+            tx_full: self.full,
+            ..netdev::Stats::default()
+        }
+    }
+}
+
+/// Frame `seq` van slot 1 naar buiten: TCP naar EXT_IP:443, met `seq` in de
+/// eerste vier bytes payload (de NAT herschrijft koppen, niet de payload).
+fn outbound(seq: u32) -> Vec<u8> {
+    mk_frame(
+        PROTO_TCP,
+        HOST_MAC,
+        port_mac(1),
+        port_ip4(1),
+        EXT_IP,
+        5555,
+        443,
+        &seq.to_be_bytes(),
+    )
+}
+
+/// De `seq` van een frame op de draad.
+fn seq_of(f: &[u8]) -> u32 {
+    let at = ETH_LEN + 20 + 20;
+    u32::from_be_bytes(f[at..at + 4].try_into().unwrap())
+}
+
+type TestPump = crate::pump::Pump<'static, SlowNic>;
+
+/// De switch met slot 1 en de uplink, en een pomp over een [`SlowNic`] met
+/// 64 TX-plekken (de RTL8125 van de ORION) achter zijn egress-rij.
+fn switch_and_pump() -> (H, App, TestPump) {
+    let mut h = harness();
+    h.uplink();
+    let app = h.attach(1);
+    let (to_switch, ingress) = leak(Ingress::new()).split().unwrap();
+    let (egress, from_switch) = leak(Egress::new()).split().unwrap();
+    // De rijen van de harness zijn los van de pomp; deze switch krijgt de
+    // rijen van de pomp.
+    h.sw.ingress = Some(ingress);
+    h.sw.core.egress = Some(egress);
+    let pump = crate::pump::Pump::new(
+        SlowNic::new(64),
+        to_switch,
+        from_switch,
+        leak(Signal::new()),
+        h.door,
+        h.published.xoff(),
+        h.stats,
+    );
+    (h, app, pump)
+}
+
+/// Linux' `netif_stop_queue`: een burst van duizenden frames uit één slot
+/// door een NIC die per ronde maar drie frames de draad op zet. Geen
+/// enkele drop, dezelfde volgorde, en de switch loopt alleen weer na de
+/// wek van de pomp (de deur van de executor belt niet zolang de uplink
+/// stilstaat).
+#[test]
+fn een_burst_door_een_trage_nic_verliest_niets_en_blijft_op_volgorde() {
+    let (mut h, mut app, mut pump) = switch_and_pump();
+    let mut buf = vec![0u8; MAX_LAN_FRAME];
+    let total = 5000u32;
+    let mut next = 0u32;
+    let (mut stopped, mut woken, mut app_waited) = (false, false, false);
+    for _ in 0..1_000_000 {
+        // De app schrijft tot zijn ring vol is, en wacht dan (transmit_wait).
+        while next < total {
+            if !app.tx.push(KIND_FRAME, &outbound(next)) {
+                app_waited = true;
+                break;
+            }
+            next += 1;
+        }
+        // De deur van de executor (Doorbell): belt alleen als er werk ligt
+        // en de uplink loopt.
+        h.published.ring(h.door);
+        if h.door.take() {
+            h.sw.switch_pass(&mut buf);
+        }
+        let was = h.published.xoff().is_stopped();
+        stopped |= was;
+        pump.pass();
+        if was && !h.published.xoff().is_stopped() {
+            assert!(
+                h.door.is_set(),
+                "the pump opened the queue without the bell"
+            );
+            woken = true;
+        }
+        pump.nic().complete(3);
+        if pump.nic().wire.len() == total as usize {
+            break;
+        }
+    }
+    let wire = &pump.nic().wire;
+    assert_eq!(wire.len(), total as usize, "frames went missing");
+    assert!(
+        wire.iter().enumerate().all(|(i, f)| seq_of(f) == i as u32),
+        "the order changed"
+    );
+    assert!(
+        stopped && woken && app_waited,
+        "the burst never filled the queues"
+    );
+    assert!(h.stats.uplink_xoff.load(Relaxed) > 0);
+    assert!(h.stats.nic_tx_held.load(Relaxed) > 0);
+    assert!(
+        h.stats.nic_tx_full.load(Relaxed) > 0,
+        "the NIC never was full"
+    );
+    for (what, c) in [
+        ("uplink_tx_drops", &h.stats.uplink_tx_drops),
+        ("nic_tx_errors", &h.stats.nic_tx_errors),
+        ("rx_drops", &h.stats.rx_drops),
+        ("uplink_rx_drops", &h.stats.uplink_rx_drops),
+        ("nat_flow_full", &h.stats.nat_flow_full),
+    ] {
+        assert_eq!(c.load(Relaxed), 0, "{what}");
+    }
+    assert!(!h.published.xoff().is_stopped());
+}
+
+/// Een rij die vol blijft (de NIC neemt niets meer), is geen hang van de
+/// switch: de andere richting, van de draad naar het slot, loopt door; de
+/// deur belt niet voor de stilstaande TX-ringen (de OS-core mag slapen); en
+/// als de NIC weer neemt, komt alles alsnog, zonder drop.
+#[test]
+fn een_volle_rij_houdt_de_ontvangst_niet_tegen() {
+    let (mut h, mut app, mut pump) = switch_and_pump();
+    let mut buf = vec![0u8; MAX_LAN_FRAME];
+    let mut sent = 0u32;
+    for _ in 0..100 {
+        while app.tx.push(KIND_FRAME, &outbound(sent)) {
+            sent += 1;
+            if sent == 1000 {
+                break;
+            }
+        }
+        h.published.ring(h.door);
+        if h.door.take() {
+            h.sw.switch_pass(&mut buf);
+        }
+        pump.pass();
+    }
+    assert!(h.published.xoff().is_stopped(), "the queue never stopped");
+    assert!(
+        !h.published.pending(),
+        "a stopped uplink still counts as work: the OS core would never sleep"
+    );
+    // Van de draad naar slot 1: een IPv6-unicast op zijn MAC.
+    let v6 = ether_frame(port_mac(1), [0x10, 0x20, 0x30, 0x40, 0x50, 0x60], 0x86dd);
+    pump.nic().rx.push_back(v6.clone());
+    assert!(pump.pass(), "the pump did not take the received frame");
+    assert!(h.door.take(), "the pump did not ring the switch for it");
+    h.sw.switch_pass(&mut buf);
+    assert_eq!(
+        app.rx.frame().as_deref(),
+        Some(&v6[..]),
+        "RX stopped with TX"
+    );
+    // De NIC neemt weer: alles komt, op volgorde.
+    for _ in 0..100_000 {
+        pump.nic().complete(64);
+        pump.pass();
+        if h.door.take() {
+            h.sw.switch_pass(&mut buf);
+        }
+        h.published.ring(h.door);
+        if pump.nic().wire.len() == sent as usize {
+            break;
+        }
+    }
+    let wire = &pump.nic().wire;
+    assert_eq!(wire.len(), sent as usize);
+    assert!(wire.iter().enumerate().all(|(i, f)| seq_of(f) == i as u32));
+    assert_eq!(h.stats.uplink_tx_drops.load(Relaxed), 0);
+    assert_eq!(h.stats.nic_tx_errors.load(Relaxed), 0);
+}
