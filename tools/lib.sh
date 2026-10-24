@@ -177,6 +177,31 @@ serve() {
 	PIDS="$PIDS $!"
 }
 
+# sntp: de tijd van de host als SNTP-server op 127.0.0.1:$NTPPORT/udp (voor
+# de gast hopos.ntp=10.0.2.2:$NTPPORT), zodat een ring niet aan pool.ntp.org
+# hangt; zijn log in $ART/ntp.log. Modus 4, stratum 2, het transmit-veld van
+# de vraag als originate (dat toetst Hop), zoals hop/tools/qemu-test-cluster.sh.
+sntp() {
+	python3 - "$NTPPORT" >"$ART/ntp.log" 2>&1 <<'PY' &
+import socket, struct, sys, time
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("127.0.0.1", int(sys.argv[1])))
+print("ntp up", flush=True)
+def stamp(t):
+    t += 2208988800
+    return struct.pack("!II", int(t), int((t % 1) * (1 << 32)))
+while True:
+    req, addr = s.recvfrom(512)
+    if len(req) < 48:
+        continue
+    now = time.time()
+    resp = bytes([0x24, 2, 6, 0xEC]) + bytes(8) + b"LOCL" + stamp(now) + req[40:48] + stamp(now) + stamp(time.time())
+    s.sendto(resp, addr)
+    print("ntp answered", addr, flush=True)
+PY
+	PIDS="$PIDS $!"
+}
+
 # --- QEMU
 
 # hop_virt [VAR=waarde...] [-- QEMU-argumenten]: image/qemu-run.sh op de

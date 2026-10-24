@@ -1857,6 +1857,10 @@ pub(crate) mod tests {
         pub(crate) boot_pending: [bool; 16],
         /// Wat `SCHED_CURRENT` zegt: de vasthouder van de core.
         pub(crate) hog: Option<usize>,
+        /// Draait op het moment van het startschot, met het slot: de eerste
+        /// instructie van de bewoner. De toets van de system-API kijkt
+        /// daar of een call van die bewoner al toegelaten wordt.
+        pub(crate) on_dispatch: Option<std::boxed::Box<dyn Fn(usize)>>,
     }
 
     impl FakeCage {
@@ -1884,6 +1888,7 @@ pub(crate) mod tests {
                 exit_grace_ms: [0; 16],
                 boot_pending: [false; 16],
                 hog: None,
+                on_dispatch: None,
             }
         }
     }
@@ -1908,6 +1913,9 @@ pub(crate) mod tests {
         }
         fn dispatch(&mut self, slot: Slot, core: Core) -> core::result::Result<(), CageError> {
             self.dispatched.push((slot.get(), core.get()));
+            if let Some(f) = &self.on_dispatch {
+                f(slot.get());
+            }
             if self.fail_dispatch {
                 return Err(CageError { code: 1 });
             }

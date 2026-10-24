@@ -4305,6 +4305,43 @@ mod tests {
         assert_eq!(svc.ctl(s(1)).unwrap().conns(gen2), 0);
     }
 
+    /// De belofte van een start (ook die van een herstarte Hop): vanaf de
+    /// eerste instructie van de bewoner, het startschot, wordt zijn
+    /// verbinding toegelaten. De generatie staat vóór de dispatch, en de
+    /// plaatsen van de vorige levensduur tellen niet. Geen `NotLive` tussen
+    /// Arm en de eerste call; een weigering daarna is een fout van de kern.
+    #[test]
+    fn a_resident_is_admitted_from_its_first_instruction() {
+        let svc: &'static Servicers = std::boxed::Box::leak(std::boxed::Box::new(Servicers::new()));
+        let con: &'static FakeConsole = std::boxed::Box::leak(std::boxed::Box::default());
+        let inbox: &'static Mailbox<Envelope<'static>, 2> =
+            std::boxed::Box::leak(std::boxed::Box::new(Mailbox::new()));
+        let hop: &'static System<'static, 'static, 2> = std::boxed::Box::leak(
+            std::boxed::Box::new(System::new(inbox, svc, Some(Privilege::for_test(s(1))), 8)),
+        );
+        let seen: &'static std::cell::RefCell<Vec<core::result::Result<(), Refusal>>> =
+            std::boxed::Box::leak(std::boxed::Box::default());
+        let mut a = actor(svc, con, Obey::Exit, 64, 4);
+        a.cage().on_dispatch = Some(std::boxed::Box::new(move |slot| {
+            // De bewoner belt meteen: al zijn verbindingen tegelijk.
+            for _ in 0..MAX_HOP_CONNS {
+                seen.borrow_mut()
+                    .push(hop.admit(port_ip4(slot)).map(core::mem::drop));
+            }
+        }));
+        crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
+        // De oude Hop houdt zijn verbindingen nog vast als de nieuwe start.
+        let old: Vec<_> = (0..MAX_HOP_CONNS)
+            .map(|_| hop.admit(port_ip4(1)).unwrap())
+            .collect();
+        crate::slots::tests::stop(&mut a, 1).unwrap();
+        crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
+        drop(old);
+        let seen = seen.borrow();
+        assert_eq!(seen.len(), 2 * usize::from(MAX_HOP_CONNS));
+        assert!(seen.iter().all(core::result::Result::is_ok), "{seen:?}");
+    }
+
     /// Een lege omgeving van één verbinding: buffers, antwoordplek, geheugen.
     struct Seat {
         buf: Vec<u8>,

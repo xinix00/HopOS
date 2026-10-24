@@ -335,7 +335,20 @@ pub enum PrivOp {
     /// termijn op; vertrok Hop dan nog niet, dan volgt de stop-bel (de
     /// kill-vlag) met een korte termijn als vangnet. Daarna plaatst de kern
     /// de nieuwe Hop in hetzelfde slot, met dezelfde env, poorten en
-    /// bevoegdheid. De andere bewoners merken niets; de staat van Hop ligt
+    /// bevoegdheid.
+    ///
+    /// De belofte van die start, het seintje dat Hop nodig heeft: de kern
+    /// plaatst de nieuwe Hop pas als de oude bevestigd weg is, en zijn
+    /// system-verbindingen worden vanaf zijn eerste instructie toegelaten.
+    /// De generatie van het slot staat vóór het startschot, en de plaatsen
+    /// van de vorige levensduur tellen niet tegen de nieuwe (de teller per
+    /// levensduur, `kern::slots::ServicerCtl::try_conn`). Hop hoeft dus
+    /// niet te wachten of opnieuw te proberen: een weigering of een
+    /// mislukte call naar de kern bij zijn start is een fout, en dan stopt
+    /// Hop hard (de kern laat hem liggen, `HOPOS_HOP_DOWN`, en de watchdog
+    /// reset de node).
+    ///
+    /// De andere bewoners merken niets; de staat van Hop ligt
     /// in [`PrivOp::StatePut`]. Haalt een nieuw image het niet (het plaatst
     /// niet, of de nieuwe Hop faalt of vertrekt ongevraagd), dan is er geen
     /// Hop meer: een falende Hop is een falende node. De kern zet geen vorig

@@ -201,7 +201,15 @@ terwijl elke andere bewoner doordraait:
 
 Elke nieuwe Hop krijgt hetzelfde slot (en dus de bevoegdheid: het token
 hoort bij slot 1), dezelfde env, poorten, volume en `Placement`
-(`HOPOS_HOP_START`). Wat de oude half deed, een open image-stroom, gaat
+(`HOPOS_HOP_START`). De start zelf is het seintje: de kern plaatst hem pas
+als de oude bevestigd weg is, en laat zijn system-verbindingen toe vanaf
+zijn eerste instructie (de generatie van het slot staat vóór het
+startschot, en de verbindingsteller hoort bij een levensduur, zodat de
+plaatsen van de oude Hop niet meetellen). Hop wacht dus niet en probeert
+niet opnieuw: een weigering of een mislukte call naar de kern bij zijn
+start is een fout, en dan stopt hij hard; de kern laat hem liggen
+(`HOPOS_HOP_DOWN`) en de watchdog reset de node. Een toets in kern houdt
+die volgorde vast (`a_resident_is_admitted_from_its_first_instruction`). Wat de oude half deed, een open image-stroom, gaat
 terug in de pool (`HOPOS_HOP_STREAMS_DROPPED`). Zijn agent-staat vindt hij
 in de kern terug: Hop legt hem bij elke wijziging neer (`STATE_PUT`, één
 blob tot 1 MiB, vervangend en atomair) en leest hem na de start
