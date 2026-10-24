@@ -85,6 +85,17 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       proberen (ruis); na elke flip `HOP_STORE_KERNEL NEXT_STORE failed
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
+- [ ] leanhttp (lean, de client): een headerregel boven 8192 bytes is een
+      fout, en de 302 van een GitHub-release draagt een
+      `content-security-policy` van 9243 bytes (24-10). Geen node haalt dus
+      nog iets van github.com/.../releases/download (`HOP_JOB_FAILED ...
+      header line exceeds 8192 bytes`), ook de init-job van welcome niet.
+      Een regel die we niet lezen overslaan in plaats van falen, of de grens
+      zoals curl (100 KB per regel); dan een lean-tag en de bump.
+- [ ] De O6N-stick staat nog op v3.0.16 met Hop 3.0.14: de node draait
+      3.0.17 met Hop 3.0.15 via flip en `POST /restart` (24-10), met
+      `hopos.tick=1` in het venster van de flip. Een koude boot valt terug op
+      de stick; de stick naar 3.0.17 zodra hij er toch uit is.
 
 ### Op ijzer te zien
 
@@ -111,6 +122,14 @@ docs/measurements.md, de details per board in docs/boards-*.md.
 
 ### Meten
 
+- [ ] De meetronde (tools/meet) op 3.0.17 over alle borden: de zendring
+      dropt niet meer (d217db7). Op de O6N gezien (24-10, A/B met twee warme
+      flips, één stroom, 64 TX-plekken): naar de Mac over wifi 11,1 tot 11,8
+      MB/s op 3.0.16 tegen 69,6 tot 72,9 op 3.0.17; bench push naar de M4
+      over de draad 69,4 tot 69,7 tegen 117,6 tot 117,9 (de lijn), met
+      txdrop=0 err=0 en full=589131 held=180796 xoff=97883. De ring van 256
+      is dus niet nodig. De andere borden hebben ook 64 TX-plekken (igb, gem):
+      daar dezelfde winst verwacht, nog niet gemeten.
 - [ ] De hairpin-storm ligt sinds de middag lager dan vanochtend, ook met een
       stille node op 3.0.10: O6N 906 tegen 1983, Pi 4 1091 tegen 1942, Altra
       707 tegen 1000, Radxa 468 tegen 620 conn/s (tools/meet, 04-10 16:xx);
