@@ -86,12 +86,16 @@ docs/measurements.md, de details per board in docs/boards-*.md.
       (timed out)` (04-10 op Pi 4, Pi 5 en M4).
 - [ ] vitals: de standaard-rx-URL werkt niet (`CONNECT is not supported`).
 - [ ] De O6N-stick staat nog op v3.0.16 met Hop 3.0.14: de node draait
-      kern 3.0.17 met Hop 3.0.16 via flips en `POST /restart` (24-10), met
-      `hopos.tick=1` in het venster van de flip. Een koude boot valt terug op
-      de stick; de stick naar de nieuwste release zodra hij er toch uit is.
-      De volgende release draagt ook de verbindingsteller per levensduur
-      (fb81b13) en Hop's herhaling na een stille kern (8b1025a): pas dan
-      heeft een herstart op de O6N meteen een klok en https.
+      3.0.20 met Hop 3.0.18 via warme flips en `POST /restart` (24-10; de
+      laatste flip haalde zijn bundel zelf van GitHub). Een koude boot valt
+      terug op de stick; de stick naar de nieuwste release zodra hij er toch
+      uit is.
+- [ ] De M4 draait kern 3.0.20 via warme flips (24-10, de spin-jobs en
+      haasd-test doorgedraaid), maar Hop is daar nog 3.0.9: die kent
+      `POST /restart` niet, en een koude flip weigert de M4 (geen PSCI). Eén
+      keer opnieuw installeren via Recovery met de stick van de nieuwste
+      release (de jobspecs vooraf bewaren, de leader kent ze daarna niet);
+      daarna gaat elke Hop-update op afstand onder de apps door.
 - [ ] Het config-venster: de bootregel `HOPOS_CFG_WINDOW` per bord, een
       warme flip met `HOPOS_FLIP_CFG`, en `hop image --write` op een echte
       kaart (de LicheeRV eerst met `CFG=`, anders boot hij zonder config).
