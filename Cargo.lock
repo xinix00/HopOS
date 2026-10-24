@@ -701,28 +701,28 @@ dependencies = [
 
 [[package]]
 name = "leancrypto"
-version = "3.1.12"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.12#30dfbd73743a57b59ad42ed0258b7e3c10d04b20"
+version = "3.1.14"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.14#186de345e59c9e003f684fe6d0c838bab7501498"
 
 [[package]]
 name = "leandhcp"
-version = "3.1.12"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.12#30dfbd73743a57b59ad42ed0258b7e3c10d04b20"
+version = "3.1.14"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.14#186de345e59c9e003f684fe6d0c838bab7501498"
 
 [[package]]
 name = "leanelf"
-version = "3.1.12"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.12#30dfbd73743a57b59ad42ed0258b7e3c10d04b20"
+version = "3.1.14"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.14#186de345e59c9e003f684fe6d0c838bab7501498"
 
 [[package]]
 name = "leanhttp"
-version = "3.1.12"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.12#30dfbd73743a57b59ad42ed0258b7e3c10d04b20"
+version = "3.1.14"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.14#186de345e59c9e003f684fe6d0c838bab7501498"
 
 [[package]]
 name = "leannet"
-version = "3.1.12"
-source = "git+https://github.com/xinix00/lean.git?tag=v3.1.12#30dfbd73743a57b59ad42ed0258b7e3c10d04b20"
+version = "3.1.14"
+source = "git+https://github.com/xinix00/lean.git?tag=v3.1.14#186de345e59c9e003f684fe6d0c838bab7501498"
 
 [[package]]
 name = "loc"
