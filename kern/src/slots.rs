@@ -56,7 +56,7 @@ use crate::pool::{GroupName, Placement, Places};
 use crate::{Core, Error, GRAIN, Region, Result, SLOT_CAP, Slot};
 use alloc::vec::Vec;
 use core::sync::atomic::{
-    AtomicU8, AtomicU64,
+    AtomicU64,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
 use core::time::Duration;
@@ -424,7 +424,11 @@ pub struct ServicerCtl {
     stop: Signal,
     gone: Signal,
     start: Signal,
-    conns: AtomicU8,
+    /// De open system-verbindingen van één levensduur: de generatie in de
+    /// hoge 32 bits, het aantal in de lage. Eén atomic, want samen
+    /// betekenen ze iets (handboek §1.3): een plaats hoort bij een
+    /// levensduur, niet bij het slot.
+    conns: AtomicU64,
     base: AtomicU64,
     size: AtomicU64,
 }
@@ -435,31 +439,66 @@ impl ServicerCtl {
             stop: Signal::new(),
             gone: Signal::new(),
             start: Signal::new(),
-            conns: AtomicU8::new(0),
+            conns: AtomicU64::new(0),
             base: AtomicU64::new(0),
             size: AtomicU64::new(0),
         }
     }
 
-    /// Probeert een system-verbinding te claimen (hooguit `max`).
-    pub fn try_conn(&self, max: u8) -> bool {
-        if self.conns.fetch_add(1, AcqRel) >= max {
-            self.conns.fetch_sub(1, AcqRel);
-            return false;
+    /// Probeert een system-verbinding van levensduur `generation` te
+    /// claimen (hooguit `max`). De plaatsen van een oudere levensduur tellen
+    /// niet: wie als eerste van een nieuwe levensduur claimt, begint bij
+    /// nul. Tot 25-10 deelde het slot één teller over zijn levensduren, en
+    /// een nieuwe Hop die binnen milliseconden na zijn start belde (de
+    /// ORION, na POST /restart), vond de plaatsen van de oude nog bezet tot
+    /// hun serve-taken op hun tik ([`crate::system::LIFE_TICK`]) zagen dat
+    /// die levensduur voorbij was: zijn kloktaak werd geweigerd, en zonder
+    /// klok weigerde zijn TLS elke download.
+    pub fn try_conn(&self, generation: u32, max: u8) -> bool {
+        let mut cur = self.conns.load(Acquire);
+        loop {
+            let (g, n) = split_conns(cur);
+            let n = if g == generation { n } else { 0 };
+            if n >= u32::from(max) {
+                return false;
+            }
+            let new = (u64::from(generation) << 32) | u64::from(n + 1);
+            match self.conns.compare_exchange_weak(cur, new, AcqRel, Acquire) {
+                Ok(_) => return true,
+                Err(v) => cur = v,
+            }
         }
-        true
     }
 
-    /// Geeft een system-verbinding terug.
-    pub fn drop_conn(&self) {
-        self.conns.fetch_sub(1, AcqRel);
+    /// Geeft een system-verbinding van levensduur `generation` terug. Is
+    /// de teller al van een nieuwere levensduur, dan niets: die plaats telde
+    /// daar nooit mee, en aftrekken zou de nieuwe onderlopen.
+    pub fn drop_conn(&self, generation: u32) {
+        let mut cur = self.conns.load(Acquire);
+        loop {
+            let (g, n) = split_conns(cur);
+            if g != generation || n == 0 {
+                return;
+            }
+            let new = (u64::from(g) << 32) | u64::from(n - 1);
+            match self.conns.compare_exchange_weak(cur, new, AcqRel, Acquire) {
+                Ok(_) => return,
+                Err(v) => cur = v,
+            }
+        }
     }
 
-    /// Het aantal open system-verbindingen.
+    /// Het aantal open system-verbindingen van levensduur `generation`.
     #[must_use]
-    pub fn conns(&self) -> u8 {
-        self.conns.load(Relaxed)
+    pub fn conns(&self, generation: u32) -> u32 {
+        let (g, n) = split_conns(self.conns.load(Relaxed));
+        if g == generation { n } else { 0 }
     }
+}
+
+/// De generatie en het aantal uit het woord van [`ServicerCtl::conns`].
+fn split_conns(v: u64) -> (u32, u32) {
+    ((v >> 32) as u32, v as u32)
 }
 
 /// De servicers van alle slots: per slot de besturing, plus de leesbare

@@ -40,9 +40,7 @@ use cpu::println;
 use dev::Pa;
 use executor::{Clock, Executor, Sleeper};
 use kern::slots::Reply;
-use kern::system::{
-    Admitted, Conn, End, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD, MAX_SYSTEM_CONNS,
-};
+use kern::system::{Admitted, Conn, End, MAX_HOP_CONNS, MAX_IO_CHUNK, MAX_PAYLOAD};
 use leandhcp::{Action, Client, Instant, KeepAction, Keeper, Lease};
 use leannet::{Endpoint, ListenHandle, Stack, TcpHandle, UdpHandle};
 use net::host::{HostPort, HostStack};
@@ -948,16 +946,19 @@ async fn system_listener(exec: &'static Executor, ip: Ipv4Addr, api: SystemApi) 
             close(exec, h);
             continue;
         }
-        let Some(who) = api.system.admit(remote) else {
-            refused = refused.wrapping_add(1);
-            if refused <= LOUD_REFUSALS {
-                println!(
-                    "system: {} refused (no live slot behind it, or {MAX_SYSTEM_CONNS} open), {refused} so far HOPOS_SYSTEM_REFUSED",
-                    Ipv4Addr::from(remote)
-                );
+        let who = match api.system.admit(remote) {
+            Ok(who) => who,
+            Err(why) => {
+                refused = refused.wrapping_add(1);
+                if refused <= LOUD_REFUSALS {
+                    println!(
+                        "system: {} refused ({why}), {refused} so far HOPOS_SYSTEM_REFUSED",
+                        Ipv4Addr::from(remote)
+                    );
+                }
+                close(exec, h);
+                continue;
             }
-            close(exec, h);
-            continue;
         };
         match DOORS.hand(Job { h, remote, who }) {
             Ok(()) => served = served.wrapping_add(1),

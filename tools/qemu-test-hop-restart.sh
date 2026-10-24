@@ -26,7 +26,13 @@
 #               de laatste staat, HOPOS_HOP_STOPPED reason=request
 #               left=self: geen stop-bel nodig), een niet-leeg
 #               blob (HOPOS_HOP_STATE kept=N, N > 0), een nieuwe
-#               HOPOS_HOP_START slot=1, HOP_ADOPTED n=1 en een nieuwe HOP_UP;
+#               HOPOS_HOP_START slot=1, HOP_ADOPTED n=1 en een nieuwe HOP_UP,
+#               en de klok van de nieuwe Hop: een HOP_CLOCK_SYNCED na zijn
+#               HOPOS_HOP_START (SNTP van pool.ntp.org door slirp; de eerste
+#               Hop haalt hem soms niet vóór de wissel) en nergens een
+#               HOPOS_SYSTEM_REFUSED (de ORION, 24-10: de plaatsen van de oude
+#               Hop telden nog tegen de nieuwe, en zijn kloktaak werd
+#               geweigerd);
 #   de apps     welcome blijft in slot 2: na elke wissel de pagina met
 #               "slot 2", GET /tasks met welcome running, één HOP_JOB_PLACED
 #               in de hele run, en geen stop van slot 2;
@@ -100,11 +106,17 @@ restart() {
 		"http://127.0.0.1:$AGENTPORT/restart" 2>&1 || true)"
 }
 
-# swapped N: de N-de Hop is op en heeft welcome overgenomen, en de pagina
-# en GET /tasks zeggen dat welcome nog draait.
+# synced N: de N-de Hop (na de N-de HOPOS_HOP_START) zette zijn klok.
+synced() {
+	tr -d '\r' <"$LOG" | awk -v n="$1" '/HOPOS_HOP_START slot=1 / { s++ } s == n && /slot 1: .*HOP_CLOCK_SYNCED/ { f = 1 } END { exit !f }'
+}
+
+# swapped N: de N-de Hop is op, heeft zijn klok gezet en welcome
+# overgenomen, en de pagina en GET /tasks zeggen dat welcome nog draait.
 swapped() {
 	[ "$(count 'HOPOS_HOP_START slot=1 ')" -ge "$1" ] &&
 		[ "$(count 'slot 1: .*HOP_UP')" -ge "$1" ] &&
+		synced "$1" &&
 		[ "$(count 'slot 1: .*HOP_ADOPTED n=1')" -ge "$(($1 - 1))" ] &&
 		page && running welcome
 }
@@ -202,6 +214,19 @@ if [ "$n" = 3 ]; then
 	echo "   ok  drie keer HOPOS_HOP_START slot=1: de boot en twee wissels, de weigering wisselde niet"
 else
 	echo "   ROOD $n keer HOPOS_HOP_START slot=1, verwacht 3"
+	fail=1
+fi
+n="$(count 'HOPOS_SYSTEM_REFUSED')"
+if [ "$n" = 0 ]; then
+	echo "   ok  geen HOPOS_SYSTEM_REFUSED: elke nieuwe Hop kreeg al zijn system-verbindingen"
+else
+	echo "   ROOD $n keer HOPOS_SYSTEM_REFUSED, de eerste: $(first 'HOPOS_SYSTEM_REFUSED')"
+	fail=1
+fi
+if synced 2 && synced 3; then
+	echo "   ok  HOP_CLOCK_SYNCED van beide nieuwe Hops: hun kloktaak kwam door"
+else
+	echo "   ROOD een nieuwe Hop zette zijn klok niet (HOP_CLOCK_SYNCED na zijn HOPOS_HOP_START)"
 	fail=1
 fi
 n="$(count 'HOP_JOB_PLACED')"

@@ -1629,12 +1629,18 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
     }
 
     /// Laat een verbinding toe: het slot uit het bron-IP, een levende
-    /// servicer, en hooguit [`MAX_SYSTEM_CONNS`]. Het resultaat geeft de
-    /// verbinding weer vrij in zijn `Drop`.
-    pub fn admit(&self, ip: u32) -> Option<Admitted<'i>> {
-        let slot = slot_from_remote(ip, self.max_slots)?;
-        let generation = self.svc.current(slot)?;
-        let ctl = self.svc.ctl(slot)?;
+    /// servicer, en hooguit [`MAX_SYSTEM_CONNS`] van die levensduur (Hop
+    /// [`MAX_HOP_CONNS`]); de verbindingen van een vorige levensduur tellen
+    /// niet mee ([`slots::ServicerCtl::try_conn`]). Het resultaat geeft de
+    /// verbinding weer vrij in zijn `Drop`; een weigering zegt waarom.
+    ///
+    /// # Errors
+    ///
+    /// Geen slot achter het adres, geen levende bewoner, of vol.
+    pub fn admit(&self, ip: u32) -> core::result::Result<Admitted<'i>, Refusal> {
+        let slot = slot_from_remote(ip, self.max_slots).ok_or(Refusal::NoSlot)?;
+        let generation = self.svc.current(slot).ok_or(Refusal::NotLive { slot })?;
+        let ctl = self.svc.ctl(slot).ok_or(Refusal::NotLive { slot })?;
         // Hop houdt één verbinding meer: zijn store-taak wacht er blijvend
         // op NEXT_STORE, naast de eigenaar-taak en de kloktaak.
         let hop = self.privilege.as_ref().is_some_and(|p| p.slot == slot);
@@ -1643,11 +1649,13 @@ impl<'i, 'r, const N: usize> System<'i, 'r, N> {
         // een weigering wegvalt, geeft in zijn `Drop` een plaats terug die
         // nooit genomen was (gemeten 29-09: na één weigering liet de cap een
         // derde verbinding toe).
-        ctl.try_conn(cap).then(|| Admitted {
-            slot,
-            generation,
-            svc: self.svc,
-        })
+        ctl.try_conn(generation, cap)
+            .then(|| Admitted {
+                slot,
+                generation,
+                svc: self.svc,
+            })
+            .ok_or(Refusal::Full { slot, cap })
     }
 
     /// Dient één verbinding: frames lezen tot de peer weggaat, de
@@ -2630,7 +2638,42 @@ impl Admitted<'_> {
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
         if let Some(ctl) = self.svc.ctl(self.slot) {
-            ctl.drop_conn();
+            ctl.drop_conn(self.generation);
+        }
+    }
+}
+
+/// Waarom [`System::admit`] een verbinding weigerde; de listener zet het
+/// in zijn regel (`HOPOS_SYSTEM_REFUSED`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// Het bron-IP is geen slot-adres.
+    NoSlot,
+    /// Het slot heeft geen levende bewoner (gestopt, of nog niet gestart).
+    NotLive {
+        /// Het slot.
+        slot: Slot,
+    },
+    /// Deze levensduur heeft al `cap` verbindingen open.
+    Full {
+        /// Het slot.
+        slot: Slot,
+        /// Het plafond van dat slot.
+        cap: u8,
+    },
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Refusal::NoSlot => f.write_str("not a slot address"),
+            Refusal::NotLive { slot } => write!(f, "slot {slot} has no live resident"),
+            Refusal::Full { slot, cap } => {
+                write!(
+                    f,
+                    "slot {slot} already has {cap} connections open in this lifetime"
+                )
+            }
         }
     }
 }
@@ -4184,33 +4227,82 @@ mod tests {
         crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
         let inbox: Mailbox<Envelope<'_>, 2> = Mailbox::new();
         let sys = System::new(&inbox, &svc, None, 8);
+        let gen1 = svc.current(s(1)).unwrap();
         let one = sys.admit(port_ip4(1)).unwrap();
         let two = sys.admit(port_ip4(1)).unwrap();
-        assert!(
-            sys.admit(port_ip4(1)).is_none(),
+        let full = Refusal::Full {
+            slot: s(1),
+            cap: MAX_SYSTEM_CONNS,
+        };
+        assert_eq!(
+            sys.admit(port_ip4(1)).err(),
+            Some(full),
             "third connection admitted"
         );
         // Een weigering kost geen plaats: ook de vierde blijft buiten.
-        assert!(
-            sys.admit(port_ip4(1)).is_none(),
+        assert_eq!(
+            sys.admit(port_ip4(1)).err(),
+            Some(full),
             "a refusal gave a seat back"
         );
-        assert_eq!(svc.ctl(s(1)).unwrap().conns(), 2);
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(gen1), 2);
         drop(one);
-        assert!(sys.admit(port_ip4(1)).is_some());
+        assert!(sys.admit(port_ip4(1)).is_ok());
         drop(two);
-        assert!(
-            sys.admit(port_ip4(2)).is_none(),
+        assert_eq!(
+            sys.admit(port_ip4(2)).err(),
+            Some(Refusal::NotLive { slot: s(2) }),
             "slot without servicer admitted"
         );
+        assert_eq!(sys.admit(0x0A64_0001).err(), Some(Refusal::NoSlot));
         // Het slot van Hop houdt er één meer, voor zijn store-taak.
         let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
         let seats: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(port_ip4(1))).collect();
-        assert!(seats.iter().all(Option::is_some));
+        assert!(seats.iter().all(core::result::Result::is_ok));
         assert!(
-            hop.admit(port_ip4(1)).is_none(),
+            hop.admit(port_ip4(1)).is_err(),
             "a fourth connection for Hop"
         );
+    }
+
+    /// De plaatsen van een vorige levensduur tellen niet tegen de nieuwe:
+    /// een herstarte Hop belt binnen milliseconden (de ORION, 24-10), en
+    /// de verbindingen van de oude zagen hun einde dan nog niet. Geven ze
+    /// hun plaats later terug, dan loopt de nieuwe teller niet onder.
+    #[test]
+    fn a_new_lifetime_does_not_wait_for_the_seats_of_the_old_one() {
+        let (svc, con) = (Servicers::new(), FakeConsole::default());
+        let mut a = actor(&svc, &con, Obey::Exit, 64, 4);
+        crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
+        let inbox: Mailbox<Envelope<'_>, 2> = Mailbox::new();
+        let hop = System::new(&inbox, &svc, Some(Privilege::for_test(s(1))), 8);
+        let old: Vec<_> = (0..MAX_HOP_CONNS)
+            .map(|_| hop.admit(port_ip4(1)).unwrap())
+            .collect();
+        assert!(hop.admit(port_ip4(1)).is_err());
+        // De oude Hop stopt en de nieuwe start, terwijl zijn verbindingen nog
+        // open staan.
+        crate::slots::tests::stop(&mut a, 1).unwrap();
+        crate::slots::tests::start(&mut a, 1, 8, 1).unwrap();
+        let gen2 = svc.current(s(1)).unwrap();
+        let new: Vec<_> = (0..MAX_HOP_CONNS).map(|_| hop.admit(port_ip4(1))).collect();
+        assert!(
+            new.iter().all(core::result::Result::is_ok),
+            "the old lifetime still held the seats: {:?}",
+            new.iter()
+                .filter_map(|r| r.as_ref().err())
+                .collect::<Vec<_>>()
+        );
+        assert!(hop.admit(port_ip4(1)).is_err(), "the new cap still holds");
+        // De oude geven hun plaats terug: de nieuwe telt er nog drie.
+        drop(old);
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(gen2), u32::from(MAX_HOP_CONNS));
+        assert!(
+            hop.admit(port_ip4(1)).is_err(),
+            "an old drop gave a new seat"
+        );
+        drop(new);
+        assert_eq!(svc.ctl(s(1)).unwrap().conns(gen2), 0);
     }
 
     /// Een lege omgeving van één verbinding: buffers, antwoordplek, geheugen.
@@ -4290,7 +4382,7 @@ mod tests {
             }
             assert!(f1.as_mut().poll(&mut cx).is_pending());
             assert_eq!(
-                svc.ctl(s(2)).unwrap().conns(),
+                svc.ctl(s(2)).unwrap().conns(svc.current(s(2)).unwrap()),
                 1,
                 "silent peer lost its seat"
             );
@@ -4315,14 +4407,12 @@ mod tests {
         let sys = System::new(&inbox, &svc, None, 8);
         let (timer, hooks) = (FakeTimer::default(), NoHooks::default());
         let (mut p1, mut p2) = (Pipe::silent(port_ip4(2)), Pipe::silent(port_ip4(2)));
+        let life = svc.current(s(2)).unwrap();
         let (w1, w2) = (
             sys.admit(port_ip4(2)).unwrap(),
             sys.admit(port_ip4(2)).unwrap(),
         );
-        assert!(
-            sys.admit(port_ip4(2)).is_none(),
-            "third connection admitted"
-        );
+        assert!(sys.admit(port_ip4(2)).is_err(), "third connection admitted");
         let mut ends = [None, None];
         {
             let mut f1 = pin!(sys.serve(
@@ -4371,8 +4461,12 @@ mod tests {
         }
         assert_eq!(ends, [Some(End::Evicted), Some(End::Evicted)]);
         drop((w1, w2));
-        assert_eq!(svc.ctl(s(2)).unwrap().conns(), 0, "seats not given back");
-        assert!(sys.admit(port_ip4(2)).is_none(), "stopped slot admitted");
+        assert_eq!(
+            svc.ctl(s(2)).unwrap().conns(life),
+            0,
+            "seats not given back"
+        );
+        assert!(sys.admit(port_ip4(2)).is_err(), "stopped slot admitted");
     }
 
     /// Een verbinding zonder verkeer van een levend slot sluit na
